@@ -1,0 +1,21 @@
+{
+  "user": {
+    "id": "018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d50",
+    "email": "user@example.com",
+    "display_name": "User Name",
+    "password_login_enabled": true,
+    "password_2fa_enabled": true,
+    "oidc_issuer": null,
+    "oidc_subject": null,
+    "global_role": "user",
+    "status": "active",
+    "application_grant_count": 2,
+    "created_at": "2026-06-01T09:00:00Z",
+    "updated_at": "2026-06-24T12:00:00Z",
+    "last_login_at": "2026-06-24T12:00:00Z"
+  },
+  "access_token": "cth_uat_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "access_expires_at": "2026-06-24T12:05:00Z",
+  "refresh_token": "cth_urt_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "refresh_expires_at": "2026-06-24T20:00:00Z"
+}

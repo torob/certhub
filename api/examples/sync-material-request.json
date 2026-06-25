@@ -1,0 +1,8 @@
+{
+  "domains": [
+    "api.torob.dev",
+    "*.torob.dev"
+  ],
+  "key_type": "ecdsa-p256",
+  "issuer": "letsencrypt_production"
+}

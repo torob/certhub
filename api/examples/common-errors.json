@@ -1,0 +1,62 @@
+{
+  "invalid_request": {
+    "error": {
+      "code": "invalid_request",
+      "message": "Request body contains invalid fields.",
+      "retryable": false,
+      "retry_after_seconds": null,
+      "details": {
+        "fields": [
+          {
+            "field": "domains[0]",
+            "code": "invalid_domain",
+            "message": "Domain is not valid for public TLS issuance."
+          }
+        ]
+      }
+    }
+  },
+  "invalid_token": {
+    "error": {
+      "code": "invalid_token",
+      "message": "Authentication token is missing, invalid, or expired.",
+      "retryable": false,
+      "retry_after_seconds": null,
+      "details": {}
+    }
+  },
+  "domain_not_authorized": {
+    "error": {
+      "code": "domain_not_authorized",
+      "message": "Application is not authorized for one or more requested domains.",
+      "retryable": false,
+      "retry_after_seconds": null,
+      "details": {
+        "unauthorized_domains": [
+          "admin.torob.dev"
+        ]
+      }
+    }
+  },
+  "certificate_not_ready": {
+    "error": {
+      "code": "certificate_not_ready",
+      "message": "Certificate material is not ready yet.",
+      "retryable": true,
+      "retry_after_seconds": 10,
+      "details": {
+        "certificate_id": "018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41",
+        "status": "issuing"
+      }
+    }
+  },
+  "rate_limited": {
+    "error": {
+      "code": "rate_limited",
+      "message": "Retry after the indicated delay.",
+      "retryable": true,
+      "retry_after_seconds": 30,
+      "details": {}
+    }
+  }
+}

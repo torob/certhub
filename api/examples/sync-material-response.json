@@ -1,0 +1,22 @@
+{
+  "certificate_id": "018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41",
+  "application_id": "018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d42",
+  "domains": [
+    "*.torob.dev",
+    "api.torob.dev"
+  ],
+  "key_type": "ecdsa-p256",
+  "issuer_id": "018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d43",
+  "issuer_name": "letsencrypt_production",
+  "version": 3,
+  "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB...example leaf certificate...\n-----END CERTIFICATE-----\n",
+  "chain_pem": "-----BEGIN CERTIFICATE-----\nMIIB...example issuer chain...\n-----END CERTIFICATE-----\n",
+  "fullchain_pem": "-----BEGIN CERTIFICATE-----\nMIIB...example full chain...\n-----END CERTIFICATE-----\n",
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMIIE...example private key...\n-----END PRIVATE KEY-----\n",
+  "not_before": "2026-06-24T00:00:00Z",
+  "not_after": "2026-09-22T00:00:00Z",
+  "serial_number": "03aabb",
+  "fingerprint_sha256": "abc123",
+  "key_fingerprint_sha256": "def456",
+  "material_etag": "\"cth-mat-v1.JYjzT2o0Gd9c6SwJ5YYRWR6d9xWJ9G7dy2cW3rQpQ9E\""
+}
