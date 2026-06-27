@@ -1,0 +1,137 @@
+{{- if not .Values.managedSecretNames }}
+{{- fail "managedSecretNames must list target TLS Secret names managed by this operator release" }}
+{{- end }}
+{{- if .Values.clusterScoped }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-certhub-operator
+rules:
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates/finalizers"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+{{ toYaml .Values.managedSecretNames | indent 6 }}
+    verbs: ["get", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-certhub-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-certhub-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-certhub-operator
+    namespace: {{ .Release.Namespace }}
+{{- $tokenNS := default .Release.Namespace .Values.certhub.tokenSecretNamespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-certhub-operator-token
+  namespace: {{ $tokenNS }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.certhub.tokenSecretName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-certhub-operator-token
+  namespace: {{ $tokenNS }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-certhub-operator-token
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-certhub-operator
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+{{- $watchNS := default .Release.Namespace .Values.watchNamespace }}
+{{- $tokenNS := default $watchNS .Values.certhub.tokenSecretNamespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-certhub-operator
+  namespace: {{ $watchNS }}
+rules:
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["certs.torob.dev"]
+    resources: ["certhubcertificates/finalizers"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+{{ toYaml .Values.managedSecretNames | indent 6 }}
+    verbs: ["get", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-certhub-operator
+  namespace: {{ $watchNS }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-certhub-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-certhub-operator
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-certhub-operator-token
+  namespace: {{ $tokenNS }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.certhub.tokenSecretName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-certhub-operator-token
+  namespace: {{ $tokenNS }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-certhub-operator-token
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-certhub-operator
+    namespace: {{ .Release.Namespace }}
+{{- end }}

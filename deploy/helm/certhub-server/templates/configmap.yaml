@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-certhub-server-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: certhub-server
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+{{ .Values.config.yaml | indent 4 }}

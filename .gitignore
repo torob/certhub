@@ -1,0 +1,60 @@
+# Build outputs
+dist/
+bin/
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Full-product E2E artifacts
+certhub-full-e2e-artifacts/
+
+# Local implementation notes
+implementation-log.md
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+coverage/
+coverage.out
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency and local caches
+web/node_modules/
+.cache/
+.tmp/
+tmp/
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Local secrets
+.env.*
+*.pem
+*.key
+*.crt
+*kubeconfig*
+*.secret
+*.secrets
+*.secret.*
+*.secrets.*
+*secret.txt
+*secrets.txt

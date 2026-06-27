@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      npm_config_registry: https://registry.npmjs.org
+      GOPROXY: https://proxy.golang.org,direct
+      GOCACHE: ~/.cache/go-build
+      GOPATH: ~/go
+      GOMODCACHE: ~/go/pkg/mod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: make web-install
+
+      - name: Run repository checks
+        run: make check

@@ -1,0 +1,8 @@
+{
+  "name": "certhub-redocly-tool",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@redocly/cli": "2.35.1"
+  }
+}

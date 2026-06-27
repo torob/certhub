@@ -1,0 +1,41 @@
+replicaCount: 1
+
+image:
+  repository: certhub-operator
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+clusterScoped: false
+watchNamespace: ""
+managedSecretNames:
+  - gateway-tls
+
+certhub:
+  url: https://certhub.example.com
+  tokenSecretName: certhub-token
+  tokenSecretKey: token
+  tokenSecretNamespace: ""
+  resyncInterval: 6h
+  reconcileBackoff: 1m
+  httpTimeout: 30s
+
+metrics:
+  service:
+    enabled: true
+    port: 8080
+
+resources: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

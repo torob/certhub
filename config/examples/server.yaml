@@ -1,0 +1,10 @@
+database:
+  url_env: "CERTHUB_DATABASE_URL"
+encryption:
+  key_env: "CERTHUB_ENCRYPTION_KEY"
+http:
+  bind_addr: ":8080"
+  require_https: true
+  trusted_proxy_cidrs: []
+self_certificate:
+  sync_enabled: false
