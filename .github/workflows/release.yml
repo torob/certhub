@@ -13,9 +13,9 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: torob
   GOPROXY: https://proxy.golang.org,direct
-  GOCACHE: ~/.cache/go-build
-  GOPATH: ~/go
-  GOMODCACHE: ~/go/pkg/mod
+  GOCACHE: /home/runner/.cache/go-build
+  GOPATH: /home/runner/go
+  GOMODCACHE: /home/runner/go/pkg/mod
   npm_config_registry: https://registry.npmjs.org
 
 jobs:

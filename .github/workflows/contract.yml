@@ -12,9 +12,9 @@ jobs:
     env:
       npm_config_registry: https://registry.npmjs.org
       GOPROXY: https://proxy.golang.org,direct
-      GOCACHE: ~/.cache/go-build
-      GOPATH: ~/go
-      GOMODCACHE: ~/go/pkg/mod
+      GOCACHE: /home/runner/.cache/go-build
+      GOPATH: /home/runner/go
+      GOMODCACHE: /home/runner/go/pkg/mod
     steps:
       - name: Checkout
         uses: actions/checkout@v4
