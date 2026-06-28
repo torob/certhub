@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"certhub/internal/commands"
+	"github.com/torob/certhub/internal/commands"
 )
 
 func main() {

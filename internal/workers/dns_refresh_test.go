@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/dnsproviders"
+	"github.com/torob/certhub/internal/dnsproviders"
 )
 
 func TestDNSRefreshWorkersDrainJobsAndStop(t *testing.T) {

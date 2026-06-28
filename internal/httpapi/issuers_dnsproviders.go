@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"certhub/internal/auth"
-	dnsdomain "certhub/internal/dnsproviders"
-	issuerdomain "certhub/internal/issuers"
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/auth"
+	dnsdomain "github.com/torob/certhub/internal/dnsproviders"
+	issuerdomain "github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/storage"
 )
 
 type issuerCreateRequest struct {

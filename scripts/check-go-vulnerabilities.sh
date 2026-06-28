@@ -54,7 +54,7 @@ govulncheck_bin="$(GO_BIN="$go_bin" ./scripts/install-govulncheck.sh)"
 
 assert_go_files_unchanged "$before_mod" "$before_sum"
 
-mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./... | awk '$0 !~ /\/dist(\/|$)/ && $0 !~ /\/certhub-full-e2e-artifacts(\/|$)/')
+mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...)
 GOFLAGS=-mod=readonly "$govulncheck_bin" "${packages[@]}"
 
 assert_go_files_unchanged "$before_mod" "$before_sum"

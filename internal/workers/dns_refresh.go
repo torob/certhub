@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	security "certhub/internal/crypto"
-	"certhub/internal/dnsproviders"
+	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/dnsproviders"
 )
 
 type DNSRefreshService interface {

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/dnsproviders"
-	"certhub/internal/issuers"
-	"certhub/internal/migrations"
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/dnsproviders"
+	"github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/migrations"
+	"github.com/torob/certhub/internal/storage"
 )
 
 func TestMilestone4RepositoriesWithPostgres(t *testing.T) {

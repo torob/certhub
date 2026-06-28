@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/certhubclient"
 )
 
 func TestExternalKubernetesSecretSyncWithRealAPI(t *testing.T) {

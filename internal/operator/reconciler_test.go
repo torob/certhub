@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"certhub/pkg/certhubclient"
-	certerrors "certhub/pkg/errors"
-	"certhub/pkg/material"
+	"github.com/torob/certhub/pkg/certhubclient"
+	certerrors "github.com/torob/certhub/pkg/errors"
+	"github.com/torob/certhub/pkg/material"
 )
 
 func TestValidateCertificateSpec(t *testing.T) {

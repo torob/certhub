@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	acmedomain "certhub/internal/acme"
-	dnsproviders "certhub/internal/dnsproviders"
+	acmedomain "github.com/torob/certhub/internal/acme"
+	dnsproviders "github.com/torob/certhub/internal/dnsproviders"
 
 	xacme "golang.org/x/crypto/acme"
 )

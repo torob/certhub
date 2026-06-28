@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"certhub/pkg/certcriteria"
+	"github.com/torob/certhub/pkg/certcriteria"
 )
 
 var secretNameRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)

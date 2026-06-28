@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/audit"
-	"certhub/internal/auth"
-	security "certhub/internal/crypto"
-	"certhub/internal/storage"
-	userdomain "certhub/internal/users"
+	"github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/storage"
+	userdomain "github.com/torob/certhub/internal/users"
 )
 
 func TestIdentityTokenClassRouting(t *testing.T) {

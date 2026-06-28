@@ -3,7 +3,7 @@ package applications
 import (
 	"strings"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 type DomainCoverageResult struct {

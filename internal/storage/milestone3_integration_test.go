@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/applications"
-	"certhub/internal/audit"
-	"certhub/internal/auth"
-	"certhub/internal/migrations"
-	"certhub/internal/storage"
-	"certhub/internal/users"
+	"github.com/torob/certhub/internal/applications"
+	"github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	"github.com/torob/certhub/internal/migrations"
+	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestMilestone3RepositoriesWithPostgres(t *testing.T) {

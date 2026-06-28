@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	tlsmaterial "certhub/pkg/material"
+	tlsmaterial "github.com/torob/certhub/pkg/material"
 )
 
 type PublishOptions struct {

@@ -18,16 +18,16 @@ import (
 	"sync"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	"certhub/internal/auth"
-	certdomain "certhub/internal/certificates"
-	"certhub/internal/config"
-	security "certhub/internal/crypto"
-	dnsdomain "certhub/internal/dnsproviders"
-	issuerdomain "certhub/internal/issuers"
-	userdomain "certhub/internal/users"
-	"certhub/internal/webui"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	certdomain "github.com/torob/certhub/internal/certificates"
+	"github.com/torob/certhub/internal/config"
+	security "github.com/torob/certhub/internal/crypto"
+	dnsdomain "github.com/torob/certhub/internal/dnsproviders"
+	issuerdomain "github.com/torob/certhub/internal/issuers"
+	userdomain "github.com/torob/certhub/internal/users"
+	"github.com/torob/certhub/internal/webui"
 )
 
 type ReadinessChecker interface {

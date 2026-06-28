@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	acmedomain "certhub/internal/acme"
-	"certhub/internal/certificates"
-	security "certhub/internal/crypto"
-	dnsdomain "certhub/internal/dnsproviders"
-	issuerdomain "certhub/internal/issuers"
-	"certhub/internal/storage"
+	acmedomain "github.com/torob/certhub/internal/acme"
+	"github.com/torob/certhub/internal/certificates"
+	security "github.com/torob/certhub/internal/crypto"
+	dnsdomain "github.com/torob/certhub/internal/dnsproviders"
+	issuerdomain "github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/storage"
 )
 
 func TestPresentAndValidatePresentsAllProvidersBeforeAccepting(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	security "certhub/internal/crypto"
+	security "github.com/torob/certhub/internal/crypto"
 	"go.yaml.in/yaml/v4"
 )
 

@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/audit"
-	security "certhub/internal/crypto"
-	"certhub/internal/storage"
-	"certhub/internal/users"
+	"github.com/torob/certhub/internal/audit"
+	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestCreateProviderEncryptsTypedCredentialsAndAuditsNoSecret(t *testing.T) {

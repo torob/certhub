@@ -29,6 +29,7 @@ WEB_EMBED_DIR := internal/webui/assets
 GO_BUILD_ENV := CGO_ENABLED=0 GOCACHE=$$HOME/.cache/go-build GOPATH=$$HOME/go GOMODCACHE=$$HOME/go/pkg/mod GOPROXY=https://proxy.golang.org,direct
 GO_READONLY_ENV := $(GO_BUILD_ENV) GOFLAGS=-mod=readonly
 GO_BUILD_FLAGS := -trimpath -buildvcs=false -ldflags "-s -w"
+GO_PACKAGE_ROOTS := ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...
 
 .PHONY: check fmt go-fmt go-test go-lockfile-check build build-go build-server build-cli build-operator web-ci web-install web-typecheck web-build web-build-release web-embed-release release-artifacts dependency-check go-dependency-check go-vulnerability-check go-license-check web-dependency-check web-vulnerability-check web-license-check web-lockfile-check web-asset-check release-scaffold-check contract openapi-validate contract-baseline tools-redocly tools-govulncheck tools-helm clean
 
@@ -51,7 +52,7 @@ go-fmt:
 	fi
 
 go-test:
-	@packages="$$( $(GO_READONLY_ENV) $(GO) list ./... | awk '$$0 !~ /\/dist(\/|$$)/ && $$0 !~ /\/certhub-full-e2e-artifacts(\/|$$)/' )"; \
+	@packages="$$( $(GO_READONLY_ENV) $(GO) list $(GO_PACKAGE_ROOTS) )"; \
 	$(GO_READONLY_ENV) $(GO) test $$packages
 
 go-lockfile-check:

@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	"certhub/internal/auth"
-	certdomain "certhub/internal/certificates"
-	tlsmaterial "certhub/pkg/material"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	certdomain "github.com/torob/certhub/internal/certificates"
+	tlsmaterial "github.com/torob/certhub/pkg/material"
 )
 
 type certificateCriteriaRequest struct {

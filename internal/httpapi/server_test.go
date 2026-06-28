@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"certhub/internal/config"
+	"github.com/torob/certhub/internal/config"
 )
 
 type staticReadiness []ReadinessCheck

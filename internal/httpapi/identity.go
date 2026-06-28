@@ -10,10 +10,10 @@ import (
 	"time"
 	"unicode"
 
-	appdomain "certhub/internal/applications"
-	"certhub/internal/auth"
-	"certhub/internal/storage"
-	userdomain "certhub/internal/users"
+	appdomain "github.com/torob/certhub/internal/applications"
+	"github.com/torob/certhub/internal/auth"
+	"github.com/torob/certhub/internal/storage"
+	userdomain "github.com/torob/certhub/internal/users"
 )
 
 type loginRequest struct {

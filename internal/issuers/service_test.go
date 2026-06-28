@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/acme"
-	"certhub/internal/audit"
-	security "certhub/internal/crypto"
-	"certhub/internal/users"
+	"github.com/torob/certhub/internal/acme"
+	"github.com/torob/certhub/internal/audit"
+	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestCreateIssuerCreatesEncryptedACMEAccountAndAuditsNoSecret(t *testing.T) {

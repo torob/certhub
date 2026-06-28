@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 type Type string

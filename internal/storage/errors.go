@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	security "certhub/internal/crypto"
+	security "github.com/torob/certhub/internal/crypto"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

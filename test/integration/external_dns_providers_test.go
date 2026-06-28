@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	dnsproviders "certhub/internal/dnsproviders"
+	dnsproviders "github.com/torob/certhub/internal/dnsproviders"
 )
 
 func TestExternalDNSProviderChallengeLifecycle(t *testing.T) {

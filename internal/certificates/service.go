@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	security "certhub/internal/crypto"
-	issuerdomain "certhub/internal/issuers"
-	"certhub/internal/storage"
-	userdomain "certhub/internal/users"
-	"certhub/pkg/certcriteria"
-	tlsmaterial "certhub/pkg/material"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	security "github.com/torob/certhub/internal/crypto"
+	issuerdomain "github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/storage"
+	userdomain "github.com/torob/certhub/internal/users"
+	"github.com/torob/certhub/pkg/certcriteria"
+	tlsmaterial "github.com/torob/certhub/pkg/material"
 )
 
 var (

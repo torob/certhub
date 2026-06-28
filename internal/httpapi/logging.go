@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	security "certhub/internal/crypto"
+	security "github.com/torob/certhub/internal/crypto"
 )
 
 type jsonLogger struct {

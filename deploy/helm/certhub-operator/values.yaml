@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: certhub-operator
+  repository: ghcr.io/torob/certhub-operator
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 

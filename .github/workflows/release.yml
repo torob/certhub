@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: torob
+  GOPROXY: https://proxy.golang.org,direct
+  GOCACHE: ~/.cache/go-build
+  GOPATH: ~/go
+  GOMODCACHE: ~/go/pkg/mod
+  npm_config_registry: https://registry.npmjs.org
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Compute release version
+        id: release
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: ./scripts/build-multiarch-release-artifacts.sh
+
+      - name: Upload GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/release/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Certhub ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/server.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY_DIR=dist/bin
+          tags: |
+            ghcr.io/torob/certhub-server:${{ github.ref_name }}
+            ghcr.io/torob/certhub-server:${{ steps.release.outputs.version }}
+
+      - name: Publish CLI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/cli.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY_DIR=dist/bin
+          tags: |
+            ghcr.io/torob/certhub-cli:${{ github.ref_name }}
+            ghcr.io/torob/certhub-cli:${{ steps.release.outputs.version }}
+
+      - name: Publish operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/operator.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY_DIR=dist/bin
+          tags: |
+            ghcr.io/torob/certhub-operator:${{ github.ref_name }}
+            ghcr.io/torob/certhub-operator:${{ steps.release.outputs.version }}
+
+      - name: Publish Helm OCI charts
+        env:
+          HELM_EXPERIMENTAL_OCI: "1"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          helm package deploy/helm/certhub-server --version "$version" --app-version "$version" --destination dist/release
+          helm package deploy/helm/certhub-operator --version "$version" --app-version "$version" --destination dist/release
+          helm push "dist/release/certhub-server-${version}.tgz" oci://ghcr.io/torob/charts
+          helm push "dist/release/certhub-operator-${version}.tgz" oci://ghcr.io/torob/charts

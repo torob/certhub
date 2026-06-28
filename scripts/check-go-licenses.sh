@@ -15,7 +15,7 @@ cd "$repo_root"
 
 packages_json="$(mktemp)"
 trap 'rm -f "$packages_json"' EXIT
-mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./... | awk '$0 !~ /\/dist(\/|$)/ && $0 !~ /\/certhub-full-e2e-artifacts(\/|$)/')
+mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...)
 GOFLAGS=-mod=readonly "$go_bin" list -deps -json "${packages[@]}" >"$packages_json"
 third_party_modules="$(node - "$packages_json" <<'JS'
 const fs = require("node:fs");
@@ -25,7 +25,7 @@ const modules = new Map();
 for (const chunk of content ? content.split(/\n(?=\{)/) : []) {
   const pkg = JSON.parse(chunk);
   const mod = pkg.Module;
-  if (mod && mod.Path && mod.Path !== "certhub") modules.set(mod.Path, mod.Version || "");
+  if (mod && mod.Path && mod.Path !== "github.com/torob/certhub") modules.set(mod.Path, mod.Version || "");
 }
 for (const [path, version] of [...modules].sort()) console.log(`${path} ${version}`);
 JS

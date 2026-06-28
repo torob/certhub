@@ -20,6 +20,14 @@ for bin in certhub-server certhub-cli certhub-operator; do
   fi
 done
 
+host_os="$("$go_bin" env GOOS)"
+host_arch="$("$go_bin" env GOARCH)"
+platform_bin_dir="$dist_dir/bin/$host_os-$host_arch"
+mkdir -p "$platform_bin_dir"
+for bin in certhub-server certhub-cli certhub-operator; do
+  cp -a "$dist_dir/bin/$bin" "$platform_bin_dir/$bin"
+done
+
 mkdir -p "$archive_root/bin" "$archive_root/config/examples" "$archive_root/deploy" "$archive_root/api" "$archive_root/specs" "$archive_root/migrations/postgres" "$archive_root/manifests"
 cp -a "$dist_dir/bin/." "$archive_root/bin/"
 cp -a "$repo_root/config/examples/." "$archive_root/config/examples/"

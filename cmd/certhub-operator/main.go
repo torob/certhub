@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"certhub/internal/operator"
+	"github.com/torob/certhub/internal/operator"
 )
 
 const operatorHelp = `certhub-operator is the Certhub Kubernetes operator command.

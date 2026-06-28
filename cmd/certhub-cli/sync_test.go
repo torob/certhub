@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"certhub/pkg/certhubclient"
-	"certhub/pkg/material"
+	"github.com/torob/certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/material"
 )
 
 func TestRunOnceCreatesThenPollsAndWritesMaterial(t *testing.T) {

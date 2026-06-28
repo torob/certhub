@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/audit"
-	"certhub/internal/config"
-	security "certhub/internal/crypto"
-	"certhub/internal/migrations"
-	"certhub/internal/storage"
-	"certhub/internal/users"
+	"github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/config"
+	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/migrations"
+	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestStartOIDCLoginBuildsAuthorizationCodePKCERedirect(t *testing.T) {

@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/config"
-	"certhub/internal/httpapi"
-	"certhub/internal/migrations"
+	"github.com/torob/certhub/internal/config"
+	"github.com/torob/certhub/internal/httpapi"
+	"github.com/torob/certhub/internal/migrations"
 )
 
 func TestBareServerPrintsHelpAndDoesNotRun(t *testing.T) {

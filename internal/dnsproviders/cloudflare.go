@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 type CloudflareCredentials struct {

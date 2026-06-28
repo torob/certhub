@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	certerrors "certhub/pkg/errors"
+	certerrors "github.com/torob/certhub/pkg/errors"
 )
 
 const validAppToken = ApplicationTokenPrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

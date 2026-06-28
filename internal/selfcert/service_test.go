@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/applications"
-	"certhub/internal/audit"
-	"certhub/internal/certificates"
-	"certhub/internal/config"
-	"certhub/internal/issuers"
-	"certhub/internal/storage"
-	tlsmaterial "certhub/pkg/material"
+	"github.com/torob/certhub/internal/applications"
+	"github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/certificates"
+	"github.com/torob/certhub/internal/config"
+	"github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/storage"
+	tlsmaterial "github.com/torob/certhub/pkg/material"
 )
 
 const (

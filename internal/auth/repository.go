@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 const rollbackTimeout = 5 * time.Second

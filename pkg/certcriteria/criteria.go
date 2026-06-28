@@ -4,7 +4,7 @@ import (
 	"errors"
 	"slices"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 const DefaultKeyType = "ecdsa-p256"

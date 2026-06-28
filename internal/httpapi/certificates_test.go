@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	"certhub/internal/auth"
-	certdomain "certhub/internal/certificates"
-	security "certhub/internal/crypto"
-	issuerdomain "certhub/internal/issuers"
-	"certhub/internal/storage"
-	"certhub/pkg/certhubclient"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	certdomain "github.com/torob/certhub/internal/certificates"
+	security "github.com/torob/certhub/internal/crypto"
+	issuerdomain "github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/pkg/certhubclient"
 )
 
 func TestSyncMaterialMatchingETagReturns204WithoutPrivateKeyAudit(t *testing.T) {

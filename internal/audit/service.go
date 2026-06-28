@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 )
 
 var (

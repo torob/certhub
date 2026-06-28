@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/applications"
-	"certhub/internal/certificates"
-	"certhub/internal/dnsproviders"
-	"certhub/internal/issuers"
-	"certhub/internal/migrations"
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/applications"
+	"github.com/torob/certhub/internal/certificates"
+	"github.com/torob/certhub/internal/dnsproviders"
+	"github.com/torob/certhub/internal/issuers"
+	"github.com/torob/certhub/internal/migrations"
+	"github.com/torob/certhub/internal/storage"
 )
 
 func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {

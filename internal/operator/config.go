@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/certhubclient"
 )
 
 type Config struct {

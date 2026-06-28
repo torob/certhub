@@ -10,9 +10,9 @@ import (
 	"slices"
 	"time"
 
-	"certhub/pkg/certhubclient"
-	certerrors "certhub/pkg/errors"
-	"certhub/pkg/material"
+	"github.com/torob/certhub/pkg/certhubclient"
+	certerrors "github.com/torob/certhub/pkg/errors"
+	"github.com/torob/certhub/pkg/material"
 )
 
 var ErrNotFound = stderrors.New("not found")

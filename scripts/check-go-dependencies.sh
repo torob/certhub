@@ -30,7 +30,7 @@ tmp_modules="$(mktemp)"
 tmp_gomod="$(mktemp)"
 trap 'rm -f "$tmp_packages" "$tmp_modules" "$tmp_gomod"' EXIT
 
-mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./... | awk '$0 !~ /\/dist(\/|$)/ && $0 !~ /\/certhub-full-e2e-artifacts(\/|$)/')
+mapfile -t packages < <(GOFLAGS=-mod=readonly "$go_bin" list ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...)
 GOFLAGS=-mod=readonly "$go_bin" list -deps -json "${packages[@]}" >"$tmp_packages"
 GOFLAGS=-mod=readonly "$go_bin" list -m -u -json all >"$tmp_modules"
 "$go_bin" mod edit -json >"$tmp_gomod"

@@ -29,7 +29,7 @@ before_sum="$(snapshot_file go.sum)"
 
 "$go_bin" mod verify
 GOFLAGS=-mod=readonly "$go_bin" list -m all >/dev/null
-GOFLAGS=-mod=readonly "$go_bin" list ./... >/dev/null
+GOFLAGS=-mod=readonly "$go_bin" list ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/... >/dev/null
 
 after_mod="$(snapshot_file go.mod)"
 after_sum="$(snapshot_file go.sum)"

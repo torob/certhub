@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	certerrors "certhub/pkg/errors"
-	"certhub/pkg/material"
+	certerrors "github.com/torob/certhub/pkg/errors"
+	"github.com/torob/certhub/pkg/material"
 )
 
 const (

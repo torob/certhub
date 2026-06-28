@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"certhub/internal/storage"
+	"github.com/torob/certhub/internal/storage"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

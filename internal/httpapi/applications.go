@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	"certhub/internal/auth"
-	"certhub/internal/storage"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	"github.com/torob/certhub/internal/storage"
 )
 
 type applicationCreateRequest struct {

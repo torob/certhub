@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"certhub/pkg/material"
+	"github.com/torob/certhub/pkg/material"
 )
 
 type Metadata struct {

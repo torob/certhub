@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"certhub/pkg/certhubclient"
-	certerrors "certhub/pkg/errors"
+	"github.com/torob/certhub/pkg/certhubclient"
+	certerrors "github.com/torob/certhub/pkg/errors"
 )
 
 const (

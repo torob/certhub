@@ -37,8 +37,10 @@ check_image() {
   local image="certhub-${name}:release-check"
   local rootfs="$tmp_dir/${name}.tar"
   local files="$tmp_dir/${name}.files"
+  local target_arch
+  target_arch="$(docker version --format '{{.Server.Arch}}')"
 
-  docker build --pull=false --build-arg "BINARY_DIR=$binary_dir" -f "$context_dir/deploy/docker/$dockerfile" -t "$image" "$context_dir" >/dev/null
+  docker build --pull=false --build-arg "BINARY_DIR=$binary_dir" --build-arg TARGETOS=linux --build-arg "TARGETARCH=$target_arch" -f "$context_dir/deploy/docker/$dockerfile" -t "$image" "$context_dir" >/dev/null
   images+=("$image")
 
   local user

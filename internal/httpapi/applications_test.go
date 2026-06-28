@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	appdomain "certhub/internal/applications"
-	auditdomain "certhub/internal/audit"
-	"certhub/internal/auth"
-	"certhub/internal/config"
-	"certhub/internal/storage"
+	appdomain "github.com/torob/certhub/internal/applications"
+	auditdomain "github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/auth"
+	"github.com/torob/certhub/internal/config"
+	"github.com/torob/certhub/internal/storage"
 )
 
 func TestAuthMeWithApplicationToken(t *testing.T) {

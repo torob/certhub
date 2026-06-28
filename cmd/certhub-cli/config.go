@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"certhub/pkg/certcriteria"
-	"certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/certcriteria"
+	"github.com/torob/certhub/pkg/certhubclient"
 
 	"go.yaml.in/yaml/v4"
 )

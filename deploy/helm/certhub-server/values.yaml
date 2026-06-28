@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: certhub-server
+  repository: ghcr.io/torob/certhub-server
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 

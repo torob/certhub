@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"certhub/internal/audit"
-	"certhub/internal/config"
-	security "certhub/internal/crypto"
+	"github.com/torob/certhub/internal/audit"
+	"github.com/torob/certhub/internal/config"
+	security "github.com/torob/certhub/internal/crypto"
 )
 
 func TestCreateUserRequiresProvisioningWhenPassword2FARequired(t *testing.T) {

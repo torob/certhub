@@ -1,4 +1,4 @@
-module certhub
+module github.com/torob/certhub
 
 go 1.26.4
 
