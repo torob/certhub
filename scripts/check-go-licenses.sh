@@ -51,7 +51,7 @@ while read -r module version; do
         failures+=("$module $version: Apache-2.0 license evidence not found")
       fi
       ;;
-    github.com/jackc/pgpassfile|github.com/jackc/pgservicefile|github.com/jackc/pgx/v5|github.com/jackc/puddle/v2|github.com/mfridman/interpolate|github.com/pressly/goose/v3|go.uber.org/multierr)
+    github.com/jackc/pgpassfile|github.com/jackc/pgservicefile|github.com/jackc/pgx/v5|github.com/jackc/puddle/v2|github.com/mfridman/interpolate|github.com/pressly/goose/v3|github.com/skip2/go-qrcode|go.uber.org/multierr)
       if ! grep -Rqs "MIT License\\|Permission is hereby granted" "$module_dir/LICENSE" "$module_dir/LICENSE"* 2>/dev/null; then
         failures+=("$module $version: MIT license evidence not found")
       fi
