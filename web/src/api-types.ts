@@ -996,8 +996,6 @@ export interface components {
         Email: string;
         /** Format: uri */
         HTTPSURL: string;
-        /** Format: uri */
-        NullableHTTPSURL: string | null;
         /** @example req_01HZY9T8YF3KZ9F2V5G9N0E2ZP */
         CorrelationID: string;
         UserAccessToken: string;
@@ -1254,8 +1252,8 @@ export interface components {
             /** @description True when a password hash is configured. The hash is never returned. */
             password_login_enabled: boolean;
             password_2fa_enabled: boolean;
-            oidc_issuer?: components["schemas"]["NullableHTTPSURL"];
-            oidc_subject?: string | null;
+            /** @description True when this User has an internal OIDC identity link. Raw issuer and subject values are not exposed. */
+            oidc_linked: boolean;
             global_role: components["schemas"]["GlobalRole"];
             status: components["schemas"]["UserStatus"];
             /** @description Number of explicit Application grants for this User. */
@@ -1296,12 +1294,7 @@ export interface components {
             status?: components["schemas"]["UserStatus"];
             password?: string;
             provision_password_2fa?: boolean;
-            oidc_issuer?: components["schemas"]["HTTPSURL"];
-            oidc_subject?: string;
-        } & (unknown | {
-            oidc_issuer: unknown;
-            oidc_subject: unknown;
-        });
+        };
         UserPatchRequest: {
             display_name?: components["schemas"]["HumanName"];
             global_role?: components["schemas"]["GlobalRole"];
@@ -1310,12 +1303,7 @@ export interface components {
             password?: string | null;
             provision_password_2fa?: boolean;
             reset_password_2fa?: boolean;
-            oidc_issuer?: components["schemas"]["NullableHTTPSURL"];
-            oidc_subject?: string | null;
-        } & (unknown | {
-            oidc_issuer: unknown;
-            oidc_subject: unknown;
-        });
+        };
         UserLookupResponse: {
             user: components["schemas"]["UserLookup"];
         };
@@ -1657,6 +1645,7 @@ export interface components {
             api_token: components["schemas"]["SecretString"];
         };
         ArvanCloudCredentials: {
+            /** @description Full ArvanCloud Authorization header value, including the Apikey scheme when required. */
             api_key: components["schemas"]["SecretString"];
         };
         DNSProviderZone: {

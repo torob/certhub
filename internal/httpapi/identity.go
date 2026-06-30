@@ -46,8 +46,6 @@ type userCreateRequest struct {
 	Status               string  `json:"status"`
 	Password             *string `json:"password"`
 	ProvisionPassword2FA bool    `json:"provision_password_2fa"`
-	OIDCIssuer           *string `json:"oidc_issuer"`
-	OIDCSubject          *string `json:"oidc_subject"`
 }
 
 type apiUser struct {
@@ -56,8 +54,7 @@ type apiUser struct {
 	DisplayName           string     `json:"display_name"`
 	PasswordLoginEnabled  bool       `json:"password_login_enabled"`
 	Password2FAEnabled    bool       `json:"password_2fa_enabled"`
-	OIDCIssuer            *string    `json:"oidc_issuer,omitempty"`
-	OIDCSubject           *string    `json:"oidc_subject,omitempty"`
+	OIDCLinked            bool       `json:"oidc_linked"`
 	GlobalRole            string     `json:"global_role"`
 	Status                string     `json:"status"`
 	ApplicationGrantCount int64      `json:"application_grant_count"`
@@ -383,8 +380,6 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request, reqctx
 		Status:               userdomain.Status(body.Status),
 		Password:             body.Password,
 		ProvisionPassword2FA: body.ProvisionPassword2FA,
-		OIDCIssuer:           body.OIDCIssuer,
-		OIDCSubject:          body.OIDCSubject,
 	}
 	result, err := s.users.CreateUser(r.Context(), userActor(current), params, s.userAuditContext(reqctx))
 	if err != nil {
@@ -572,8 +567,6 @@ func decodeUserPatch(r *http.Request) (userdomain.UpdateUserServiceParams, error
 		"password":               true,
 		"provision_password_2fa": true,
 		"reset_password_2fa":     true,
-		"oidc_issuer":            true,
-		"oidc_subject":           true,
 	}
 	var out userdomain.UpdateUserServiceParams
 	for key, value := range raw {
@@ -618,31 +611,6 @@ func decodeUserPatch(r *http.Request) (userdomain.UpdateUserServiceParams, error
 			if err := json.Unmarshal(value, &out.ResetPassword2FA); err != nil {
 				return out, err
 			}
-		case "oidc_issuer":
-			out.OIDCSet = true
-			if string(value) != "null" {
-				var v string
-				if err := json.Unmarshal(value, &v); err != nil {
-					return out, err
-				}
-				out.OIDCIssuer = &v
-			}
-		case "oidc_subject":
-			out.OIDCSet = true
-			if string(value) != "null" {
-				var v string
-				if err := json.Unmarshal(value, &v); err != nil {
-					return out, err
-				}
-				out.OIDCSubject = &v
-			}
-		}
-	}
-	if out.OIDCSet {
-		_, hasIssuer := raw["oidc_issuer"]
-		_, hasSubject := raw["oidc_subject"]
-		if hasIssuer != hasSubject {
-			return out, errors.New("oidc fields must be updated together")
 		}
 	}
 	return out, nil
@@ -753,8 +721,7 @@ func serializeUser(user userdomain.User) apiUser {
 		DisplayName:           user.DisplayName,
 		PasswordLoginEnabled:  user.PasswordHash != nil,
 		Password2FAEnabled:    user.Password2FAEnabled,
-		OIDCIssuer:            user.OIDCIssuer,
-		OIDCSubject:           user.OIDCSubject,
+		OIDCLinked:            user.OIDCIssuer != nil && user.OIDCSubject != nil,
 		GlobalRole:            string(user.GlobalRole),
 		Status:                string(user.Status),
 		ApplicationGrantCount: user.ApplicationGrantCount,

@@ -2871,12 +2871,6 @@ components:
       format: uri
       maxLength: 2048
       pattern: '^https://(?![^/?#]*@)(?!.*#)[^\s/?#]+(?:/[^\s#]*)?(?:\?[^\s#]*)?$'
-    NullableHTTPSURL:
-      type: string
-      format: uri
-      maxLength: 2048
-      nullable: true
-      pattern: '^https://(?![^/?#]*@)(?!.*#)[^\s/?#]+(?:/[^\s#]*)?(?:\?[^\s#]*)?$'
     CorrelationID:
       type: string
       minLength: 1
@@ -3476,7 +3470,7 @@ components:
     User:
       type: object
       additionalProperties: false
-      required: [id, email, display_name, password_login_enabled, password_2fa_enabled, global_role, status, application_grant_count, created_at, updated_at]
+      required: [id, email, display_name, password_login_enabled, password_2fa_enabled, oidc_linked, global_role, status, application_grant_count, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3490,12 +3484,9 @@ components:
           description: True when a password hash is configured. The hash is never returned.
         password_2fa_enabled:
           type: boolean
-        oidc_issuer:
-          $ref: '#/components/schemas/NullableHTTPSURL'
-        oidc_subject:
-          type: string
-          maxLength: 255
-          nullable: true
+        oidc_linked:
+          type: boolean
+          description: True when this User has an internal OIDC identity link. Raw issuer and subject values are not exposed.
         global_role:
           $ref: '#/components/schemas/GlobalRole'
         status:
@@ -3567,19 +3558,6 @@ components:
       type: object
       additionalProperties: false
       required: [email, display_name]
-      oneOf:
-        - not:
-            anyOf:
-              - required: [oidc_issuer]
-                properties:
-                  oidc_issuer: {}
-              - required: [oidc_subject]
-                properties:
-                  oidc_subject: {}
-        - required: [oidc_issuer, oidc_subject]
-          properties:
-            oidc_issuer: {}
-            oidc_subject: {}
       properties:
         email:
           $ref: '#/components/schemas/Email'
@@ -3595,29 +3573,10 @@ components:
           maxLength: 1024
         provision_password_2fa:
           type: boolean
-        oidc_issuer:
-          $ref: '#/components/schemas/HTTPSURL'
-        oidc_subject:
-          type: string
-          minLength: 1
-          maxLength: 255
     UserPatchRequest:
       type: object
       additionalProperties: false
       minProperties: 1
-      oneOf:
-        - not:
-            anyOf:
-              - required: [oidc_issuer]
-                properties:
-                  oidc_issuer: {}
-              - required: [oidc_subject]
-                properties:
-                  oidc_subject: {}
-        - required: [oidc_issuer, oidc_subject]
-          properties:
-            oidc_issuer: {}
-            oidc_subject: {}
       properties:
         display_name:
           $ref: '#/components/schemas/HumanName'
@@ -3635,13 +3594,6 @@ components:
           type: boolean
         reset_password_2fa:
           type: boolean
-        oidc_issuer:
-          $ref: '#/components/schemas/NullableHTTPSURL'
-        oidc_subject:
-          type: string
-          minLength: 1
-          maxLength: 255
-          nullable: true
     UserLookupResponse:
       type: object
       additionalProperties: false
@@ -4645,8 +4597,7 @@ components:
           display_name: User Name
           password_login_enabled: true
           password_2fa_enabled: true
-          oidc_issuer: null
-          oidc_subject: null
+          oidc_linked: false
           global_role: user
           status: active
           application_grant_count: 2
@@ -4817,8 +4768,7 @@ components:
             display_name: User Name
             password_login_enabled: true
             password_2fa_enabled: true
-            oidc_issuer: null
-            oidc_subject: null
+            oidc_linked: false
             global_role: user
             status: active
             application_grant_count: 2
@@ -4845,8 +4795,7 @@ components:
           display_name: User Name
           password_login_enabled: true
           password_2fa_enabled: false
-          oidc_issuer: null
-          oidc_subject: null
+          oidc_linked: false
           global_role: user
           status: active
           application_grant_count: 0
@@ -4875,8 +4824,7 @@ components:
           display_name: User Name
           password_login_enabled: true
           password_2fa_enabled: true
-          oidc_issuer: null
-          oidc_subject: null
+          oidc_linked: false
           global_role: user
           status: active
           application_grant_count: 2

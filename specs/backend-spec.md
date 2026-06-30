@@ -280,7 +280,7 @@ Required bootstrap and management commands:
 ```text
 certhub-server migrate --config <path>
 certhub-server bootstrap --interactive --config <path>
-certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password-stdin] [--oidc-issuer <url> --oidc-subject <subject>] [--allow-existing-admin]
+certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password-stdin] [--allow-existing-admin]
 certhub-server bootstrap create-admin --interactive --config <path> [--allow-existing-admin]
 certhub-server bootstrap create-issuer --config <path> --name <machine_name> --environment <production|staging> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
 certhub-server bootstrap create-dns-provider --config <path> --name <machine_name> --type <cloudflare|arvancloud> --zone-mode <auto|manual> [--credentials-stdin|--credentials-env <env>|--credentials-file <path>]
@@ -292,7 +292,7 @@ Command-specific rules:
 
 - `migrate` applies pending PostgreSQL migrations and exits. It is safe to run before other bootstrap commands. Other direct database commands may run migrations automatically before their own service call, but must use the same migration runner and locking.
 - `bootstrap create-admin` creates a global `admin` User. It must fail if any active global admin already exists unless `--allow-existing-admin` is set for explicit emergency recovery. Successful creation must write a `bootstrap_admin_created` audit event with `identity_type=system`.
-- `bootstrap create-admin` must support password auth, OIDC link fields, or both, matching `POST /v1/users` validation. If password is provided while `auth.password.2fa_required=true`, the command must generate and enable TOTP and print the provisioning URI exactly once.
+- `bootstrap create-admin` must support password auth or passwordless OIDC provisioning by verified email when OIDC is enabled. It must not accept OIDC issuer or subject from a human. If password is provided while `auth.password.2fa_required=true`, the command must generate and enable TOTP and print the provisioning URI exactly once.
 - `bootstrap create-issuer` must call the same issuer creation/update service rules as the User-authenticated issuer management API, except that the actor is system command authority.
 - `bootstrap create-dns-provider` must call the same DNS provider creation service rules as the User-authenticated DNS provider management API. Provider credentials are write-only, validated against the provider-specific typed schema, encrypted before storage, and never printed.
 - `bootstrap add-dns-provider-zone` is for manual-zone bootstrap. It must call the same service rules as the DNS provider zone management API.
@@ -308,7 +308,7 @@ Interactive bootstrap mode:
 - Interactive password prompts must disable terminal echo, require password confirmation, apply the password policy before creating the User, and never write the password to stdout, logs, command history, audit metadata, or crash output.
 - If the interactive admin flow configures password login while `auth.password.2fa_required=true`, Certhub must generate a TOTP secret, display the provisioning URI exactly once, optionally render a terminal QR code derived from that URI, prompt the operator for a current TOTP code, and verify the code before committing the admin User.
 - If TOTP confirmation fails or the operator aborts before confirmation, Certhub must not create a password-enabled admin User with an unconfirmed TOTP secret. The command must roll back any partially prepared User/TOTP state.
-- If the interactive admin flow creates an OIDC-only admin with no password login, Certhub-native TOTP is not required.
+- If the interactive admin flow creates a passwordless OIDC-provisioned admin, Certhub-native TOTP is not required.
 - `--interactive` is incompatible with `--json`; interactive output is human-oriented and must still avoid printing secrets except for one-time TOTP provisioning material.
 
 First self-certificate bootstrap through commands:
@@ -603,7 +603,7 @@ OIDC auth requirements:
 - The provider-facing callback is `GET /v1/auth/oidc/callback?code=...&state=...`. It must not return Certhub User access tokens or refresh tokens directly to the browser.
 - After successful provider callback validation, Certhub creates a short-lived, single-use login handoff ID, stores only its HMAC hash, and redirects the browser to the validated frontend return URL with the handoff ID.
 - The frontend exchanges the handoff ID through `POST /v1/auth/oidc/handoff` to receive Certhub User access and refresh tokens. Tokens must never appear in provider callback URLs, frontend URLs, logs, browser history, or referrers.
-- OIDC login maps to an existing active User by `(oidc_issuer, oidc_subject)` when present. If no OIDC link exists, Certhub may link by email only when the provider asserts `email_verified=true` or equivalent provider-specific verified-email evidence, exactly one active User has the same normalized email, and both OIDC link fields are null. If the verification claim is missing or false, email-linking must be rejected.
+- OIDC login maps to an existing active User by `(oidc_issuer, oidc_subject)` when present. If no OIDC link exists, Certhub may link by email only when the provider asserts `email_verified=true` or equivalent provider-specific verified-email evidence, exactly one active User has the same normalized email, and both OIDC link fields are null. If the verification claim is missing or false, email-linking must be rejected. OIDC issuer and subject are internal provider-derived identifiers; they must not be set, replaced, or cleared by admins, bootstrap commands, direct public API fields, or the web UI.
 - If no active provisioned User matches the OIDC identity, login fails with `user_not_provisioned`.
 
 User login session requirements:
@@ -2099,7 +2099,7 @@ Description and notes:
 
 - Admin-only in v1.
 - Creates a human identity; Applications remain separate identities.
-- May set an initial password, OIDC link fields, or both.
+- May set an initial password. Passwordless Users may be created when OIDC is enabled so their OIDC identity can be linked later by verified email during login.
 - If `password` is present, Certhub validates password policy and stores only `password_hash`.
 - Does not accept caller-provided TOTP secrets.
 - If `password` is present and `auth.password.2fa_required=true`, the request must set `provision_password_2fa=true`; Certhub generates and enables TOTP and returns the provisioning URI once.
@@ -2123,13 +2123,11 @@ Request body:
   "global_role": "user",
   "status": "active",
   "password": "initial password",
-  "provision_password_2fa": true,
-  "oidc_issuer": "https://issuer.example.com",
-  "oidc_subject": "stable-subject"
+  "provision_password_2fa": true
 }
 ```
 
-`password`, `provision_password_2fa`, `oidc_issuer`, and `oidc_subject` are optional. If one of `oidc_issuer` or `oidc_subject` is present, both must be present.
+`password` and `provision_password_2fa` are optional. `oidc_issuer` and `oidc_subject` are not accepted in this request.
 
 Expected responses:
 
@@ -2173,12 +2171,12 @@ Summary: Update mutable User fields.
 Description and notes:
 
 - Admin-only in v1.
-- Mutable fields include display name, global role, status, password replacement/removal, password 2FA administrative reset, and OIDC link replacement/removal.
+- Mutable fields include display name, global role, status, password replacement/removal, and password 2FA administrative reset. OIDC link fields are internal provider-derived state and are not mutable through this endpoint.
 - Changing status to disabled prevents future authentication.
 - Password update accepts plaintext only in the API request and stores only a new `password_hash`.
 - If a password is added or replaced while `auth.password.2fa_required=true`, the update must also provision password 2FA or reject the request.
 - Password 2FA administrative reset may disable password 2FA and clear TOTP secrets only when password login is also disabled for that User or `auth.password.2fa_required=false`; it must not reveal existing TOTP secrets.
-- OIDC link updates must keep `(oidc_issuer, oidc_subject)` unique.
+- OIDC links must keep `(oidc_issuer, oidc_subject)` unique when written internally by the OIDC login flow.
 
 ```http
 PATCH /v1/users/{user_id}
@@ -3206,8 +3204,8 @@ Human identities.
 | `password_2fa_enabled` | boolean | Required, default `false` | Whether password login requires TOTP for this User. Applies only to password auth. |
 | `totp_secret_encrypted` | encrypted text | Nullable | Active TOTP secret encrypted with Certhub encryption key. Required when `password_2fa_enabled=true`. |
 | `pending_totp_secret_encrypted` | encrypted text | Nullable | Pending TOTP setup secret encrypted with Certhub encryption key until confirmation. |
-| `oidc_issuer` | string | Nullable, format `https_url` | OIDC issuer this User is linked to. |
-| `oidc_subject` | string | Nullable, length 1-255, no control characters | Stable OIDC subject value from the issuer. |
+| `oidc_issuer` | string | Nullable, format `https_url`, internal-only | OIDC issuer this User is linked to. Written only by the OIDC login flow. |
+| `oidc_subject` | string | Nullable, length 1-255, no control characters, internal-only | Stable OIDC subject value from the issuer. Written only by the OIDC login flow. |
 | `global_role` | enum | Required, one of `user`, `admin`; default `user` | Global User privilege level. |
 | `status` | enum | Required, one of `active`, `disabled`; default `active` | Disabled Users cannot authenticate. |
 | `created_at` | timestamptz | Required | Creation time. |
@@ -3217,6 +3215,7 @@ Human identities.
 Constraints:
 
 - `(oidc_issuer, oidc_subject)` must be unique when both values are non-null.
+- `oidc_issuer` and `oidc_subject` must not be set, replaced, or cleared from human-admin APIs, bootstrap flags, or the web UI.
 - `password_hash` must be written only by Certhub after password policy validation and Argon2id hashing; plaintext passwords must never be stored.
 - `totp_secret_encrypted` and `pending_totp_secret_encrypted` must never be returned by list/detail APIs, logs, or audit metadata.
 - If `auth.password.2fa_required=true`, Users with `password_hash` must have `password_2fa_enabled=true` before password login can create a session.

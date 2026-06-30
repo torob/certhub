@@ -104,8 +104,6 @@ type CreateUserServiceParams struct {
 	Status               Status
 	Password             *string
 	ProvisionPassword2FA bool
-	OIDCIssuer           *string
-	OIDCSubject          *string
 }
 
 type CreateUserResult struct {
@@ -117,8 +115,6 @@ type BootstrapCreateAdminParams struct {
 	Email              string
 	DisplayName        string
 	Password           *string
-	OIDCIssuer         *string
-	OIDCSubject        *string
 	AllowExistingAdmin bool
 	ConfirmPassword2FA func(TOTPProvisioning) (string, error)
 }
@@ -131,9 +127,6 @@ type UpdateUserServiceParams struct {
 	Password             *string
 	ProvisionPassword2FA bool
 	ResetPassword2FA     bool
-	OIDCSet              bool
-	OIDCIssuer           *string
-	OIDCSubject          *string
 }
 
 type UpdateUserResult struct {
@@ -195,7 +188,7 @@ func (s *Service) createUser(ctx context.Context, actor Actor, params CreateUser
 	if params.Status != "" && params.Status != StatusActive && params.Status != StatusDisabled {
 		return CreateUserResult{}, ErrInvalidRequest
 	}
-	if (params.OIDCIssuer == nil) != (params.OIDCSubject == nil) {
+	if params.Password == nil && !s.cfg.OIDC.Enabled {
 		return CreateUserResult{}, ErrInvalidRequest
 	}
 	create := CreateUserParams{
@@ -203,8 +196,6 @@ func (s *Service) createUser(ctx context.Context, actor Actor, params CreateUser
 		DisplayName: params.DisplayName,
 		GlobalRole:  params.GlobalRole,
 		Status:      params.Status,
-		OIDCIssuer:  params.OIDCIssuer,
-		OIDCSubject: params.OIDCSubject,
 	}
 	var provisioning *TOTPProvisioning
 	if params.Password != nil {
@@ -263,7 +254,7 @@ func (s *Service) bootstrapCreateAdmin(ctx context.Context, params BootstrapCrea
 	if err := s.ready(); err != nil {
 		return CreateUserResult{}, err
 	}
-	if params.Password == nil && params.OIDCIssuer == nil {
+	if params.Password == nil && !s.cfg.OIDC.Enabled {
 		return CreateUserResult{}, ErrInvalidRequest
 	}
 	if !params.AllowExistingAdmin {
@@ -284,16 +275,11 @@ func (s *Service) bootstrapCreateAdmin(ctx context.Context, params BootstrapCrea
 	if err := storage.ValidateHumanString(params.DisplayName, "display_name", 1, 255); err != nil {
 		return CreateUserResult{}, ErrInvalidRequest
 	}
-	if (params.OIDCIssuer == nil) != (params.OIDCSubject == nil) {
-		return CreateUserResult{}, ErrInvalidRequest
-	}
 	create := CreateUserParams{
 		Email:       params.Email,
 		DisplayName: params.DisplayName,
 		GlobalRole:  GlobalRoleAdmin,
 		Status:      StatusActive,
-		OIDCIssuer:  params.OIDCIssuer,
-		OIDCSubject: params.OIDCSubject,
 	}
 	var provisioning *TOTPProvisioning
 	if params.Password != nil {
@@ -338,7 +324,7 @@ func (s *Service) bootstrapCreateAdmin(ctx context.Context, params BootstrapCrea
 		"global_role":   string(user.GlobalRole),
 		"status":        string(user.Status),
 		"password_auth": params.Password != nil,
-		"oidc_link":     params.OIDCIssuer != nil,
+		"oidc_auth":     params.Password == nil && s.cfg.OIDC.Enabled,
 		"password_2fa":  provisioning != nil,
 	}
 	if auditCtx.Command != "" {
@@ -470,18 +456,6 @@ func (s *Service) updateUser(ctx context.Context, actor Actor, id string, params
 		update.TOTPSecretEncrypted = storage.SetString(encrypted)
 		update.PendingTOTPSecretEncrypted = storage.ClearString()
 		provisioning = &p
-	}
-	if params.OIDCSet {
-		if (params.OIDCIssuer == nil) != (params.OIDCSubject == nil) {
-			return UpdateUserResult{}, ErrInvalidRequest
-		}
-		if params.OIDCIssuer == nil {
-			update.OIDCIssuer = storage.ClearString()
-			update.OIDCSubject = storage.ClearString()
-		} else {
-			update.OIDCIssuer = storage.SetString(*params.OIDCIssuer)
-			update.OIDCSubject = storage.SetString(*params.OIDCSubject)
-		}
 	}
 	user, err := s.repo.Update(ctx, id, update)
 	if err != nil {

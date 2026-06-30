@@ -534,19 +534,32 @@ func (s *Service) CompleteOIDCCallback(ctx context.Context, code, state string, 
 			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "invalid_code_verifier"})
 			return ErrOIDCValidationFailed
 		}
-		subject, email, err := txsvc.validateOIDCCode(ctx, code, string(verifier), loginState.Nonce)
+		claims, err := txsvc.validateOIDCCode(ctx, code, string(verifier), loginState.Nonce)
 		if err != nil {
 			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "oidc_validation_failed"})
 			return ErrOIDCValidationFailed
 		}
-		user, err := txsvc.userRepo.LookupByOIDC(ctx, txsvc.cfg.OIDC.IssuerURL, subject)
-		if err != nil || user.Status != users.StatusActive {
-			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "user_not_provisioned"})
-			return ErrOIDCUserNotProvisioned
+		user, linked, err := txsvc.resolveOIDCUser(ctx, claims)
+		if err != nil {
+			reason := "user_not_provisioned"
+			if errors.Is(err, ErrOIDCValidationFailed) {
+				reason = "oidc_email_mismatch"
+			}
+			var targetID *string
+			if user.ID != "" {
+				targetID = &user.ID
+			}
+			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", targetID, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": reason})
+			return err
 		}
-		if email != "" && !strings.EqualFold(email, user.Email) {
-			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", &user.ID, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "oidc_email_mismatch"})
-			return ErrOIDCValidationFailed
+		if linked {
+			if err := txsvc.auditUserEvent(ctx, user.ID, "user_updated", "user", &user.ID, auditCtx, audit.ResultSuccess, map[string]any{"oidc_linked": true}); err != nil {
+				return err
+			}
+		}
+		if user.Status != users.StatusActive {
+			_ = s.auditSystemFailure(ctx, "user_login_failed", "user", &user.ID, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "user_not_provisioned"})
+			return ErrOIDCUserNotProvisioned
 		}
 		if _, err := txsvc.authRepo.CreateOIDCHandoff(ctx, CreateOIDCHandoffParams{
 			HandoffHash:       txsvc.keys.HashToken(handoffID),
@@ -621,6 +634,38 @@ func (s *Service) exchangeOIDCHandoff(ctx context.Context, handoffID string, aud
 		return LoginResult{}, err
 	}
 	return LoginResult{User: updated, Tokens: tokens}, nil
+}
+
+func (s *Service) resolveOIDCUser(ctx context.Context, claims oidcClaims) (users.User, bool, error) {
+	issuer := claims.Issuer
+	user, err := s.userRepo.LookupByOIDC(ctx, issuer, claims.Subject)
+	if err == nil {
+		if claims.Email != "" && !strings.EqualFold(claims.Email, user.Email) {
+			return user, false, ErrOIDCValidationFailed
+		}
+		return user, false, nil
+	}
+	if !errors.Is(err, storage.ErrNoRows) {
+		return users.User{}, false, err
+	}
+	if claims.Email == "" || !claims.EmailVerified {
+		return users.User{}, false, ErrOIDCUserNotProvisioned
+	}
+	user, err = s.userRepo.LookupByNormalizedEmail(ctx, claims.Email)
+	if err != nil || user.Status != users.StatusActive {
+		return users.User{}, false, ErrOIDCUserNotProvisioned
+	}
+	if user.OIDCIssuer != nil || user.OIDCSubject != nil {
+		return user, false, ErrOIDCUserNotProvisioned
+	}
+	updated, err := s.userRepo.Update(ctx, user.ID, users.UpdateUserParams{
+		OIDCIssuer:  storage.SetString(issuer),
+		OIDCSubject: storage.SetString(claims.Subject),
+	})
+	if err != nil {
+		return user, false, ErrOIDCUserNotProvisioned
+	}
+	return updated, true, nil
 }
 
 func (s *Service) createSession(ctx context.Context, userID string, method AuthMethod, auditCtx AuditContext) (Tokens, Session, error) {
@@ -862,14 +907,15 @@ type oidcJWTHeader struct {
 }
 
 type oidcClaims struct {
-	Issuer    string          `json:"iss"`
-	Subject   string          `json:"sub"`
-	Audience  json.RawMessage `json:"aud"`
-	Expiry    int64           `json:"exp"`
-	NotBefore int64           `json:"nbf"`
-	IssuedAt  int64           `json:"iat"`
-	Nonce     string          `json:"nonce"`
-	Email     string          `json:"email"`
+	Issuer        string          `json:"iss"`
+	Subject       string          `json:"sub"`
+	Audience      json.RawMessage `json:"aud"`
+	Expiry        int64           `json:"exp"`
+	NotBefore     int64           `json:"nbf"`
+	IssuedAt      int64           `json:"iat"`
+	Nonce         string          `json:"nonce"`
+	Email         string          `json:"email"`
+	EmailVerified bool            `json:"email_verified"`
 }
 
 type oidcJWKS struct {
@@ -885,10 +931,10 @@ type oidcJWK struct {
 	Exponent  string `json:"e"`
 }
 
-func (s *Service) validateOIDCCode(ctx context.Context, code, codeVerifier, nonce string) (string, string, error) {
+func (s *Service) validateOIDCCode(ctx context.Context, code, codeVerifier, nonce string) (oidcClaims, error) {
 	discovery, err := s.fetchOIDCDiscovery(ctx)
 	if err != nil {
-		return "", "", err
+		return oidcClaims{}, err
 	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
@@ -898,28 +944,28 @@ func (s *Service) validateOIDCCode(ctx context.Context, code, codeVerifier, nonc
 	form.Set("code_verifier", codeVerifier)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, discovery.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", "", err
+		return oidcClaims{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return "", "", ErrOIDCValidationFailed
+		return oidcClaims{}, ErrOIDCValidationFailed
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		return "", "", ErrOIDCValidationFailed
+		return oidcClaims{}, ErrOIDCValidationFailed
 	}
 	var tokenResponse oidcTokenResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResponse); err != nil || tokenResponse.IDToken == "" {
-		return "", "", ErrOIDCValidationFailed
+		return oidcClaims{}, ErrOIDCValidationFailed
 	}
 	claims, err := s.validateIDToken(ctx, tokenResponse.IDToken, discovery, nonce)
 	if err != nil {
-		return "", "", err
+		return oidcClaims{}, err
 	}
-	return claims.Subject, claims.Email, nil
+	return claims, nil
 }
 
 func (s *Service) fetchOIDCDiscovery(ctx context.Context) (oidcDiscovery, error) {

@@ -564,6 +564,122 @@ func TestCompleteOIDCCallbackExchangesCodeWithPKCEAndCreatesHandoff(t *testing.T
 	}
 }
 
+func TestCompleteOIDCCallbackLinksProvisionedUserByVerifiedEmail(t *testing.T) {
+	keys, err := security.NewKeySet(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		kid          = "provider-key"
+		rawState     = "cth_oidc_state_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		stateID      = "12345678-1234-4234-9234-123456789abc"
+		codeVerifier = "stored-pkce-verifier"
+		authCode     = "provider-auth-code"
+		nonce        = "nonce-from-state"
+		userID       = "12345678-1234-4234-9234-000000000001"
+	)
+	encryptedVerifier, err := keys.SealDatabaseValue([]byte(codeVerifier), oidcVerifierAAD(stateID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &oidcFakeRepo{
+		wantStateHash: keys.HashOIDCState(rawState),
+		state: OIDCLoginState{
+			ID:                    stateID,
+			StateHash:             keys.HashOIDCState(rawState),
+			Nonce:                 nonce,
+			CodeVerifierEncrypted: encryptedVerifier,
+			ProviderCallbackURL:   "https://certhub.example.com/v1/auth/oidc/callback",
+			ExpiresAt:             time.Now().Add(time.Minute),
+		},
+		user: users.User{
+			ID:          userID,
+			Email:       "user@example.com",
+			DisplayName: "OIDC User",
+			GlobalRole:  users.GlobalRoleUser,
+			Status:      users.StatusActive,
+		},
+	}
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 server.URL,
+				"authorization_endpoint": server.URL + "/oauth/v2/authorize",
+				"token_endpoint":         server.URL + "/oauth/v2/token",
+				"jwks_uri":               server.URL + "/oauth/v2/keys",
+			})
+		case "/oauth/v2/token":
+			idToken := signedOIDCTestToken(t, signingKey, kid, map[string]any{
+				"iss":            server.URL,
+				"sub":            "subject-verified-email",
+				"aud":            "certhub-web",
+				"exp":            time.Now().Add(time.Hour).Unix(),
+				"iat":            time.Now().Add(-time.Minute).Unix(),
+				"nonce":          nonce,
+				"email":          "user@example.com",
+				"email_verified": true,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"id_token": idToken})
+		case "/oauth/v2/keys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+				"kty": "RSA",
+				"kid": kid,
+				"use": "sig",
+				"alg": "RS256",
+				"n":   base64.RawURLEncoding.EncodeToString(signingKey.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(signingKey.E)).Bytes()),
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	service := NewService(ServiceConfig{
+		AuthRepository:  repo,
+		UserRepository:  repo,
+		AuditRepository: repo,
+		KeySet:          keys,
+		Config: config.AuthConfig{
+			UserAccessTokenTTLSeconds:  300,
+			UserRefreshTokenTTLSeconds: 3600,
+			OIDC: config.OIDCConfig{
+				Enabled:     true,
+				IssuerURL:   server.URL,
+				ClientID:    "certhub-web",
+				RedirectURL: "https://certhub.example.com/v1/auth/oidc/callback",
+			},
+		},
+		HTTPClient: server.Client(),
+	})
+	if _, err := service.CompleteOIDCCallback(context.Background(), authCode, rawState, AuditContext{}); err != nil {
+		t.Fatal(err)
+	}
+	if repo.lookupOIDCIssuer != server.URL || repo.lookupOIDCSubject != "subject-verified-email" {
+		t.Fatalf("OIDC lookup = issuer %q subject %q", repo.lookupOIDCIssuer, repo.lookupOIDCSubject)
+	}
+	if repo.lookupEmail != "user@example.com" {
+		t.Fatalf("email lookup = %q", repo.lookupEmail)
+	}
+	if repo.updatedUserID != userID || !repo.updatedUserParams.OIDCIssuer.Set || repo.updatedUserParams.OIDCIssuer.Value == nil || *repo.updatedUserParams.OIDCIssuer.Value != server.URL {
+		t.Fatalf("issuer update = user %q params %#v", repo.updatedUserID, repo.updatedUserParams)
+	}
+	if !repo.updatedUserParams.OIDCSubject.Set || repo.updatedUserParams.OIDCSubject.Value == nil || *repo.updatedUserParams.OIDCSubject.Value != "subject-verified-email" {
+		t.Fatalf("subject update = %#v", repo.updatedUserParams)
+	}
+	if !repo.createdHandoff || repo.createdHandoffParams.UserID != userID {
+		t.Fatalf("handoff was not created for linked user: %#v", repo.createdHandoffParams)
+	}
+}
+
 func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -571,6 +687,7 @@ func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T)
 		signWithUnknownKey bool
 		tokenKeyID         string
 		userStatus         users.Status
+		noExistingLink     bool
 		wantErr            error
 	}{
 		{
@@ -615,6 +732,22 @@ func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T)
 			name:       "disabled linked user",
 			userStatus: users.StatusDisabled,
 			wantErr:    ErrOIDCUserNotProvisioned,
+		},
+		{
+			name: "unverified email cannot create link",
+			mutateClaims: func(claims map[string]any, _ string) {
+				claims["email_verified"] = false
+			},
+			noExistingLink: true,
+			wantErr:        ErrOIDCUserNotProvisioned,
+		},
+		{
+			name: "missing verified email cannot create link",
+			mutateClaims: func(claims map[string]any, _ string) {
+				delete(claims, "email_verified")
+			},
+			noExistingLink: true,
+			wantErr:        ErrOIDCUserNotProvisioned,
 		},
 	}
 	for _, tt := range tests {
@@ -729,7 +862,9 @@ func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T)
 				}
 			}))
 			defer server.Close()
-			repo.user.OIDCIssuer = &server.URL
+			if !tt.noExistingLink {
+				repo.user.OIDCIssuer = &server.URL
+			}
 			service := NewService(ServiceConfig{
 				AuthRepository:  repo,
 				UserRepository:  repo,
@@ -1276,6 +1411,9 @@ type oidcFakeRepo struct {
 	user                 users.User
 	lookupOIDCIssuer     string
 	lookupOIDCSubject    string
+	lookupEmail          string
+	updatedUserID        string
+	updatedUserParams    users.UpdateUserParams
 	auditEvents          []audit.AppendEventParams
 }
 
@@ -1364,8 +1502,12 @@ func (f *oidcFakeRepo) Get(_ context.Context, userID string) (users.User, error)
 	return users.User{}, storage.ErrNoRows
 }
 
-func (f *oidcFakeRepo) LookupByNormalizedEmail(context.Context, string) (users.User, error) {
-	return users.User{}, errors.New("not implemented")
+func (f *oidcFakeRepo) LookupByNormalizedEmail(_ context.Context, email string) (users.User, error) {
+	f.lookupEmail = email
+	if f.user.ID != "" && strings.EqualFold(f.user.Email, email) {
+		return f.user, nil
+	}
+	return users.User{}, storage.ErrNoRows
 }
 
 func (f *oidcFakeRepo) LookupByOIDC(_ context.Context, issuer, subject string) (users.User, error) {
@@ -1380,6 +1522,14 @@ func (f *oidcFakeRepo) LookupByOIDC(_ context.Context, issuer, subject string) (
 func (f *oidcFakeRepo) Update(_ context.Context, userID string, params users.UpdateUserParams) (users.User, error) {
 	if f.user.ID != userID {
 		return users.User{}, storage.ErrNoRows
+	}
+	f.updatedUserID = userID
+	f.updatedUserParams = params
+	if params.OIDCIssuer.Set {
+		f.user.OIDCIssuer = params.OIDCIssuer.Value
+	}
+	if params.OIDCSubject.Set {
+		f.user.OIDCSubject = params.OIDCSubject.Value
 	}
 	if params.LastLoginAt.Set {
 		f.user.LastLoginAt = params.LastLoginAt.Value

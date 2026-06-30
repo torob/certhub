@@ -196,6 +196,24 @@ func TestBootstrapCreateAdminIsNotScaffolded(t *testing.T) {
 	}
 }
 
+func TestBootstrapCreateAdminRejectsOIDCLinkFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
+		"bootstrap", "create-admin",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--email", "admin@example.com",
+		"--display-name", "Admin User",
+		"--oidc-issuer", "https://issuer.example.com",
+		"--oidc-subject", "subject",
+	})
+	if code != 2 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestBootstrapCredentialFileRequiresPrivateRegularFile(t *testing.T) {
 	dir := newCommandTempDir(t)
 	secretPath := filepath.Join(dir, "credentials.json")

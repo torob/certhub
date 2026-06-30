@@ -89,6 +89,86 @@ func TestAuthMeWithUserAccessToken(t *testing.T) {
 	}
 }
 
+func TestUserResponsesExposeOnlyOIDCLinkedStatus(t *testing.T) {
+	user := fakeUser()
+	user.OIDCIssuer = ptrString("https://issuer.example.com")
+	user.OIDCSubject = ptrString("subject-canary")
+	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
+			ID:              "22345678-1234-4234-9234-123456789abc",
+			UserID:          user.ID,
+			AuthMethod:      auth.AuthMethodPassword,
+			AccessTokenHash: testKeySet(t).HashToken(token),
+			Status:          auth.SessionStatusActive,
+			AccessExpiresAt: time.Now().Add(time.Minute),
+		}},
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          testKeySet(t),
+		Config:          testConfig(t, "").Auth,
+	})
+	handler := New(testConfig(t, ""), WithIdentityServices(authSvc, userdomain.NewService(userdomain.ServiceConfig{
+		Repository:      &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          testKeySet(t),
+		Config:          testConfig(t, "").Auth,
+	}))).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+user.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "oidc_issuer") || strings.Contains(rec.Body.String(), "oidc_subject") || strings.Contains(rec.Body.String(), "subject-canary") {
+		t.Fatalf("body leaked raw OIDC link: %s", rec.Body.String())
+	}
+	var body struct {
+		User struct {
+			OIDCLinked bool `json:"oidc_linked"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.User.OIDCLinked {
+		t.Fatalf("oidc_linked was not true: %s", rec.Body.String())
+	}
+}
+
+func TestPatchUserRejectsOIDCLinkFields(t *testing.T) {
+	user := fakeUser()
+	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
+			ID:              "22345678-1234-4234-9234-123456789abc",
+			UserID:          user.ID,
+			AuthMethod:      auth.AuthMethodPassword,
+			AccessTokenHash: testKeySet(t).HashToken(token),
+			Status:          auth.SessionStatusActive,
+			AccessExpiresAt: time.Now().Add(time.Minute),
+		}},
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          testKeySet(t),
+		Config:          testConfig(t, "").Auth,
+	})
+	handler := New(testConfig(t, ""), WithIdentityServices(authSvc, userdomain.NewService(userdomain.ServiceConfig{
+		Repository:      &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          testKeySet(t),
+		Config:          testConfig(t, "").Auth,
+	}))).Handler()
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/users/"+user.ID, strings.NewReader(`{"oidc_issuer":"https://issuer.example.com","oidc_subject":"subject"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assertErrorCode(t, rec, http.StatusBadRequest, "invalid_request")
+}
+
 func TestIdentityConflictErrorCarriesRetryAfter(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeIdentityError(rec, auth.ErrConflict)
@@ -102,6 +182,10 @@ func TestIdentityConflictErrorCarriesRetryAfter(t *testing.T) {
 	if body["error"]["retry_after_seconds"] != float64(1) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
+}
+
+func ptrString(value string) *string {
+	return &value
 }
 
 func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {

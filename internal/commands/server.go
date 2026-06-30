@@ -454,8 +454,6 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 	email := fs.String("email", "", "admin email")
 	displayName := fs.String("display-name", "", "admin display name")
 	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
-	oidcIssuer := fs.String("oidc-issuer", "", "OIDC issuer URL")
-	oidcSubject := fs.String("oidc-subject", "", "OIDC subject")
 	allowExistingAdmin := fs.Bool("allow-existing-admin", false, "allow creation when an active admin already exists")
 	interactive := fs.Bool("interactive", false, "run guided admin creation")
 	jsonOut := fs.Bool("json", false, "print JSON output")
@@ -477,16 +475,6 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 		value := strings.TrimRight(string(raw), "\r\n")
 		password = &value
 	}
-	var issuerPtr, subjectPtr *string
-	if *oidcIssuer != "" || *oidcSubject != "" {
-		if *oidcIssuer == "" || *oidcSubject == "" {
-			return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("oidc-issuer and oidc-subject must be set together"))
-		}
-		issuerPtr, subjectPtr = oidcIssuer, oidcSubject
-	}
-	if password == nil && issuerPtr == nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("password-stdin or OIDC link is required"))
-	}
 	boot, err := r.openBootstrapServices(context.Background(), *configPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
@@ -496,8 +484,6 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 		Email:              *email,
 		DisplayName:        *displayName,
 		Password:           password,
-		OIDCIssuer:         issuerPtr,
-		OIDCSubject:        subjectPtr,
 		AllowExistingAdmin: *allowExistingAdmin,
 	}, users.AuditContext{CorrelationID: "bootstrap-create-admin", Command: "certhub-server bootstrap create-admin"})
 	if err != nil {
@@ -553,7 +539,7 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
 	}
-	password, err := r.promptSecret("Admin password: ")
+	password, err := r.promptSecret("Admin password [optional when OIDC is enabled]: ")
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
 	}
@@ -563,21 +549,6 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 	}
 	if password != confirm {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("password confirmation does not match"))
-	}
-	oidcIssuer, err := r.promptLine("OIDC issuer URL [optional]: ")
-	if err != nil {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
-	}
-	var oidcIssuerPtr, oidcSubjectPtr *string
-	oidcIssuer = strings.TrimSpace(oidcIssuer)
-	if oidcIssuer != "" {
-		oidcSubject, err := r.promptLine("OIDC subject: ")
-		if err != nil {
-			return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
-		}
-		oidcSubject = strings.TrimSpace(oidcSubject)
-		oidcIssuerPtr = &oidcIssuer
-		oidcSubjectPtr = &oidcSubject
 	}
 	var passwordPtr *string
 	if password != "" {
@@ -592,8 +563,6 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 		Email:              strings.TrimSpace(email),
 		DisplayName:        strings.TrimSpace(displayName),
 		Password:           passwordPtr,
-		OIDCIssuer:         oidcIssuerPtr,
-		OIDCSubject:        oidcSubjectPtr,
 		AllowExistingAdmin: allowExistingAdmin,
 		ConfirmPassword2FA: func(p users.TOTPProvisioning) (string, error) {
 			r.writeTOTPProvisioning(p.ProvisioningURI)

@@ -30,6 +30,42 @@ func TestCreateUserRequiresProvisioningWhenPassword2FARequired(t *testing.T) {
 	}
 }
 
+func TestCreateUserRequiresPasswordUnlessOIDCEnabled(t *testing.T) {
+	service := NewService(ServiceConfig{
+		Repository:      &serviceFakeStore{},
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          serviceTestKeySet(t),
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}},
+	})
+	_, err := service.CreateUser(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleAdmin}, CreateUserServiceParams{
+		Email:       "user@example.com",
+		DisplayName: "User Name",
+	}, AuditContext{})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCreateUserAllowsPasswordlessUserWhenOIDCEnabled(t *testing.T) {
+	store := &serviceFakeStore{}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          serviceTestKeySet(t),
+		Config:          config.AuthConfig{OIDC: config.OIDCConfig{Enabled: true}},
+	})
+	result, err := service.CreateUser(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleAdmin}, CreateUserServiceParams{
+		Email:       "user@example.com",
+		DisplayName: "User Name",
+	}, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.User.Email != "user@example.com" || store.created.PasswordHash != nil || store.created.OIDCIssuer != nil || store.created.OIDCSubject != nil {
+		t.Fatalf("passwordless OIDC-provisioned user = result %#v created %#v", result.User, store.created)
+	}
+}
+
 func TestLookupUserNonAdminRequiresApplicationManagerGrant(t *testing.T) {
 	service := NewService(ServiceConfig{
 		Repository:      &serviceFakeStore{},
@@ -83,6 +119,42 @@ func TestBootstrapCreateAdminRejectsExistingActiveAdminUnlessAllowed(t *testing.
 	}, AuditContext{})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBootstrapCreateAdminRequiresPasswordUnlessOIDCEnabled(t *testing.T) {
+	service := NewService(ServiceConfig{
+		Repository:      &serviceFakeStore{},
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          serviceTestKeySet(t),
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}},
+	})
+	_, err := service.BootstrapCreateAdmin(context.Background(), BootstrapCreateAdminParams{
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+	}, AuditContext{})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBootstrapCreateAdminAllowsPasswordlessAdminWhenOIDCEnabled(t *testing.T) {
+	store := &serviceFakeStore{}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          serviceTestKeySet(t),
+		Config:          config.AuthConfig{OIDC: config.OIDCConfig{Enabled: true}},
+	})
+	result, err := service.BootstrapCreateAdmin(context.Background(), BootstrapCreateAdminParams{
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+	}, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.User.GlobalRole != GlobalRoleAdmin || result.User.Status != StatusActive || store.created.PasswordHash != nil || store.created.OIDCIssuer != nil || store.created.OIDCSubject != nil {
+		t.Fatalf("passwordless OIDC-provisioned admin = result %#v created %#v", result.User, store.created)
 	}
 }
 

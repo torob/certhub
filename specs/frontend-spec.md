@@ -93,7 +93,7 @@ Fields that must use backend-compatible machine validators include:
 - Certificate domains.
 - ACME account emails.
 - User emails.
-- OIDC issuer URLs when edited by admins.
+- OIDC link status. Raw OIDC issuer and subject values are internal provider-derived identifiers and must not be edited by admins.
 - Token expiration timestamps.
 - Key type and enum fields.
 
@@ -177,7 +177,7 @@ No management task may require the CLI, Kubernetes operator, direct database acc
 Required web management workflows:
 
 - User authentication, logout, refresh, current identity display, and password-login TOTP self-service.
-- User administration: list, create, inspect, update mutable fields, manage password availability, manage OIDC link fields, and administrative password-2FA provisioning or reset where backend policy allows it.
+- User administration: list, create, inspect, update mutable fields, manage password availability, show OIDC link status, and administrative password-2FA provisioning or reset where backend policy allows it.
 - Application administration: list, create, inspect, update mutable fields, disable/enable through status, and inspect related certificates and audit events.
 - Application token management: list token metadata, create tokens, display raw token value exactly once, support expiring and non-expiring tokens, and revoke tokens.
 - Application User grant management: list grants, create or replace grants, and remove grants.
@@ -422,7 +422,6 @@ User detail:
 - Password replacement/removal controls for admins.
 - Password 2FA status and administrative provisioning/reset controls where backend policy allows them.
 - OIDC link status.
-- OIDC issuer and subject replacement/removal controls for admins.
 - Application grants.
 - Private-key access audit events.
 - Administrative audit events.
@@ -435,8 +434,9 @@ User creation and update forms:
 - Admin-only in v1.
 - Must support email, display name, global role, and status.
 - May set an initial password when password authentication is enabled.
+- May create a passwordless User when OIDC is enabled so the backend can link the User by verified email during first OIDC login.
 - May provision password-login TOTP when required by backend policy. The provisioning URI is shown only once and must not be persisted.
-- May set OIDC issuer and subject together. The UI must not submit only one of them.
+- Must not expose controls to set, replace, or clear OIDC issuer or subject.
 - Must not expose or manage User personal tokens.
 
 ## Issuers
@@ -693,7 +693,7 @@ Required frontend scenarios:
 - User with `manager` access can list and revoke Application tokens, add/delete domain scopes, and create/replace/remove Application User grants.
 - Non-admin User cannot create Applications.
 - Admin can create Applications and update mutable Application fields.
-- Admin can create Users, update mutable User fields, configure password availability, provision password-login TOTP when required, and set or remove OIDC link fields.
+- Admin can create Users, update mutable User fields, configure password availability, provision password-login TOTP when required, and inspect OIDC link status without setting, replacing, or clearing the link fields.
 - Renewal and key rotation create a higher-numbered certificate version shown in certificate detail.
 - Admin can view and manage all Applications.
 - Admin can create, inspect, update mutable issuer fields, disable issuers through status, and sees the default issuer uniqueness constraint.
