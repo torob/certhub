@@ -20,6 +20,7 @@ import (
 	"time"
 	"unsafe"
 
+	qrcode "github.com/skip2/go-qrcode"
 	acmedomain "github.com/torob/certhub/internal/acme"
 	"github.com/torob/certhub/internal/applications"
 	"github.com/torob/certhub/internal/audit"
@@ -509,7 +510,7 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 	return r.reportBootstrapSuccess(*jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "created admin user %s (%s)\n", result.User.Email, result.User.ID)
 		if result.Password2FA != nil {
-			fmt.Fprintf(r.Stdout, "totp_provisioning_uri: %s\n", result.Password2FA.ProvisioningURI)
+			r.writeTOTPProvisioning(result.Password2FA.ProvisioningURI)
 		}
 	})
 }
@@ -595,7 +596,7 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 		OIDCSubject:        oidcSubjectPtr,
 		AllowExistingAdmin: allowExistingAdmin,
 		ConfirmPassword2FA: func(p users.TOTPProvisioning) (string, error) {
-			fmt.Fprintf(r.Stdout, "totp_provisioning_uri: %s\n", p.ProvisioningURI)
+			r.writeTOTPProvisioning(p.ProvisioningURI)
 			return r.promptLine("Current TOTP code: ")
 		},
 	}, users.AuditContext{CorrelationID: "bootstrap-create-admin-interactive", Command: "certhub-server bootstrap create-admin --interactive"})
@@ -604,6 +605,15 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 	}
 	fmt.Fprintf(r.Stdout, "created admin user %s (%s)\n", result.User.Email, result.User.ID)
 	return 0
+}
+
+func (r ServerRunner) writeTOTPProvisioning(uri string) {
+	code, err := qrcode.New(uri, qrcode.Medium)
+	if err == nil {
+		fmt.Fprintln(r.Stdout, "totp_qr_code:")
+		fmt.Fprint(r.Stdout, code.ToSmallString(false))
+	}
+	fmt.Fprintf(r.Stdout, "totp_provisioning_uri: %s\n", uri)
 }
 
 func (r ServerRunner) bootstrapCreateIssuer(args []string) int {

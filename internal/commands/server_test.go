@@ -63,6 +63,22 @@ func TestGenerateEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestWriteTOTPProvisioningIncludesQRCodeAndURI(t *testing.T) {
+	var stdout bytes.Buffer
+	uri := "otpauth://totp/Certhub:admin@example.com?secret=ABCDEFGHIJKLMNOP&issuer=Certhub"
+	(ServerRunner{Stdout: &stdout}).writeTOTPProvisioning(uri)
+	output := stdout.String()
+	if !strings.Contains(output, "totp_qr_code:\n") {
+		t.Fatalf("output missing qr label: %q", output)
+	}
+	if !strings.Contains(output, "totp_provisioning_uri: "+uri) {
+		t.Fatalf("output missing uri: %q", output)
+	}
+	if strings.Count(output, "\n") < 10 {
+		t.Fatalf("output does not look like a terminal QR code: %q", output)
+	}
+}
+
 func TestMigrateLoadsConfigAndFailsClosedWithoutDatabase(t *testing.T) {
 	configPath := writeCommandConfig(t)
 	var stdout, stderr bytes.Buffer

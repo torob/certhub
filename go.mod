@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pressly/goose/v3 v3.27.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.55.0

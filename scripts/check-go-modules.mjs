@@ -24,6 +24,7 @@ const compiledModulePaths = new Set(compiledModules.map((mod) => mod.Path));
 const approvedDirectRequires = versionMap({
   "github.com/jackc/pgx/v5": "v5.10.0",
   "github.com/pressly/goose/v3": "v3.27.1",
+  "github.com/skip2/go-qrcode": "v0.0.0-20200617195104-da1b6568686e",
   "go.yaml.in/yaml/v4": "v4.0.0-rc.6",
   "golang.org/x/crypto": "v0.53.0",
   "golang.org/x/net": "v0.55.0"
@@ -38,6 +39,7 @@ const approvedCompiledModules = versionMap({
   "github.com/mfridman/interpolate": "v0.0.2",
   "github.com/pressly/goose/v3": "v3.27.1",
   "github.com/sethvargo/go-retry": "v0.3.0",
+  "github.com/skip2/go-qrcode": "v0.0.0-20200617195104-da1b6568686e",
   "go.uber.org/multierr": "v1.11.0",
   "go.yaml.in/yaml/v4": "v4.0.0-rc.6",
   "golang.org/x/crypto": "v0.53.0",
