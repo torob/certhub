@@ -41,6 +41,8 @@ type APIResult<T> = {
 const queryClient = new QueryClient();
 const sessionKey = "certhub.session.v1";
 const authExpiredEvent = "certhub-auth-expired";
+const accessRefreshSkewMs = 60_000;
+let refreshInFlight: Promise<boolean> | undefined;
 
 const nav = [
   ["home", "Home", Home],
@@ -141,7 +143,44 @@ function clientError(message: string, retryable = false): APIResult<never> {
   };
 }
 
-async function refreshSession(session: Session): Promise<boolean> {
+function authExpiredResult(requestID: string): APIResult<never> {
+  return {
+    status: 401,
+    requestID,
+    error: { code: "session_expired", message: "session expired", retryable: false }
+  };
+}
+
+function parseExpiresAt(value?: string): number | undefined {
+  if (!value) return undefined;
+  const expiresAt = Date.parse(value);
+  return Number.isFinite(expiresAt) ? expiresAt : undefined;
+}
+
+function shouldRefreshAccess(session: Session): boolean {
+  const expiresAt = parseExpiresAt(session.accessExpiresAt);
+  return expiresAt !== undefined && expiresAt <= Date.now() + accessRefreshSkewMs;
+}
+
+function isRefreshableRequest(pathname: string): boolean {
+  return ![
+    "/v1/auth/login",
+    "/v1/auth/logout",
+    "/v1/auth/refresh",
+    "/v1/auth/oidc/handoff"
+  ].includes(pathname);
+}
+
+function copyLatestTokens(session: Session) {
+  const latest = loadSession();
+  if (!latest?.accessToken || !latest.refreshToken) return;
+  session.accessToken = latest.accessToken;
+  session.refreshToken = latest.refreshToken;
+  session.accessExpiresAt = latest.accessExpiresAt;
+  session.refreshExpiresAt = latest.refreshExpiresAt;
+}
+
+async function performRefreshSession(session: Session): Promise<boolean> {
   if (!session.refreshToken) return false;
   const result = await api<{
     access_token: string;
@@ -164,23 +203,45 @@ async function refreshSession(session: Session): Promise<boolean> {
   return true;
 }
 
+async function refreshSession(session: Session): Promise<boolean> {
+  if (!session.refreshToken) return false;
+  if (!refreshInFlight) {
+    refreshInFlight = performRefreshSession(session).finally(() => {
+      refreshInFlight = undefined;
+    });
+  }
+  try {
+    const refreshed = await refreshInFlight;
+    if (refreshed) copyLatestTokens(session);
+    return refreshed;
+  } catch {
+    clearSession(true);
+    return false;
+  }
+}
+
 async function api<T>(path: string, session: Session | undefined, init: RequestInit = {}, allowRefresh = true): Promise<APIResult<T>> {
   const url = new URL(path, window.location.origin);
   if (url.origin !== window.location.origin) return clientError("cross-origin API requests are blocked");
   const rid = requestID();
+  const requestPath = `${url.pathname}${url.search}`;
+  const canRefresh = Boolean(allowRefresh && session?.refreshToken && isRefreshableRequest(url.pathname));
+  if (canRefresh && session && shouldRefreshAccess(session)) {
+    const refreshed = await refreshSession(session);
+    if (!refreshed) return authExpiredResult(rid);
+  }
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   headers.set("X-Request-ID", rid);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (session?.accessToken) headers.set("Authorization", `Bearer ${session.accessToken}`);
-  const requestPath = `${url.pathname}${url.search}`;
   let response: Response;
   try {
     response = await fetch(requestPath, { ...init, headers, cache: "no-store", redirect: "error" });
   } catch (err) {
     return clientError(`network error: ${(err as Error).message}`, true);
   }
-  if (response.status === 401 && allowRefresh && session?.refreshToken && !requestPath.startsWith("/v1/auth/")) {
+  if (response.status === 401 && canRefresh && session) {
     const refreshed = await refreshSession(session);
     if (refreshed) return api<T>(path, session, init, false);
   }
@@ -240,6 +301,25 @@ function AppShell() {
     window.addEventListener("popstate", listener);
     return () => window.removeEventListener("popstate", listener);
   }, []);
+
+  useEffect(() => {
+    if (!session?.refreshToken) return;
+    const expiresAt = parseExpiresAt(session.accessExpiresAt);
+    if (expiresAt === undefined) return;
+    let canceled = false;
+    const timeout = window.setTimeout(() => {
+      refreshSession(session).then((refreshed) => {
+        if (canceled) return;
+        if (!refreshed) return;
+        const latest = loadSession();
+        if (latest?.accessToken) setSession(latest);
+      });
+    }, Math.max(0, expiresAt - Date.now() - accessRefreshSkewMs));
+    return () => {
+      canceled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [session?.accessExpiresAt, session?.accessToken, session?.refreshToken]);
 
   useEffect(() => {
     if (!session?.accessToken) return;
