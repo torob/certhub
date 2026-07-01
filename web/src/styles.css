@@ -311,6 +311,35 @@ td {
   overflow-wrap: anywhere;
 }
 
+.actions-head,
+.actions-td {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.actions-cell {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.row-action {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 0.82rem;
+}
+
+.row-action.danger {
+  border-color: #d7b7b7;
+  color: #8a1f1f;
+}
+
+.row-action.danger:hover {
+  border-color: #b45a5a;
+  background: #fff7f7;
+}
+
 th {
   position: sticky;
   top: 0;
@@ -619,12 +648,6 @@ tr.selectable:focus-within td {
 .chip.warn {
   border-color: #e0b66a;
   background: #fff7df;
-}
-
-.row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .kv {

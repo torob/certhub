@@ -9,6 +9,7 @@ import {
   KeyRound,
   Lock,
   LogOut,
+  Plus,
   Settings,
   RefreshCw,
   ServerCog,
@@ -832,8 +833,7 @@ function ApplicationDetailPage(props: PageProps) {
     activeTab === "scopes" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Domain scopes")),
       canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh(refresh + 1)) }) : null,
-      table(scopes, ["value", "kind", "created_at"]),
-      canManage ? rowActions(scopes, (scope) => createElement("button", { key: scope.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)) }, `Delete ${scope.value}`)) : null
+      table(scopes, ["value", "kind", "created_at", canManage ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),
@@ -850,14 +850,12 @@ function ApplicationDetailPage(props: PageProps) {
         createElement("code", null, tokenValue),
         createElement("button", { onClick: () => setTokenValue("") }, "Clear")
       ) : null,
-      table(tokens, ["name", "status", "expires_at", "last_used_at"]),
-      canManage ? rowActions(tokens, (token) => createElement("button", { key: token.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)) }, `Revoke ${token.name}`)) : null
+      table(tokens, ["name", "status", "expires_at", "last_used_at", canManage ? actionsColumn((token) => rowAction("Revoke", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Revoke ${token.name}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "access" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Access")),
       canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null,
-      table(grants, [{ key: "user", render: (grant) => userLabel(grant.user) || "User not visible" }, "role", "created_at"]),
-      canManage ? rowActions(grants, (grant) => createElement("button", { key: grant.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)) }, `Remove ${userLabel(grant.user) || "user"}`)) : null
+      table(grants, [{ key: "user", render: (grant: any) => userLabel(grant.user) || "User not visible" }, "role", "created_at", canManage ? actionsColumn((grant) => rowAction("Remove", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Remove ${userLabel(grant.user) || "user"}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "certificates" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" },
@@ -1109,11 +1107,9 @@ function DNSDetailPage(props: PageProps) {
     createElement("div", { className: "toolbar" }, createElement("button", { onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones/refresh`, {}, () => setRefresh(refresh + 1)) }, createElement(RefreshCw, { size: 16 }), "Refresh zones")),
     provider.zone_mode === "manual" ? createElement(GenericCreate, { title: "Add zone", fields: ["zone_name"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, body, () => setRefresh(refresh + 1)) }) : null,
     createElement("h2", null, "Zones"),
-    table(zones, ["zone_name", "created_at"]),
-    provider.zone_mode === "manual" ? rowActions(zones, (zone) => createElement("button", { key: zone.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh(refresh + 1)) }, `Delete ${zone.zone_name}`)) : null,
+    table(zones, ["zone_name", "created_at", provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Delete ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[]),
     createElement("h2", null, "Discovered zones"),
-    table(discovered, ["zone_name", "already_configured", { key: "conflict_dns_provider", render: (zone) => dnsProviderLabel(providerByID.get(zone.conflict_dns_provider_id)) || (zone.conflict_dns_provider_id ? "Configured by another provider" : "") }]),
-    provider.zone_mode === "manual" ? rowActions(discovered, (zone) => createElement("button", { key: zone.zone_name, disabled: zone.already_configured, onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh(refresh + 1)) }, `Add ${zone.zone_name}`)) : null
+    table(discovered, ["zone_name", "already_configured", { key: "conflict_dns_provider", render: (zone: any) => dnsProviderLabel(providerByID.get(zone.conflict_dns_provider_id)) || (zone.conflict_dns_provider_id ? "Configured by another provider" : "") }, provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Add", () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh(refresh + 1)), { icon: Plus, disabled: zone.already_configured, label: `Add ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[])
   );
 }
 
@@ -1562,8 +1558,8 @@ function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, col
   return createElement("div", { className: "table-wrap" },
     meta ? createElement("div", { className: "table-meta" }, `Showing ${shown} of ${meta.total ?? shown}`) : null,
     createElement("table", null,
-      createElement("thead", null, createElement("tr", null, specs.map((c) => createElement("th", { key: c.key }, c.label)))),
-      createElement("tbody", null, rows.map((row: any) => createElement("tr", { key: row.id || JSON.stringify(row), onClick: () => onSelect?.(row), className: onSelect ? "selectable" : "" }, specs.map((c) => createElement("td", { key: c.key }, c.render ? c.render(row) : cell(row[c.key]))))))
+      createElement("thead", null, createElement("tr", null, specs.map((c) => createElement("th", { key: c.key, className: c.key === "actions" ? "actions-head" : "" }, c.label)))),
+      createElement("tbody", null, rows.map((row: any) => createElement("tr", { key: row.id || JSON.stringify(row), onClick: () => onSelect?.(row), className: onSelect ? "selectable" : "" }, specs.map((c) => createElement("td", { key: c.key, className: c.key === "actions" ? "actions-td" : "" }, c.render ? c.render(row) : cell(row[c.key]))))))
     )
   );
 }
@@ -1587,10 +1583,24 @@ function countText(result: { data?: { pagination?: PageMeta }; loading?: boolean
   return String(pageTotal(result, 0));
 }
 
-function rowActions(result: { data?: any }, render: (row: any) => unknown) {
-  const rows = rowsOf(result);
-  if (!rows.length) return null;
-  return createElement("div", { className: "row-actions" }, rows.map(render));
+function actionsColumn(render: (row: any) => unknown): TableColumn {
+  return { key: "actions", label: "Actions", render: (row) => createElement("div", { className: "actions-cell" }, render(row)) };
+}
+
+function rowAction(label: string, onClick: () => void, options: { icon?: any; danger?: boolean; disabled?: boolean; label?: string } = {}) {
+  const Icon = options.icon;
+  const accessibleLabel = options.label || label;
+  return createElement("button", {
+    type: "button",
+    className: options.danger ? "row-action danger" : "row-action",
+    disabled: options.disabled,
+    title: accessibleLabel,
+    "aria-label": accessibleLabel,
+    onClick: (event: any) => {
+      event.stopPropagation();
+      onClick();
+    }
+  }, Icon ? createElement(Icon, { size: 14 }) : null, label);
 }
 
 function input(label: string, value: string, onChange: (v: string) => void, type = "text") {
