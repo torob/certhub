@@ -338,6 +338,46 @@ tr.selectable:focus-within td {
   gap: 8px;
 }
 
+.application-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #cfd8df;
+}
+
+.tab {
+  min-height: 38px;
+  padding-inline: 12px;
+  border-color: transparent;
+  border-bottom-color: transparent;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: #46545e;
+}
+
+.tab:hover {
+  border-color: #c5d1d9;
+  border-bottom-color: transparent;
+}
+
+.tab.active {
+  border-color: #c5d1d9;
+  border-bottom-color: #eef1f4;
+  background: #eef1f4;
+  color: #172026;
+  font-weight: 700;
+}
+
+.tab-panel {
+  display: grid;
+  gap: 12px;
+}
+
 .form-actions {
   justify-content: flex-start;
 }

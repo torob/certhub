@@ -76,6 +76,7 @@ const nav = [
 ] as const;
 type NavID = (typeof nav)[number][0];
 type ResourceType = "certificate" | "application" | "user" | "issuer" | "dns";
+type ApplicationTab = "overview" | "scopes" | "tokens" | "access" | "certificates" | "audit";
 type RouteState = {
   page: NavID;
   create?: "certificate" | "application" | "user" | "issuer" | "dns";
@@ -96,6 +97,14 @@ const navPaths: Record<NavID, string> = {
   dns: "/dns-providers",
   audit: "/audit"
 };
+const applicationTabs: { id: ApplicationTab; label: string; managerOnly?: boolean }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "scopes", label: "Domain scopes", managerOnly: true },
+  { id: "tokens", label: "Tokens", managerOnly: true },
+  { id: "access", label: "Access", managerOnly: true },
+  { id: "certificates", label: "Certificates" },
+  { id: "audit", label: "Audit" }
+];
 
 function parseRoute(): RouteState {
   const url = new URL(window.location.href);
@@ -780,68 +789,96 @@ function ApplicationDetailPage(props: PageProps) {
   const base = `/v1/applications/${id}`;
   const [refresh, setRefresh] = useState(0);
   const [tokenValue, setTokenValue] = useState("");
+  const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
+  const app = detail.data?.application || {};
+  const reserved = app.system_kind === "certhub_server" || app.name === "certhub_server";
+  const canManage = !reserved && canManageApplication(app, props.session);
+  const appLoaded = Boolean(detail.data?.application);
+  const rawTab = props.route.query.get("tab") || "overview";
+  const requestedTab = applicationTab(rawTab);
+  const activeTab = appLoaded && isManagerApplicationTab(requestedTab) && !canManage ? "overview" : requestedTab;
+  const visibleTabs = applicationTabs.filter((tab) => !tab.managerOnly || !appLoaded || canManage);
+  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, activeTab === "scopes" && canManage ? `${base}/domain-scopes?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const tokens = useAsync<{ tokens: any[] }>(props.session, activeTab === "tokens" && canManage ? `${base}/tokens?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const grants = useAsync<{ grants: any[] }>(props.session, activeTab === "access" && canManage ? `${base}/users?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const certs = useAsync<{ certificates: any[] }>(props.session, activeTab === "certificates" ? `/v1/certificates?application=${encodeURIComponent(id)}&limit=100` : "", [id, refresh, activeTab]);
+  const events = useAsync<{ audit_events: any[] }>(props.session, activeTab === "audit" ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh, activeTab]);
   useEffect(() => {
     setTokenValue("");
   }, [id]);
-  const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
-  const app = detail.data?.application || {};
-  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, id ? `${base}/domain-scopes?limit=100` : "", [id, refresh]);
-  const tokens = useAsync<{ tokens: any[] }>(props.session, id ? `${base}/tokens?limit=100` : "", [id, refresh]);
-  const grants = useAsync<{ grants: any[] }>(props.session, id ? `${base}/users?limit=100` : "", [id, refresh]);
-  const certs = useAsync<{ certificates: any[] }>(props.session, id ? `/v1/certificates?application=${encodeURIComponent(id)}&limit=100` : "", [id, refresh]);
-  const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh]);
-  const reserved = app.system_kind === "certhub_server" || app.name === "certhub_server";
-  const canManage = !reserved && canManageApplication(app, props.session);
+  useEffect(() => {
+    if (activeTab !== "tokens") setTokenValue("");
+  }, [activeTab]);
+  useEffect(() => {
+    if (!id || !appLoaded || rawTab === activeTab) return;
+    props.navigate(applicationTabPath(id, activeTab), true);
+  }, [id, appLoaded, rawTab, activeTab]);
+  const overview = createElement("section", { className: "detail" },
+    createElement("h2", null, appLabel(app)),
+    reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
+    kv("Status", app.status),
+    kv("Current user role", app.current_user_role),
+    kv("Description", app.description || ""),
+    kv("Trusted CIDRs", (app.trusted_source_cidrs || []).join(", ") || "none"),
+    kv("Domain scopes", app.domain_scope_count),
+    kv("Tokens", app.token_count),
+    kv("Certificates", app.certificate_count),
+    kv("Created at", app.created_at),
+    kv("Updated at", app.updated_at),
+    technicalDetails("Technical details", [["Application ID", app.id]])
+  );
+  const tabContent =
+    activeTab === "overview" ? overview :
+    activeTab === "scopes" ? createElement("section", { className: "tab-panel" },
+      createElement("div", { className: "section-head" }, createElement("h2", null, "Domain scopes")),
+      canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh(refresh + 1)) }) : null,
+      table(scopes, ["value", "kind", "created_at"]),
+      canManage ? rowActions(scopes, (scope) => createElement("button", { key: scope.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)) }, `Delete ${scope.value}`)) : null
+    ) :
+    activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
+      createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),
+      canManage ? createElement(GenericCreate, { title: "Create token", fields: ["name", "expires_at"], onSubmit: (body: Record<string, string>) => {
+        setTokenValue("");
+        api<any>(`${base}/tokens`, props.session, { method: "POST", body: JSON.stringify(tokenCreateBody(body)) }).then((r) => {
+          if (!r.error && r.data?.token_value) setTokenValue(r.data.token_value);
+          props.setNotice(errorOrOK(r));
+          setRefresh(refresh + 1);
+        });
+      } }) : null,
+      tokenValue ? createElement("div", { className: "secret-once" },
+        createElement("strong", null, "Raw token value, shown once"),
+        createElement("code", null, tokenValue),
+        createElement("button", { onClick: () => setTokenValue("") }, "Clear")
+      ) : null,
+      table(tokens, ["name", "status", "expires_at", "last_used_at"]),
+      canManage ? rowActions(tokens, (token) => createElement("button", { key: token.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)) }, `Revoke ${token.name}`)) : null
+    ) :
+    activeTab === "access" ? createElement("section", { className: "tab-panel" },
+      createElement("div", { className: "section-head" }, createElement("h2", null, "Access")),
+      canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null,
+      table(grants, [{ key: "user", render: (grant) => userLabel(grant.user) || "User not visible" }, "role", "created_at"]),
+      canManage ? rowActions(grants, (grant) => createElement("button", { key: grant.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)) }, `Remove ${userLabel(grant.user) || "user"}`)) : null
+    ) :
+    activeTab === "certificates" ? createElement("section", { className: "tab-panel" },
+      createElement("div", { className: "section-head" },
+        createElement("h2", null, "Certificates"),
+        canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/certificates/new?application_id=${encodeURIComponent(app.id)}`) }, createElement(BadgeCheck, { size: 16 }), "Create Certificate") : null
+      ),
+      table(certs, ["status", "normalized_sans", "key_type", "issuer_name", "updated_at"], (cert) => props.navigate(`/certificates/${cert.id}`))
+    ) :
+    createElement("section", { className: "tab-panel" },
+      createElement("div", { className: "section-head" }, createElement("h2", null, "Audit events")),
+      table(events, auditColumns({ application: app }))
+    );
   return pageFrame(app.name || "Application",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
       canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/applications/${id}/edit`) }, "Edit") : null
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
-      createElement("h2", null, appLabel(app)),
-      reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
-      kv("Status", app.status),
-      kv("Current user role", app.current_user_role),
-      kv("Description", app.description || ""),
-      kv("Trusted CIDRs", (app.trusted_source_cidrs || []).join(", ") || "none"),
-      kv("Domain scopes", app.domain_scope_count),
-      kv("Tokens", app.token_count),
-      kv("Certificates", app.certificate_count),
-      kv("Created at", app.created_at),
-      kv("Updated at", app.updated_at),
-      technicalDetails("Technical details", [["Application ID", app.id]])
-    ),
-    createElement("h2", null, "Domain scopes"),
-    canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh(refresh + 1)) }) : null,
-    table(scopes, ["value", "kind", "created_at"]),
-    canManage ? rowActions(scopes, (scope) => createElement("button", { key: scope.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)) }, `Delete ${scope.value}`)) : null,
-    createElement("h2", null, "Tokens"),
-    canManage ? createElement(GenericCreate, { title: "Create token", fields: ["name", "expires_at"], onSubmit: (body: Record<string, string>) => {
-      setTokenValue("");
-        api<any>(`${base}/tokens`, props.session, { method: "POST", body: JSON.stringify(tokenCreateBody(body)) }).then((r) => {
-      if (!r.error && r.data?.token_value) setTokenValue(r.data.token_value);
-      props.setNotice(errorOrOK(r));
-      setRefresh(refresh + 1);
-    });
-    } }) : null,
-    tokenValue ? createElement("div", { className: "secret-once" },
-      createElement("strong", null, "Raw token value, shown once"),
-      createElement("code", null, tokenValue),
-      createElement("button", { onClick: () => setTokenValue("") }, "Clear")
-    ) : null,
-    table(tokens, ["name", "status", "expires_at", "last_used_at"]),
-    canManage ? rowActions(tokens, (token) => createElement("button", { key: token.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)) }, `Revoke ${token.name}`)) : null,
-    createElement("h2", null, "Grants"),
-    canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null,
-    table(grants, [{ key: "user", render: (grant) => userLabel(grant.user) || "User not visible" }, "role", "created_at"]),
-    canManage ? rowActions(grants, (grant) => createElement("button", { key: grant.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)) }, `Remove ${userLabel(grant.user) || "user"}`)) : null,
-    createElement("div", { className: "section-head" },
-      createElement("h2", null, "Certificates"),
-      canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/certificates/new?application_id=${encodeURIComponent(app.id)}`) }, createElement(BadgeCheck, { size: 16 }), "Create Certificate") : null
-    ),
-    table(certs, ["status", "normalized_sans", "key_type", "issuer_name", "updated_at"], (cert) => props.navigate(`/certificates/${cert.id}`)),
-    createElement("h2", null, "Audit events"),
-    table(events, auditColumns({ application: app }))
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("div", { className: "application-detail" },
+      createElement(ApplicationTabs, { appID: id, activeTab, tabs: visibleTabs, navigate: props.navigate }),
+      tabContent
+    )
   );
 }
 
@@ -1488,6 +1525,31 @@ function forbiddenPage(title: string) {
 
 function resourceID(props: PageProps) {
   return props.route.id || "";
+}
+
+function applicationTab(raw: string): ApplicationTab {
+  return applicationTabs.some((tab) => tab.id === raw) ? raw as ApplicationTab : "overview";
+}
+
+function isManagerApplicationTab(tab: ApplicationTab) {
+  return applicationTabs.some((item) => item.id === tab && item.managerOnly);
+}
+
+function applicationTabPath(appID: string, tab: ApplicationTab) {
+  return tab === "overview" ? `/applications/${appID}` : `/applications/${appID}?tab=${tab}`;
+}
+
+function ApplicationTabs(props: { appID: string; activeTab: ApplicationTab; tabs: { id: ApplicationTab; label: string }[]; navigate: (path: string, replace?: boolean) => void }) {
+  return createElement("div", { className: "tabs", role: "tablist", "aria-label": "Application sections" },
+    props.tabs.map((tab) => createElement("button", {
+      key: tab.id,
+      type: "button",
+      role: "tab",
+      className: tab.id === props.activeTab ? "tab active" : "tab",
+      "aria-selected": tab.id === props.activeTab,
+      onClick: () => props.navigate(applicationTabPath(props.appID, tab.id))
+    }, tab.label))
+  );
 }
 
 function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, columns: TableColumn[], onSelect?: (row: any) => void) {
