@@ -52,6 +52,8 @@ func TestUserEndpointRejectsApplicationTokenByPrefix(t *testing.T) {
 
 func TestAuthMeWithUserAccessToken(t *testing.T) {
 	user := fakeUser()
+	user.PasswordHash = ptrString("hashed-password")
+	user.Password2FAEnabled = true
 	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
 	repo := &identityFakeAuthRepo{session: auth.Session{
 		ID:              "22345678-1234-4234-9234-123456789abc",
@@ -86,6 +88,59 @@ func TestAuthMeWithUserAccessToken(t *testing.T) {
 	}
 	if body["identity_type"] != "user" || strings.Contains(rec.Body.String(), "password_hash") || strings.Contains(rec.Body.String(), token) {
 		t.Fatalf("body = %s", rec.Body.String())
+	}
+	identity, ok := body["identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("identity missing from body: %#v", body)
+	}
+	if identity["password_login_enabled"] != true || identity["password_2fa_enabled"] != true || identity["password_2fa_disable_allowed"] != false {
+		t.Fatalf("unexpected password capability flags: %#v", identity)
+	}
+}
+
+func TestAuthMePassword2FADisableAllowedReflectsPolicy(t *testing.T) {
+	user := fakeUser()
+	user.PasswordHash = ptrString("hashed-password")
+	user.Password2FAEnabled = true
+	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
+	cfg := testConfig(t, `
+auth:
+  password:
+    2fa_required: false
+`)
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
+			ID:              "22345678-1234-4234-9234-123456789abc",
+			UserID:          user.ID,
+			AuthMethod:      auth.AuthMethodPassword,
+			AccessTokenHash: testKeySet(t).HashToken(token),
+			Status:          auth.SessionStatusActive,
+			AccessExpiresAt: time.Now().Add(time.Minute),
+		}},
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          testKeySet(t),
+		Config:          cfg.Auth,
+	})
+	handler := New(cfg, WithIdentityServices(authSvc, nil)).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Identity struct {
+			Password2FADisableAllowed bool `json:"password_2fa_disable_allowed"`
+		} `json:"identity"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Identity.Password2FADisableAllowed {
+		t.Fatalf("password_2fa_disable_allowed was false: %s", rec.Body.String())
 	}
 }
 

@@ -1234,6 +1234,12 @@ export interface components {
             id: string;
             email: components["schemas"]["Email"];
             display_name?: components["schemas"]["HumanName"];
+            /** @description True when this User has password login configured. */
+            password_login_enabled: boolean;
+            /** @description True when password login currently requires TOTP for this User. */
+            password_2fa_enabled: boolean;
+            /** @description True when the current instance policy allows this User to disable password 2FA from their profile. */
+            password_2fa_disable_allowed: boolean;
             global_role: components["schemas"]["GlobalRole"];
             status: components["schemas"]["UserStatus"];
         };

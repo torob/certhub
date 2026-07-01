@@ -140,6 +140,8 @@ Rules:
 - OIDC login does not require Certhub-native 2FA and must not ask for a TOTP code.
 - The login screen must show the OIDC sign-in control only when the same-origin runtime frontend config indicates OIDC login is enabled.
 - The frontend must support TOTP setup, confirmation, and disable flows through `/v1/auth/password-2fa/*`.
+- Profile/Security must show password-2FA configuration only for logged-in Users with password login enabled. Passwordless Users and Application identities must not see password-2FA controls.
+- When password 2FA is enabled but cannot be disabled because instance policy requires it, Profile/Security must omit the disable form and show a message explaining that password 2FA is required by instance policy.
 - OIDC must use Certhub's backend-managed PKCE flow. The frontend must not implement implicit flow, hybrid flow, or direct provider token exchange.
 - The frontend must never handle an OIDC client secret.
 - The frontend must not store provider access tokens, ID tokens, authorization codes, OIDC handoff IDs, or PKCE code verifiers in persistent browser storage.
@@ -704,6 +706,7 @@ Required frontend scenarios:
 - Backend validation errors still render correctly when server-side validation rejects an input the frontend allowed.
 - Login supports password and conditionally enabled OIDC modes and handles `invalid_credentials`, `password_auth_disabled`, and `user_not_provisioned`.
 - Password login supports TOTP 2FA and handles `password_2fa_required` and `invalid_2fa_code`; OIDC login does not show TOTP prompts.
+- Profile/Security conditionally shows password-2FA setup, disable, or required-by-policy status from `/v1/auth/me` identity capability fields.
 - OIDC login uses Authorization Code with PKCE only and never uses implicit flow or client secrets.
 - Login stores access and refresh tokens only in `sessionStorage`; refresh rotates both values; logout clears them.
 - Access tokens, refresh tokens, and OIDC authorization codes are never written to URLs, `localStorage`, `IndexedDB`, cookies, persisted React Query caches, telemetry payloads, or browser console output.

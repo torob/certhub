@@ -3439,7 +3439,7 @@ components:
     UserIdentity:
       type: object
       additionalProperties: false
-      required: [id, email, global_role, status]
+      required: [id, email, password_login_enabled, password_2fa_enabled, password_2fa_disable_allowed, global_role, status]
       properties:
         id:
           type: string
@@ -3448,6 +3448,15 @@ components:
           $ref: '#/components/schemas/Email'
         display_name:
           $ref: '#/components/schemas/HumanName'
+        password_login_enabled:
+          type: boolean
+          description: True when this User has password login configured.
+        password_2fa_enabled:
+          type: boolean
+          description: True when password login currently requires TOTP for this User.
+        password_2fa_disable_allowed:
+          type: boolean
+          description: True when the current instance policy allows this User to disable password 2FA from their profile.
         global_role:
           $ref: '#/components/schemas/GlobalRole'
         status:
@@ -4642,6 +4651,9 @@ components:
           id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d50
           email: user@example.com
           display_name: User Name
+          password_login_enabled: true
+          password_2fa_enabled: true
+          password_2fa_disable_allowed: false
           global_role: user
           status: active
     CertificateResponse:

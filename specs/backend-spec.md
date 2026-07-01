@@ -1426,7 +1426,7 @@ Summary: Return the authenticated User or Application identity.
 Description and notes:
 
 - Used by web clients to determine the current User identity and available actions. Application-token clients may use it to verify the authenticated Application when needed.
-- User responses include global role and may include display name.
+- User responses include global role, password-login availability, password-2FA status, whether password 2FA may be disabled by the current User under instance policy, and may include display name.
 - Application responses identify the Application and do not include User grant data.
 
 ```http

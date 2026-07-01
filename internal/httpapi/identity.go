@@ -325,11 +325,14 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request, reqctx Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"identity_type": "user",
 		"identity": map[string]any{
-			"id":           current.User.ID,
-			"email":        current.User.Email,
-			"display_name": current.User.DisplayName,
-			"global_role":  string(current.User.GlobalRole),
-			"status":       string(current.User.Status),
+			"id":                           current.User.ID,
+			"email":                        current.User.Email,
+			"display_name":                 current.User.DisplayName,
+			"password_login_enabled":       current.User.PasswordHash != nil,
+			"password_2fa_enabled":         current.User.Password2FAEnabled,
+			"password_2fa_disable_allowed": current.User.PasswordHash == nil || !s.cfg.Auth.Password.TwoFARequired,
+			"global_role":                  string(current.User.GlobalRole),
+			"status":                       string(current.User.Status),
 		},
 	})
 	return http.StatusOK, ""

@@ -378,6 +378,21 @@ function AppShell() {
     }
     setRoute(parseRoute());
   };
+  const refreshIdentity = async () => {
+    if (!session?.accessToken) return false;
+    const result = await api<{ identity: Identity }>("/v1/auth/me", session);
+    if (result.data?.identity) {
+      const next = { ...session, identity: result.data.identity };
+      saveSession(next);
+      setSession(next);
+      return true;
+    }
+    if (result.status === 401 || result.status === 403) {
+      saveSession(undefined);
+      setSession(undefined);
+    }
+    return false;
+  };
 
   useEffect(() => {
     const listener = () => setSession(undefined);
@@ -419,17 +434,7 @@ function AppShell() {
 
   useEffect(() => {
     if (!session?.accessToken) return;
-    api<{ identity: Identity }>("/v1/auth/me", session).then((result) => {
-      if (result.data?.identity) {
-        const next = { ...session, identity: result.data.identity };
-        saveSession(next);
-        setSession(next);
-      }
-      if (result.status === 401 || result.status === 403) {
-        saveSession(undefined);
-        setSession(undefined);
-      }
-    });
+    void refreshIdentity();
   }, [session?.accessToken]);
 
   useEffect(() => {
@@ -521,7 +526,7 @@ function AppShell() {
         createElement("span", null, "Logout")
       )
     ),
-    createElement("main", { className: "workspace" }, createElement(Page, { session, setNotice, navigate, route })),
+    createElement("main", { className: "workspace" }, createElement(Page, { session, setNotice, navigate, route, refreshIdentity })),
     notices.length ? createElement(ToastStack, { notices, onDismiss: dismissNotice }) : null
   );
 }
@@ -580,11 +585,14 @@ function ToastStack(props: { notices: ToastNotice[]; onDismiss: (id: number) => 
 
 function ProfilePage(props: PageProps) {
   const identity = props.session.identity as any;
+  const identityKnown = Boolean(identity?.id);
   const isUser = Boolean(identity?.email);
+  const passwordCapabilityKnown = identityKnown && (!isUser || Object.prototype.hasOwnProperty.call(identity || {}, "password_login_enabled"));
+  const hasPasswordLogin = isUser && identity?.password_login_enabled === true;
   const rawTab = props.route.query.get("tab") || "overview";
   const requestedTab = profileTab(rawTab);
-  const activeTab = requestedTab === "security" && !isUser ? "overview" : requestedTab;
-  const visibleTabs = profileTabs.filter((tab) => !tab.userOnly || isUser);
+  const activeTab = requestedTab === "security" && passwordCapabilityKnown && !hasPasswordLogin ? "overview" : requestedTab;
+  const visibleTabs = profileTabs.filter((tab) => !tab.userOnly || hasPasswordLogin || !identityKnown || (isUser && !passwordCapabilityKnown));
   useEffect(() => {
     if (rawTab === activeTab) return;
     props.navigate(profileTabPath(activeTab), true);
@@ -600,7 +608,7 @@ function ProfilePage(props: PageProps) {
     technicalDetails("Technical details", [["Identity ID", identity?.id]])
   );
   const tabContent = activeTab === "security" && isUser ?
-    createElement(Password2FASection, { session: props.session, setNotice: props.setNotice }) :
+    createElement(Password2FASection, { session: props.session, setNotice: props.setNotice, refreshIdentity: props.refreshIdentity }) :
     overview;
   return pageFrame(
     identityText(props.session.identity) || "Profile",
@@ -612,12 +620,16 @@ function ProfilePage(props: PageProps) {
   );
 }
 
-function Password2FASection(props: { session: Session; setNotice: (s: string) => void }) {
+function Password2FASection(props: { session: Session; setNotice: (s: string) => void; refreshIdentity: () => Promise<boolean> }) {
+  const identity = props.session.identity as any;
+  const password2FAEnabled = identity?.password_2fa_enabled === true;
+  const disableAllowed = identity?.password_2fa_disable_allowed === true;
   const [provisioning, setProvisioning] = useState<any>(undefined);
   const [totp, setTotp] = useState("");
   const [password, setPassword] = useState("");
   return createElement("section", { className: "security-panel" },
     createElement("h2", null, "Password 2FA"),
+    kv("Status", password2FAEnabled ? "enabled" : "not configured"),
     provisioning ? createElement("div", { className: "secret-once" },
       kv("Issuer", provisioning.issuer),
       kv("Account", provisioning.account_label),
@@ -625,7 +637,7 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
       kv("Provisioning URI", provisioning.provisioning_uri)
     ) : null,
     createElement("div", { className: "split-grid" },
-      createElement("section", { className: "form-section" },
+      !password2FAEnabled ? createElement("section", { className: "form-section" },
         createElement("h3", null, "Set up"),
         provisioning ? input("TOTP code", totp, setTotp) : null,
         provisioning ? createElement("button", {
@@ -636,6 +648,7 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
             if (!result.error) {
               setProvisioning(undefined);
               setTotp("");
+              await props.refreshIdentity();
             }
           }
         }, "Confirm") : createElement("button", {
@@ -647,8 +660,8 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
             } else props.setNotice(errorText(result));
           }
         }, "Set up")
-      ),
-      createElement("section", { className: "form-section" },
+      ) : null,
+      password2FAEnabled && disableAllowed ? createElement("section", { className: "form-section" },
         createElement("h3", null, "Disable"),
         input("Password", password, setPassword, "password"),
         input("TOTP code", totp, setTotp),
@@ -660,10 +673,15 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
               setProvisioning(undefined);
               setTotp("");
               setPassword("");
+              await props.refreshIdentity();
             }
           }
         }, "Disable")
-      )
+      ) : null,
+      password2FAEnabled && !disableAllowed ? createElement("section", { className: "form-section" },
+        createElement("h3", null, "Required by policy"),
+        createElement("p", { className: "note" }, "Password 2FA is required by instance policy and cannot be disabled from your profile.")
+      ) : null
     )
   );
 }
@@ -1444,7 +1462,7 @@ function DNSCreatePage(props: PageProps) {
   );
 }
 
-type PageProps = { session: Session; setNotice: (s: string) => void; navigate: (path: string, replace?: boolean) => void; route: RouteState };
+type PageProps = { session: Session; setNotice: (s: string) => void; navigate: (path: string, replace?: boolean) => void; route: RouteState; refreshIdentity: () => Promise<boolean> };
 
 function GenericCreate(props: { title: string; fields: string[]; onSubmit: (body: Record<string, string>) => void }) {
   const initial = useMemo(() => Object.fromEntries(props.fields.map((f) => [f, ""])), [props.fields.join("|")]);
