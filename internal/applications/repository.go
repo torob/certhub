@@ -57,6 +57,7 @@ type Application struct {
 	DomainScopeCount       int64
 	TokenCount             int64
 	UserGrantCount         int64
+	CertificateCount       int64
 	TrustedSourceCIDRCount int64
 }
 
@@ -831,6 +832,7 @@ func applicationSelectColumnsSQL() string {
     (select count(*) from application_domain_scopes where application_id = a.id)::bigint,
     (select count(*) from application_tokens where application_id = a.id)::bigint,
     (select count(*) from application_user_grants where application_id = a.id)::bigint,
+    (select count(*) from certificates where application_id = a.id and deleted_at is null)::bigint,
     cardinality(a.trusted_source_cidrs)::bigint`
 }
 
@@ -841,6 +843,7 @@ func applicationReturningSQL() string {
     (select count(*) from application_domain_scopes where application_id = applications.id)::bigint,
     (select count(*) from application_tokens where application_id = applications.id)::bigint,
     (select count(*) from application_user_grants where application_id = applications.id)::bigint,
+    (select count(*) from certificates where application_id = applications.id and deleted_at is null)::bigint,
     cardinality(trusted_source_cidrs)::bigint`
 }
 
@@ -874,6 +877,7 @@ func scanApplication(row scanner) (Application, error) {
 		&app.DomainScopeCount,
 		&app.TokenCount,
 		&app.UserGrantCount,
+		&app.CertificateCount,
 		&app.TrustedSourceCIDRCount,
 	); err != nil {
 		return Application{}, err
@@ -942,6 +946,7 @@ func scanTokenIdentity(row scanner) (ApplicationToken, Application, error) {
 		&app.DomainScopeCount,
 		&app.TokenCount,
 		&app.UserGrantCount,
+		&app.CertificateCount,
 		&app.TrustedSourceCIDRCount,
 	); err != nil {
 		return ApplicationToken{}, Application{}, err

@@ -277,6 +277,13 @@ textarea {
   background: #fff;
 }
 
+.table-meta {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e4e9ed;
+  color: #4d5b65;
+  font-size: 0.8rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

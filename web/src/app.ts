@@ -37,6 +37,11 @@ type APIResult<T> = {
   requestID: string;
   retryAfter?: number;
 };
+type PageMeta = {
+  limit?: number;
+  offset?: number;
+  total?: number;
+};
 type ToastNotice = {
   id: number;
   message: string;
@@ -565,17 +570,27 @@ function AccountSecurity(props: { session: Session; setNotice: (s: string) => vo
 
 function HomePage(props: PageProps) {
   const ready = useAsync<{ ready: boolean; checks: { name: string; status: string }[] }>(props.session, "/readyz", []);
-  const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", []);
-  const certificates = useAsync<{ certificates: any[] }>(props.session, "/v1/certificates?limit=100", []);
-  const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
-  const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
+  const applications = useAsync<{ applications: any[]; pagination?: PageMeta }>(props.session, "/v1/applications?limit=100", []);
+  const certificates = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=100", []);
+  const pendingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=pending", []);
+  const validatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=validating_dns", []);
+  const issuingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=issuing", []);
+  const renewingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=renewing", []);
+  const rotatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=rotating_key", []);
+  const failedCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=failed", []);
+  const expiresBefore = useMemo(() => new Date(Date.now() + 30 * 86400 * 1000).toISOString(), []);
+  const expiringCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, `/v1/certificates?limit=1&expires_before=${encodeURIComponent(expiresBefore)}`, [expiresBefore]);
+  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=1&status=active" : "", []);
+  const providers = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=100", []);
+  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/dns-providers?limit=1&status=active" : "", []);
   const firstProvider = rowsOf(providers)[0];
-  const zones = useAsync<{ zones: any[] }>(props.session, isAdmin(props.session) && firstProvider ? `/v1/dns-providers/${firstProvider.id}/zones?limit=100` : "", [firstProvider?.id]);
+  const zones = useAsync<{ zones: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) && firstProvider ? `/v1/dns-providers/${firstProvider.id}/zones?limit=100` : "", [firstProvider?.id]);
   const apps = rowsOf(applications).filter((app) => app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const manageableApps = apps.filter((app) => canManageApplication(app, props.session));
   const certs = rowsOf(certificates);
-  const issuing = certs.filter((cert) => ["pending", "validating_dns", "issuing", "renewing", "rotating_key"].includes(cert.status));
-  const expiring = certs.filter((cert) => cert.latest_version?.not_after && Date.parse(cert.latest_version.not_after) < Date.now() + 30 * 86400 * 1000);
+  const inProgressCounts = [pendingCerts, validatingCerts, issuingCerts, renewingCerts, rotatingCerts];
+  const inProgress = inProgressCounts.some((result) => result.loading) ? "Loading" : String(inProgressCounts.reduce((sum, result) => sum + pageTotal(result, 0), 0));
+  const setup = activeIssuerCount.loading || activeProviderCount.loading || zones.loading ? "Loading" : setupStatusFromCounts(pageTotal(activeIssuerCount, 0), pageTotal(activeProviderCount, 0), firstProvider ? pageTotal(zones, 0) : 0);
   return pageFrame(
     "Home",
     createElement("div", { className: "toolbar" },
@@ -585,20 +600,20 @@ function HomePage(props: PageProps) {
     ),
     createElement("section", { className: "dashboard-grid" },
       readinessCard("Service", ready.loading ? "Loading" : ready.data?.ready ? "Ready" : "Attention", ready.data?.checks?.map((check) => `${check.name}: ${check.status}`) || (ready.error ? [errorText(ready)] : [])),
-      readinessCard("Applications", String(apps.length), [
-        `${manageableApps.length} manageable`,
-        `${apps.reduce((sum, app) => sum + Number(app.domain_scope_count || 0), 0)} domain scopes`,
-        `${apps.reduce((sum, app) => sum + Number(app.certificate_count || 0), 0)} certificates`
+      readinessCard("Applications", countText(applications), [
+        `${manageableApps.length} manageable shown`,
+        `${apps.reduce((sum, app) => sum + Number(app.domain_scope_count || 0), 0)} domain scopes shown`,
+        `${apps.reduce((sum, app) => sum + Number(app.certificate_count || 0), 0)} certificates shown`
       ]),
-      readinessCard("Certificates", String(certs.length), [
-        `${issuing.length} in progress`,
-        `${expiring.length} expiring within 30 days`,
-        `${certs.filter((cert) => cert.status === "failed").length} failed`
+      readinessCard("Certificates", countText(certificates), [
+        `${inProgress} in progress`,
+        `${countText(expiringCerts)} expiring within 30 days`,
+        `${countText(failedCerts)} failed`
       ]),
-      isAdmin(props.session) ? readinessCard("Issuance setup", zones.loading ? "Loading" : setupStatus(rowsOf(issuers), rowsOf(providers), rowsOf(zones)), [
-        `${rowsOf(issuers).filter((issuer) => issuer.status === "active").length} active issuers`,
-        `${rowsOf(providers).filter((provider) => provider.status === "active").length} active DNS providers`,
-        firstProvider ? zones.loading ? `loading zones on ${firstProvider.name}` : `${rowsOf(zones).length} zones on ${firstProvider.name}` : "no DNS provider selected"
+      isAdmin(props.session) ? readinessCard("Issuance setup", setup, [
+        `${countText(activeIssuerCount)} active issuers`,
+        `${countText(activeProviderCount)} active DNS providers`,
+        firstProvider ? zones.loading ? `loading zones on ${firstProvider.name}` : `${pageTotal(zones, rowsOf(zones).length)} zones on ${firstProvider.name}` : "no DNS provider selected"
       ]) : readinessCard("Your access", manageableApps.length ? "Can issue" : "View only", manageableApps.map((app) => `${app.name}: ${app.current_user_role}`).slice(0, 4))
     ),
     createElement("section", { className: "detail" },
@@ -1183,7 +1198,9 @@ function IssueCertificateFlow(props: { session: Session; setNotice: (s: string) 
   const locked = Boolean(props.applicationID);
   const appList = useAsync<{ applications: any[] }>(props.session, props.applications ? "" : "/v1/applications?limit=100", []);
   const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
+  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, "/v1/issuers?limit=1&status=active", []);
   const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
+  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=1&status=active", []);
   const [body, setBody] = useState({ application_id: props.applicationID || "", domains: [] as string[], key_type: "ecdsa-p256", issuer: "" });
   const scopePath = body.application_id ? `/v1/applications/${body.application_id}/domain-scopes?limit=100` : "";
   const scopes = useAsync<{ domain_scopes: any[] }>(props.session, scopePath, [body.application_id]);
@@ -1193,7 +1210,6 @@ function IssueCertificateFlow(props: { session: Session; setNotice: (s: string) 
   const scopeValues = rowsOf(scopes).map((scope) => String(scope.value || "").toLowerCase());
   const uncovered = domains.filter((domain) => !scopeValues.some((scope) => domainCoveredByScope(domain, scope)));
   const activeIssuers = rowsOf(issuers).filter((issuer) => issuer.status === "active");
-  const activeProviders = rowsOf(providers).filter((provider) => provider.status === "active");
   const fieldError = validateField("application_id", body.application_id) || listError(domains, "Domains / SANs", "domain") || validateField("key_type", body.key_type);
   const canSubmit = Boolean(body.application_id && domains.length && !fieldError);
   return createElement("form", { className: "inline-form issue-flow", onSubmit: (e: Event) => {
@@ -1219,8 +1235,8 @@ function IssueCertificateFlow(props: { session: Session; setNotice: (s: string) 
       createElement("span", null, selectedApp ? `Application: ${appLabel(selectedApp)}` : "Application: select one"),
       createElement("span", null, scopes.loading ? "Domain scopes: loading" : `${scopeValues.length} domain scopes`),
       createElement("span", { className: uncovered.length ? "warn" : "" }, uncovered.length ? `Uncovered SANs: ${uncovered.join(", ")}` : domains.length ? "Requested SANs appear covered by visible scopes" : "Enter SANs to check scope coverage"),
-      createElement("span", null, issuers.error ? "Issuers: not visible to this user" : `${activeIssuers.length} active issuers`),
-      createElement("span", null, providers.error ? "DNS providers: not visible to this user" : `${activeProviders.length} active DNS providers`)
+      createElement("span", null, issuers.error || activeIssuerCount.error ? "Issuers: not visible to this user" : `${countText(activeIssuerCount)} active issuers`),
+      createElement("span", null, providers.error || activeProviderCount.error ? "DNS providers: not visible to this user" : `${countText(activeProviderCount)} active DNS providers`)
     ),
     domains.length ? createElement("div", { className: "chips" }, domains.map((domain) => createElement("span", { key: domain, className: uncovered.includes(domain) ? "chip warn" : "chip" }, domain))) : null,
     fieldError ? createElement("span", { className: "field-error" }, fieldError) : null,
@@ -1243,15 +1259,34 @@ function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, col
   const rows = rowsOf(result);
   if (result.loading) return createElement("div", { className: "empty" }, "Loading");
   if (result.error) return createElement("div", { className: "error" }, result.error.code, ": ", result.error.message);
-  return createElement("div", { className: "table-wrap" }, createElement("table", null,
-    createElement("thead", null, createElement("tr", null, columns.map((c) => createElement("th", { key: c }, c)))),
-    createElement("tbody", null, rows.map((row: any) => createElement("tr", { key: row.id || JSON.stringify(row), onClick: () => onSelect?.(row), className: onSelect ? "selectable" : "" }, columns.map((c) => createElement("td", { key: c }, cell(row[c]))))))
-  ));
+  const meta = pageMeta(result);
+  const shown = rows.length;
+  return createElement("div", { className: "table-wrap" },
+    meta ? createElement("div", { className: "table-meta" }, `Showing ${shown} of ${meta.total ?? shown}`) : null,
+    createElement("table", null,
+      createElement("thead", null, createElement("tr", null, columns.map((c) => createElement("th", { key: c }, c)))),
+      createElement("tbody", null, rows.map((row: any) => createElement("tr", { key: row.id || JSON.stringify(row), onClick: () => onSelect?.(row), className: onSelect ? "selectable" : "" }, columns.map((c) => createElement("td", { key: c }, cell(row[c]))))))
+    )
+  );
 }
 
 function rowsOf(result: { data?: any }): any[] {
   const key = Object.keys(result.data || {}).find((k) => Array.isArray(result.data[k]));
   return key ? result.data[key] : [];
+}
+
+function pageMeta(result: { data?: { pagination?: PageMeta } }): PageMeta | undefined {
+  return result.data?.pagination;
+}
+
+function pageTotal(result: { data?: { pagination?: PageMeta } }, fallback: number | any[] = rowsOf(result)): number {
+  const total = result.data?.pagination?.total;
+  return typeof total === "number" ? total : Array.isArray(fallback) ? fallback.length : fallback;
+}
+
+function countText(result: { data?: { pagination?: PageMeta }; loading?: boolean }): string {
+  if (result.loading) return "Loading";
+  return String(pageTotal(result, 0));
 }
 
 function rowActions(result: { data?: any }, render: (row: any) => unknown) {
@@ -1367,10 +1402,10 @@ function readinessCard(title: string, status: string, items: string[]) {
   );
 }
 
-function setupStatus(issuers: any[], providers: any[], zones: any[]) {
-  if (!issuers.some((issuer) => issuer.status === "active")) return "Needs issuer";
-  if (!providers.some((provider) => provider.status === "active")) return "Needs DNS provider";
-  if (providers.length && zones.length === 0) return "Needs DNS zone";
+function setupStatusFromCounts(activeIssuers: number, activeProviders: number, zones: number) {
+  if (activeIssuers === 0) return "Needs issuer";
+  if (activeProviders === 0) return "Needs DNS provider";
+  if (zones === 0) return "Needs DNS zone";
   return "Ready";
 }
 

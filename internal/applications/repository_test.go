@@ -25,8 +25,8 @@ func TestCreateApplicationNormalizesTrustedSourceCIDRs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(app.TrustedSourceCIDRs) != 2 {
-		t.Fatalf("trusted cidrs = %#v", app.TrustedSourceCIDRs)
+	if len(app.TrustedSourceCIDRs) != 2 || app.CertificateCount != 2 {
+		t.Fatalf("application read model = %#v", app)
 	}
 	if !strings.Contains(db.query, "$7::cidr[]") {
 		t.Fatalf("insert does not cast CIDR array: %s", db.query)
@@ -153,6 +153,7 @@ func applicationRowValues(now time.Time, cidrs []string) []any {
 		int64(0),
 		int64(0),
 		int64(0),
+		int64(2),
 		int64(len(cidrs)),
 	}
 }

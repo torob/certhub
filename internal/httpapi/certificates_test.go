@@ -16,6 +16,7 @@ import (
 	security "github.com/torob/certhub/internal/crypto"
 	issuerdomain "github.com/torob/certhub/internal/issuers"
 	"github.com/torob/certhub/internal/storage"
+	userdomain "github.com/torob/certhub/internal/users"
 	"github.com/torob/certhub/pkg/certhubclient"
 )
 
@@ -131,6 +132,77 @@ func TestCertificateCriteriaRejectsApplicationID(t *testing.T) {
 	}`))
 	if _, err := decodeCertificateCriteria(req); err == nil {
 		t.Fatal("expected application_id to be rejected")
+	}
+}
+
+func TestParseCertificateListParamsExpiresBefore(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates?expires_before=2026-07-26T12:00:00Z", nil)
+	params, err := parseCertificateListParams(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ExpiresBefore == nil || !params.ExpiresBefore.Equal(time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("expires_before = %#v", params.ExpiresBefore)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/certificates?expires_before=tomorrow", nil)
+	if _, err := parseCertificateListParams(req); err == nil {
+		t.Fatalf("invalid expires_before was accepted")
+	}
+}
+
+func TestSerializeCertificateIncludesLatestVersion(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	cert := fixture.cert
+	cert.LatestVersion = &fixture.version
+	out := serializeCertificate(cert)
+	if out.LatestVersion == nil || out.LatestVersion.ID != fixture.version.ID || out.LatestVersion.NotAfter == nil {
+		t.Fatalf("latest_version = %#v", out.LatestVersion)
+	}
+}
+
+func TestListCertificatesForNonAdminUsesAccessibleApplicationIDs(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	user := fakeUser()
+	user.GlobalRole = userdomain.GlobalRoleUser
+	userToken := auth.UserAccessTokenPrefix + strings.Repeat("L", 43)
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
+			ID:              "62345678-1234-4234-9234-123456789abc",
+			UserID:          user.ID,
+			AuthMethod:      auth.AuthMethodPassword,
+			AccessTokenHash: fixture.keys.HashToken(userToken),
+			Status:          auth.SessionStatusActive,
+			AccessExpiresAt: time.Now().Add(time.Minute),
+		}},
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          fixture.keys,
+		Config:          testConfig(t, "").Auth,
+	})
+	certStore := fixture.certStore
+	appStore := &certificateHTTPAppStore{app: fixture.app}
+	certSvc := certdomain.NewService(certdomain.ServiceConfig{
+		Repository:        certStore,
+		ApplicationReader: appStore,
+		IssuerReader:      fixture.issuerStore,
+		AuditRepository:   &certificateHTTPAuditStore{},
+		KeySet:            fixture.keys,
+	})
+	handler := New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithCertificateService(certSvc)).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(certStore.listParams.ApplicationIDs) != 1 || certStore.listParams.ApplicationIDs[0] != fixture.app.ID {
+		t.Fatalf("list application ids = %#v", certStore.listParams.ApplicationIDs)
+	}
+	if len(certStore.countParams.ApplicationIDs) != 1 || certStore.countParams.ApplicationIDs[0] != fixture.app.ID {
+		t.Fatalf("count application ids = %#v", certStore.countParams.ApplicationIDs)
 	}
 }
 
@@ -398,6 +470,8 @@ type certificateHTTPCertStore struct {
 	createOrReuseCert certdomain.Certificate
 	createParams      certdomain.CreateOrReuseCertificateParams
 	version           certdomain.CertificateVersion
+	listParams        certdomain.ListCertificatesParams
+	countParams       certdomain.ListCertificatesParams
 }
 
 func (s *certificateHTTPCertStore) CreateOrReuse(_ context.Context, params certdomain.CreateOrReuseCertificateParams) (certdomain.Certificate, error) {
@@ -412,12 +486,18 @@ func (s *certificateHTTPCertStore) Get(context.Context, string) (certdomain.Cert
 	return s.cert, nil
 }
 
-func (s *certificateHTTPCertStore) List(context.Context, certdomain.ListCertificatesParams) ([]certdomain.Certificate, error) {
+func (s *certificateHTTPCertStore) List(_ context.Context, params certdomain.ListCertificatesParams) ([]certdomain.Certificate, error) {
+	s.listParams = params
 	return []certdomain.Certificate{s.cert}, nil
 }
 
-func (s *certificateHTTPCertStore) Count(context.Context, certdomain.ListCertificatesParams) (int64, error) {
+func (s *certificateHTTPCertStore) Count(_ context.Context, params certdomain.ListCertificatesParams) (int64, error) {
+	s.countParams = params
 	return 1, nil
+}
+
+func (s *certificateHTTPCertStore) LatestValidVersion(context.Context, string) (certdomain.CertificateVersion, error) {
+	return s.version, nil
 }
 
 func (s *certificateHTTPCertStore) ListVersions(context.Context, certdomain.ListVersionsParams) ([]certdomain.CertificateVersion, error) {

@@ -38,6 +38,7 @@ type Store interface {
 	Get(context.Context, string) (Certificate, error)
 	List(context.Context, ListCertificatesParams) ([]Certificate, error)
 	Count(context.Context, ListCertificatesParams) (int64, error)
+	LatestValidVersion(context.Context, string) (CertificateVersion, error)
 	ListVersions(context.Context, ListVersionsParams) ([]CertificateVersion, error)
 	CountVersions(context.Context, string) (int64, error)
 	GetLatestValidMaterial(context.Context, string) (CertificateVersion, error)
@@ -113,6 +114,7 @@ type ListParams struct {
 	KeyType       *KeyType
 	Issuer        string
 	IssuerID      *string
+	ExpiresBefore *time.Time
 }
 
 type EnsureResult struct {
@@ -208,6 +210,9 @@ func (s *Service) ListCertificates(ctx context.Context, actor Actor, params List
 		if err != nil {
 			return ListResult{}, classifyReadError(err)
 		}
+		if err := s.attachLatestVersions(ctx, certs); err != nil {
+			return ListResult{}, err
+		}
 		return ListResult{Certificates: certs, Limit: opts.Limit, Offset: opts.Offset, Total: total}, nil
 	}
 	ids, err := s.apps.ListAccessibleApplicationIDs(ctx, actor.ID)
@@ -225,27 +230,24 @@ func (s *Service) ListCertificates(ctx context.Context, actor Actor, params List
 		if err != nil {
 			return ListResult{}, classifyReadError(err)
 		}
+		if err := s.attachLatestVersions(ctx, certs); err != nil {
+			return ListResult{}, err
+		}
 		return ListResult{Certificates: certs, Limit: opts.Limit, Offset: opts.Offset, Total: total}, nil
 	}
-	for _, id := range ids {
-		id := id
-		next := base
-		next.ApplicationID = &id
-		items, err := s.repo.List(ctx, next)
-		if err != nil {
-			return ListResult{}, classifyReadError(err)
-		}
-		certs = append(certs, items...)
+	if len(ids) == 0 {
+		return ListResult{Limit: opts.Limit, Offset: opts.Offset, Total: 0}, nil
 	}
-	total = int64(len(certs))
-	if opts.Offset >= len(certs) {
-		certs = nil
-	} else {
-		end := opts.Offset + opts.Limit
-		if end > len(certs) {
-			end = len(certs)
-		}
-		certs = certs[opts.Offset:end]
+	base.ApplicationIDs = ids
+	certs, err = s.repo.List(ctx, base)
+	if err == nil {
+		total, err = s.repo.Count(ctx, base)
+	}
+	if err != nil {
+		return ListResult{}, classifyReadError(err)
+	}
+	if err := s.attachLatestVersions(ctx, certs); err != nil {
+		return ListResult{}, err
 	}
 	return ListResult{Certificates: certs, Limit: opts.Limit, Offset: opts.Offset, Total: total}, nil
 }
@@ -258,7 +260,11 @@ func (s *Service) GetCertificate(ctx context.Context, actor Actor, id string) (C
 	if cert.DeletedAt != nil || cert.Status == StatusDeleted {
 		return Certificate{}, ErrNotFound
 	}
-	return cert, nil
+	certs := []Certificate{cert}
+	if err := s.attachLatestVersions(ctx, certs); err != nil {
+		return Certificate{}, err
+	}
+	return certs[0], nil
 }
 
 func (s *Service) GetCertificateForEvents(ctx context.Context, actor Actor, id string) (Certificate, error) {
@@ -536,6 +542,9 @@ func (s *Service) listParams(ctx context.Context, params ListParams) (ListCertif
 	if params.KeyType != nil {
 		out.KeyType = params.KeyType
 	}
+	if params.ExpiresBefore != nil {
+		out.ExpiresBefore = params.ExpiresBefore
+	}
 	if params.ApplicationID != nil {
 		out.ApplicationID = params.ApplicationID
 	}
@@ -564,6 +573,20 @@ func (s *Service) listParams(ctx context.Context, params ListParams) (ListCertif
 		out.NormalizedSANs = []string{normalized}
 	}
 	return out, nil
+}
+
+func (s *Service) attachLatestVersions(ctx context.Context, certs []Certificate) error {
+	for i := range certs {
+		version, err := s.repo.LatestValidVersion(ctx, certs[i].ID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNoRows) {
+				continue
+			}
+			return classifyReadError(err)
+		}
+		certs[i].LatestVersion = &version
+	}
+	return nil
 }
 
 func (s *Service) applicationBySelector(ctx context.Context, selector string) (appdomain.Application, error) {

@@ -119,6 +119,7 @@ type Certificate struct {
 	UpdatedAt        time.Time
 	DeletedAt        *time.Time
 	VersionCount     int64
+	LatestVersion    *CertificateVersion
 }
 
 type CertificateVersion struct {

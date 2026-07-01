@@ -135,6 +135,16 @@ func TestApplicationConflictErrorCarriesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestSerializeApplicationIncludesCertificateCount(t *testing.T) {
+	now := time.Now().UTC()
+	app := httpFakeApplication(now, nil)
+	app.CertificateCount = 4
+	out := serializeApplication(appdomain.ApplicationWithRole{Application: app, CurrentRole: "admin"})
+	if out.CertificateCount != 4 {
+		t.Fatalf("certificate_count = %d", out.CertificateCount)
+	}
+}
+
 func TestCreateApplicationTokenResponseShowsRawOnceAndNoHash(t *testing.T) {
 	keys := testKeySet(t)
 	user := fakeUser()

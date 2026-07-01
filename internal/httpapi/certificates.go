@@ -417,6 +417,13 @@ func parseCertificateListParams(r *http.Request) (certdomain.ListParams, error) 
 		keyType := certdomain.KeyType(raw)
 		params.KeyType = &keyType
 	}
+	if raw := query.Get("expires_before"); raw != "" {
+		expiresBefore, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return certdomain.ListParams{}, err
+		}
+		params.ExpiresBefore = &expiresBefore
+	}
 	return params, nil
 }
 
@@ -567,6 +574,10 @@ func serializeCertificate(cert certdomain.Certificate) apiCertificate {
 	if cert.RevocationReason != nil {
 		raw := string(*cert.RevocationReason)
 		out.RevocationReason = &raw
+	}
+	if cert.LatestVersion != nil {
+		latest := serializeCertificateVersion(*cert.LatestVersion)
+		out.LatestVersion = &latest
 	}
 	return out
 }

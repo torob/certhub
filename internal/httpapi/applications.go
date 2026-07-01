@@ -713,7 +713,7 @@ func serializeApplication(value appdomain.ApplicationWithRole) apiApplication {
 		DomainScopeCount:       value.Application.DomainScopeCount,
 		TokenCount:             value.Application.TokenCount,
 		TrustedSourceCIDRCount: value.Application.TrustedSourceCIDRCount,
-		CertificateCount:       0,
+		CertificateCount:       value.Application.CertificateCount,
 		CreatedAt:              value.Application.CreatedAt,
 		UpdatedAt:              value.Application.UpdatedAt,
 	}

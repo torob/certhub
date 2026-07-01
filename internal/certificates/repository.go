@@ -32,10 +32,12 @@ type CreateOrReuseCertificateParams struct {
 type ListCertificatesParams struct {
 	storage.ListOptions
 	ApplicationID  *string
+	ApplicationIDs []string
 	IssuerID       *string
 	Status         *Status
 	KeyType        *KeyType
 	NormalizedSANs []string
+	ExpiresBefore  *time.Time
 	IncludeDeleted bool
 }
 
@@ -258,6 +260,23 @@ func (r Repository) Count(ctx context.Context, params ListCertificatesParams) (i
 		return 0, fmt.Errorf("count certificates: %w", err)
 	}
 	return total, nil
+}
+
+func (r Repository) LatestValidVersion(ctx context.Context, certificateID string) (CertificateVersion, error) {
+	if err := storage.ValidateUUID(certificateID, "certificate_id"); err != nil {
+		return CertificateVersion{}, err
+	}
+	version, err := scanCertificateVersion(r.db.QueryRow(ctx, `
+select `+certificateVersionSelectSQL("v")+`
+from certificate_versions v
+where v.certificate_id = $1
+  and v.status = 'valid'
+order by v.version desc
+limit 1`, certificateID))
+	if err != nil {
+		return CertificateVersion{}, fmt.Errorf("get latest valid certificate version: %w", err)
+	}
+	return version, nil
 }
 
 func (r Repository) ListVersions(ctx context.Context, params ListVersionsParams) ([]CertificateVersion, error) {
@@ -958,6 +977,14 @@ func (r Repository) listQuery(params ListCertificatesParams, count bool) (string
 	if params.ApplicationID != nil {
 		add("c.application_id = $%d", *params.ApplicationID)
 	}
+	if len(params.ApplicationIDs) > 0 {
+		placeholders := make([]string, 0, len(params.ApplicationIDs))
+		for _, id := range params.ApplicationIDs {
+			args = append(args, id)
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+		}
+		where = append(where, "c.application_id in ("+strings.Join(placeholders, ", ")+")")
+	}
 	if params.IssuerID != nil {
 		add("c.issuer_id = $%d", *params.IssuerID)
 	}
@@ -969,6 +996,16 @@ func (r Repository) listQuery(params ListCertificatesParams, count bool) (string
 	}
 	if len(params.NormalizedSANs) > 0 {
 		add("c.normalized_sans = $%d::text[]", params.NormalizedSANs)
+	}
+	if params.ExpiresBefore != nil {
+		add(`coalesce((
+			select v.not_after <= $%d
+			from certificate_versions v
+			where v.certificate_id = c.id
+			  and v.status = 'valid'
+			order by v.version desc
+			limit 1
+		), false)`, *params.ExpiresBefore)
 	}
 	if !params.IncludeDeleted {
 		where = append(where, "c.deleted_at is null")

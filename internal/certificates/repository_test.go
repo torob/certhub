@@ -41,6 +41,54 @@ func TestCreateOrReuseNormalizesIdentityAndUsesPartialConflict(t *testing.T) {
 	}
 }
 
+func TestCertificateCountQuerySupportsAccessibleApplicationsAndExpiry(t *testing.T) {
+	expiresBefore := testTime().Add(30 * 24 * time.Hour)
+	db := &fakeDB{row: fakeRow{values: []any{int64(3)}}}
+	repo := NewRepository(db)
+	total, err := repo.Count(context.Background(), ListCertificatesParams{
+		ApplicationIDs: []string{
+			"22345678-1234-4234-9234-123456789abc",
+			"32345678-1234-4234-9234-123456789abc",
+		},
+		ExpiresBefore: &expiresBefore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d", total)
+	}
+	for _, required := range []string{
+		"c.application_id in ($1, $2)",
+		"select v.not_after <= $3",
+		"v.status = 'valid'",
+		"order by v.version desc",
+		"c.deleted_at is null",
+	} {
+		if !strings.Contains(db.query, required) {
+			t.Fatalf("count query missing %q: %s", required, db.query)
+		}
+	}
+}
+
+func TestLatestValidVersionSelectsNewestValidMetadata(t *testing.T) {
+	now := testTime()
+	db := &fakeDB{row: fakeRow{values: certificateVersionRowValues(now, string(VersionStatusValid), string(IssuanceReasonRenewal), nil)}}
+	repo := NewRepository(db)
+	version, err := repo.LatestValidVersion(context.Background(), "22345678-1234-4234-9234-123456789abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.Status != VersionStatusValid || version.Reason != IssuanceReasonRenewal {
+		t.Fatalf("version = %#v", version)
+	}
+	for _, required := range []string{"v.status = 'valid'", "order by v.version desc", "limit 1"} {
+		if !strings.Contains(db.query, required) {
+			t.Fatalf("latest version query missing %q: %s", required, db.query)
+		}
+	}
+}
+
 func TestCreateIssuingVersionReusesExistingAndUpdatesParentState(t *testing.T) {
 	now := testTime()
 	db := &fakeDB{row: fakeRow{values: certificateVersionRowValues(now, string(VersionStatusIssuing), string(IssuanceReasonRenewal), nil)}}

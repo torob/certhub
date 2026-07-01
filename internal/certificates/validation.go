@@ -76,6 +76,11 @@ func validateList(params *ListCertificatesParams) error {
 			return err
 		}
 	}
+	for _, id := range params.ApplicationIDs {
+		if err := storage.ValidateUUID(id, "application_id"); err != nil {
+			return err
+		}
+	}
 	if params.IssuerID != nil {
 		if err := storage.ValidateUUID(*params.IssuerID, "issuer_id"); err != nil {
 			return err
