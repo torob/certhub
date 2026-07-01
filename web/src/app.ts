@@ -37,12 +37,22 @@ type APIResult<T> = {
   requestID: string;
   retryAfter?: number;
 };
+type ToastNotice = {
+  id: number;
+  message: string;
+  closing: boolean;
+};
 
 const queryClient = new QueryClient();
 const sessionKey = "certhub.session.v1";
 const authExpiredEvent = "certhub-auth-expired";
 const accessRefreshSkewMs = 60_000;
+const toastLimit = 4;
+const toastVisibleMs = 6_000;
+const toastFadeMs = 3_000;
 let refreshInFlight: Promise<boolean> | undefined;
+let nextNoticeID = 0;
+const noticeTimers = new Map<number, number[]>();
 
 const nav = [
   ["home", "Home", Home],
@@ -281,8 +291,30 @@ function useAsync<T>(session: Session | undefined, path: string, deps: unknown[]
 function AppShell() {
   const [session, setSession] = useState<Session | undefined>(() => loadSession());
   const [route, setRoute] = useState<RouteState>(() => parseRoute());
-  const [notice, setNotice] = useState("");
+  const [loginNotice, setLoginNotice] = useState("");
+  const [notices, setNotices] = useState<ToastNotice[]>([]);
   const visibleNav = isAdmin(session) ? nav : nav.filter(([id]) => id === "home" || id === "certificates" || id === "applications");
+  const clearNoticeTimers = (id: number) => {
+    noticeTimers.get(id)?.forEach((timer) => window.clearTimeout(timer));
+    noticeTimers.delete(id);
+  };
+  const dismissNotice = (id: number) => {
+    clearNoticeTimers(id);
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  };
+  const fadeNotice = (id: number) => {
+    setNotices((current) => current.map((notice) => notice.id === id ? { ...notice, closing: true } : notice));
+    const removeTimer = window.setTimeout(() => dismissNotice(id), toastFadeMs);
+    noticeTimers.set(id, [...(noticeTimers.get(id) || []), removeTimer]);
+  };
+  const setNotice = (message: string) => {
+    if (!message) return;
+    const id = nextNoticeID + 1;
+    nextNoticeID = id;
+    setNotices((current) => [...current, { id, message, closing: false }].slice(-toastLimit));
+    const fadeTimer = window.setTimeout(() => fadeNotice(id), toastVisibleMs);
+    noticeTimers.set(id, [fadeTimer]);
+  };
   const navigate = (to: string, replace = false) => {
     if (to !== `${window.location.pathname}${window.location.search}`) {
       window.history[replace ? "replaceState" : "pushState"]({}, "", to);
@@ -294,6 +326,13 @@ function AppShell() {
     const listener = () => setSession(undefined);
     window.addEventListener(authExpiredEvent, listener);
     return () => window.removeEventListener(authExpiredEvent, listener);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      noticeTimers.forEach((timers) => timers.forEach((timer) => window.clearTimeout(timer)));
+      noticeTimers.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -351,7 +390,7 @@ function AppShell() {
         saveSession(next);
         setSession(next);
       } else {
-        setNotice(errorText(result));
+        setLoginNotice(errorText(result));
       }
     });
   }, []);
@@ -361,7 +400,7 @@ function AppShell() {
   }, [session?.identity, route.page]);
 
   if (!session?.accessToken) {
-    return createElement(Login, { onLogin: setSession, notice });
+    return createElement(Login, { onLogin: setSession, notice: loginNotice });
   }
 
   const Page = route.create === "certificate" ? CertificateCreatePage :
@@ -413,7 +452,8 @@ function AppShell() {
         createElement("span", null, "Logout")
       )
     ),
-    createElement("main", { className: "workspace" }, createElement(Page, { session, setNotice, navigate, route }), notice ? createElement("div", { className: "toast" }, notice) : null)
+    createElement("main", { className: "workspace" }, createElement(Page, { session, setNotice, navigate, route })),
+    notices.length ? createElement(ToastStack, { notices, onDismiss: dismissNotice }) : null
   );
 }
 
@@ -422,6 +462,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [error, setError] = useState(props.notice);
+  useEffect(() => setError(props.notice), [props.notice]);
   async function submit() {
     const result = await api<{ access_token: string; access_expires_at?: string; refresh_token: string; refresh_expires_at?: string }>("/v1/auth/login", undefined, {
       method: "POST",
@@ -444,6 +485,25 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
       createElement("button", { className: "primary", onClick: submit }, createElement(Lock, { size: 16 }), "Sign in"),
       createElement("button", { className: "secondary", onClick: () => (window.location.href = "/v1/auth/oidc/login") }, "OIDC sign in"),
       error ? createElement("p", { className: "error" }, error) : null
+    )
+  );
+}
+
+function ToastStack(props: { notices: ToastNotice[]; onDismiss: (id: number) => void }) {
+  return createElement(
+    "div",
+    { className: "toast-stack", role: "status", "aria-live": "polite", "aria-atomic": "false" },
+    props.notices.map((notice) =>
+      createElement(
+        "div",
+        { key: notice.id, className: notice.closing ? "toast closing" : "toast" },
+        createElement("span", null, notice.message),
+        createElement(
+          "button",
+          { type: "button", className: "toast-close", onClick: () => props.onDismiss(notice.id), "aria-label": "Dismiss notification", title: "Dismiss notification" },
+          createElement(X, { size: 16 })
+        )
+      )
     )
   );
 }
