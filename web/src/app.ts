@@ -78,6 +78,7 @@ const nav = [
 type NavID = (typeof nav)[number][0];
 type ResourceType = "certificate" | "application" | "user" | "issuer" | "dns";
 type ApplicationTab = "overview" | "scopes" | "tokens" | "access" | "certificates" | "audit";
+type ProfileTab = "overview" | "security";
 type RouteState = {
   page: NavID;
   create?: "certificate" | "application" | "user" | "issuer" | "dns";
@@ -105,6 +106,10 @@ const applicationTabs: { id: ApplicationTab; label: string; managerOnly?: boolea
   { id: "access", label: "Access", managerOnly: true },
   { id: "certificates", label: "Certificates" },
   { id: "audit", label: "Audit" }
+];
+const profileTabs: { id: ProfileTab; label: string; userOnly?: boolean }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "security", label: "Security", userOnly: true }
 ];
 
 function parseRoute(): RouteState {
@@ -559,20 +564,35 @@ function ToastStack(props: { notices: ToastNotice[]; onDismiss: (id: number) => 
 
 function ProfilePage(props: PageProps) {
   const identity = props.session.identity as any;
+  const isUser = Boolean(identity?.email);
+  const rawTab = props.route.query.get("tab") || "overview";
+  const requestedTab = profileTab(rawTab);
+  const activeTab = requestedTab === "security" && !isUser ? "overview" : requestedTab;
+  const visibleTabs = profileTabs.filter((tab) => !tab.userOnly || isUser);
+  useEffect(() => {
+    if (rawTab === activeTab) return;
+    props.navigate(profileTabPath(activeTab), true);
+  }, [rawTab, activeTab]);
+  const overview = createElement("section", { className: "detail" },
+    createElement("h2", null, identityText(props.session.identity)),
+    kv("Identity type", isUser ? "user" : identity?.name ? "application" : "unknown"),
+    identity?.email ? kv("Email", identity.email) : null,
+    identity?.name ? kv("Name", identity.name) : null,
+    kv("Display name", identity?.display_name || ""),
+    identity?.global_role ? kv("Global role", identity.global_role) : null,
+    identity?.status ? kv("Status", identity.status) : null,
+    technicalDetails("Technical details", [["Identity ID", identity?.id]])
+  );
+  const tabContent = activeTab === "security" && isUser ?
+    createElement(Password2FASection, { session: props.session, setNotice: props.setNotice }) :
+    overview;
   return pageFrame(
-    "Profile",
+    identityText(props.session.identity) || "Profile",
     null,
-    createElement("section", { className: "detail" },
-      createElement("h2", null, identityText(props.session.identity)),
-      kv("Identity type", identity?.email ? "user" : identity?.name ? "application" : "unknown"),
-      identity?.email ? kv("Email", identity.email) : null,
-      identity?.name ? kv("Name", identity.name) : null,
-      kv("Display name", identity?.display_name || ""),
-      identity?.global_role ? kv("Global role", identity.global_role) : null,
-      identity?.status ? kv("Status", identity.status) : null,
-      technicalDetails("Technical details", [["Identity ID", identity?.id]])
-    ),
-    identity?.email ? createElement(Password2FASection, { session: props.session, setNotice: props.setNotice }) : null
+    createElement("div", { className: "tabbed-detail" },
+      createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Profile sections", pathFor: profileTabPath, navigate: props.navigate }),
+      tabContent
+    )
   );
 }
 
@@ -873,8 +893,8 @@ function ApplicationDetailPage(props: PageProps) {
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
       canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/applications/${id}/edit`) }, "Edit") : null
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("div", { className: "application-detail" },
-      createElement(ApplicationTabs, { appID: id, activeTab, tabs: visibleTabs, navigate: props.navigate }),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("div", { className: "tabbed-detail" },
+      createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
       tabContent
     )
   );
@@ -1527,6 +1547,10 @@ function applicationTab(raw: string): ApplicationTab {
   return applicationTabs.some((tab) => tab.id === raw) ? raw as ApplicationTab : "overview";
 }
 
+function profileTab(raw: string): ProfileTab {
+  return profileTabs.some((tab) => tab.id === raw) ? raw as ProfileTab : "overview";
+}
+
 function isManagerApplicationTab(tab: ApplicationTab) {
   return applicationTabs.some((item) => item.id === tab && item.managerOnly);
 }
@@ -1535,15 +1559,19 @@ function applicationTabPath(appID: string, tab: ApplicationTab) {
   return tab === "overview" ? `/applications/${appID}` : `/applications/${appID}?tab=${tab}`;
 }
 
-function ApplicationTabs(props: { appID: string; activeTab: ApplicationTab; tabs: { id: ApplicationTab; label: string }[]; navigate: (path: string, replace?: boolean) => void }) {
-  return createElement("div", { className: "tabs", role: "tablist", "aria-label": "Application sections" },
+function profileTabPath(tab: ProfileTab) {
+  return tab === "overview" ? "/profile" : `/profile?tab=${tab}`;
+}
+
+function Tabs<T extends string>(props: { activeTab: T; tabs: { id: T; label: string }[]; ariaLabel: string; pathFor: (tab: T) => string; navigate: (path: string, replace?: boolean) => void }) {
+  return createElement("div", { className: "tabs", role: "tablist", "aria-label": props.ariaLabel },
     props.tabs.map((tab) => createElement("button", {
       key: tab.id,
       type: "button",
       role: "tab",
       className: tab.id === props.activeTab ? "tab active" : "tab",
       "aria-selected": tab.id === props.activeTab,
-      onClick: () => props.navigate(applicationTabPath(props.appID, tab.id))
+      onClick: () => props.navigate(props.pathFor(tab.id))
     }, tab.label))
   );
 }

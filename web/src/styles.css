@@ -367,7 +367,7 @@ tr.selectable:focus-within td {
   gap: 8px;
 }
 
-.application-detail {
+.tabbed-detail {
   display: grid;
   gap: 14px;
 }
