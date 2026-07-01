@@ -9,6 +9,7 @@ import {
   KeyRound,
   Lock,
   LogOut,
+  Settings,
   RefreshCw,
   ServerCog,
   ShieldCheck,
@@ -69,9 +70,14 @@ const nav = [
   ["audit", "Audit Events", Activity]
 ] as const;
 type NavID = (typeof nav)[number][0];
+type ResourceType = "certificate" | "application" | "user" | "issuer" | "dns";
 type RouteState = {
   page: NavID;
   create?: "certificate" | "application" | "user" | "issuer" | "dns";
+  detail?: ResourceType;
+  edit?: ResourceType;
+  id?: string;
+  profile?: boolean;
   path: string;
   query: URLSearchParams;
 };
@@ -90,6 +96,17 @@ function parseRoute(): RouteState {
   const url = new URL(window.location.href);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const query = url.searchParams;
+  const parts = path.split("/").filter(Boolean);
+  if (path === "/profile") return { page: "home", profile: true, path, query };
+  if (parts.length === 2 && parts[0] === "certificates" && parts[1] !== "new") return { page: "certificates", detail: "certificate", id: parts[1], path, query };
+  if (parts.length === 2 && parts[0] === "applications" && parts[1] !== "new") return { page: "applications", detail: "application", id: parts[1], path, query };
+  if (parts.length === 3 && parts[0] === "applications" && parts[2] === "edit") return { page: "applications", detail: "application", edit: "application", id: parts[1], path, query };
+  if (parts.length === 2 && parts[0] === "users" && parts[1] !== "new") return { page: "users", detail: "user", id: parts[1], path, query };
+  if (parts.length === 3 && parts[0] === "users" && parts[2] === "edit") return { page: "users", detail: "user", edit: "user", id: parts[1], path, query };
+  if (parts.length === 2 && parts[0] === "issuers" && parts[1] !== "new") return { page: "issuers", detail: "issuer", id: parts[1], path, query };
+  if (parts.length === 3 && parts[0] === "issuers" && parts[2] === "edit") return { page: "issuers", detail: "issuer", edit: "issuer", id: parts[1], path, query };
+  if (parts.length === 2 && parts[0] === "dns-providers" && parts[1] !== "new") return { page: "dns", detail: "dns", id: parts[1], path, query };
+  if (parts.length === 3 && parts[0] === "dns-providers" && parts[2] === "edit") return { page: "dns", detail: "dns", edit: "dns", id: parts[1], path, query };
   switch (path) {
     case "/":
       return { page: "home", path, query };
@@ -408,7 +425,17 @@ function AppShell() {
     return createElement(Login, { onLogin: setSession, notice: loginNotice });
   }
 
-  const Page = route.create === "certificate" ? CertificateCreatePage :
+  const Page = route.profile ? ProfilePage :
+    route.edit === "application" ? ApplicationEditPage :
+    route.edit === "user" ? UserEditPage :
+    route.edit === "issuer" ? IssuerEditPage :
+    route.edit === "dns" ? DNSEditPage :
+    route.detail === "certificate" ? CertificateDetailPage :
+    route.detail === "application" ? ApplicationDetailPage :
+    route.detail === "user" ? UserDetailPage :
+    route.detail === "issuer" ? IssuerDetailPage :
+    route.detail === "dns" ? DNSDetailPage :
+    route.create === "certificate" ? CertificateCreatePage :
     route.create === "application" ? ApplicationCreatePage :
     route.create === "user" ? UserCreatePage :
     route.create === "issuer" ? IssuerCreatePage :
@@ -435,14 +462,16 @@ function AppShell() {
         visibleNav.map(([id, label, Icon]) =>
           createElement(
             "button",
-            { key: id, className: id === route.page ? "nav active" : "nav", onClick: () => navigate(navPaths[id]), title: label },
+            { key: id, className: id === route.page && !route.profile ? "nav active" : "nav", onClick: () => navigate(navPaths[id]), title: label },
             createElement(Icon, { size: 18 }),
             createElement("span", null, label)
           )
         )
       ),
-      createElement("div", { className: "identity" }, identityText(session.identity)),
-      createElement(AccountSecurity, { session, setNotice }),
+      createElement("button", { className: route.profile ? "nav active profile-nav" : "nav profile-nav", onClick: () => navigate("/profile"), title: "Profile" },
+        createElement(Settings, { size: 18 }),
+        createElement("span", null, identityText(session.identity))
+      ),
       createElement(
         "button",
         {
@@ -513,58 +542,78 @@ function ToastStack(props: { notices: ToastNotice[]; onDismiss: (id: number) => 
   );
 }
 
-function AccountSecurity(props: { session: Session; setNotice: (s: string) => void }) {
-  const [open, setOpen] = useState(false);
+function ProfilePage(props: PageProps) {
+  const identity = props.session.identity as any;
+  return pageFrame(
+    "Profile",
+    null,
+    createElement("section", { className: "detail" },
+      createElement("h2", null, identityText(props.session.identity)),
+      kv("Identity type", identity?.email ? "user" : identity?.name ? "application" : "unknown"),
+      kv("ID", identity?.id || ""),
+      identity?.email ? kv("Email", identity.email) : null,
+      identity?.name ? kv("Name", identity.name) : null,
+      kv("Display name", identity?.display_name || ""),
+      identity?.global_role ? kv("Global role", identity.global_role) : null,
+      identity?.status ? kv("Status", identity.status) : null
+    ),
+    identity?.email ? createElement(Password2FASection, { session: props.session, setNotice: props.setNotice }) : null
+  );
+}
+
+function Password2FASection(props: { session: Session; setNotice: (s: string) => void }) {
   const [provisioning, setProvisioning] = useState<any>(undefined);
   const [totp, setTotp] = useState("");
   const [password, setPassword] = useState("");
-  if (!open) {
-    return createElement("button", { className: "nav compact", onClick: () => setOpen(true) }, createElement(Lock, { size: 16 }), createElement("span", null, "2FA"));
-  }
   return createElement("section", { className: "security-panel" },
-    createElement("div", { className: "security-head" },
-      createElement("strong", null, "Password 2FA"),
-      createElement("button", { type: "button", onClick: () => setOpen(false), title: "Close" }, "x")
-    ),
+    createElement("h2", null, "Password 2FA"),
     provisioning ? createElement("div", { className: "secret-once" },
       kv("Issuer", provisioning.issuer),
       kv("Account", provisioning.account_label),
       kv("Secret", provisioning.secret),
       kv("Provisioning URI", provisioning.provisioning_uri)
     ) : null,
-    provisioning ? input("TOTP code", totp, setTotp) : null,
-    provisioning ? createElement("button", {
-      className: "primary",
-      onClick: async () => {
-        const result = await api("/v1/auth/password-2fa/confirm", props.session, { method: "POST", body: JSON.stringify({ totp_code: totp }) });
-        props.setNotice(errorOrOK(result));
-        if (!result.error) {
-          setProvisioning(undefined);
-          setTotp("");
-        }
-      }
-    }, "Confirm") : createElement("button", {
-      onClick: async () => {
-        const result = await api<any>("/v1/auth/password-2fa/setup", props.session, { method: "POST" });
-        if (result.data) {
-          setProvisioning(result.data);
-          props.setNotice("scan or save the provisioning secret now; it is not stored by the UI");
-        } else props.setNotice(errorText(result));
-      }
-    }, "Set up"),
-    input("Password for disable", password, setPassword, "password"),
-    input("TOTP for disable", totp, setTotp),
-    createElement("button", {
-      onClick: async () => {
-        const result = await api("/v1/auth/password-2fa", props.session, { method: "DELETE", body: JSON.stringify(emptyToUndefined({ password, totp_code: totp })) });
-        props.setNotice(errorOrOK(result));
-        if (!result.error) {
-          setProvisioning(undefined);
-          setTotp("");
-          setPassword("");
-        }
-      }
-    }, "Disable")
+    createElement("div", { className: "split-grid" },
+      createElement("section", { className: "form-section" },
+        createElement("h3", null, "Set up"),
+        provisioning ? input("TOTP code", totp, setTotp) : null,
+        provisioning ? createElement("button", {
+          className: "primary",
+          onClick: async () => {
+            const result = await api("/v1/auth/password-2fa/confirm", props.session, { method: "POST", body: JSON.stringify({ totp_code: totp }) });
+            props.setNotice(errorOrOK(result));
+            if (!result.error) {
+              setProvisioning(undefined);
+              setTotp("");
+            }
+          }
+        }, "Confirm") : createElement("button", {
+          onClick: async () => {
+            const result = await api<any>("/v1/auth/password-2fa/setup", props.session, { method: "POST" });
+            if (result.data) {
+              setProvisioning(result.data);
+              props.setNotice("scan or save the provisioning secret now; it is not stored by the UI");
+            } else props.setNotice(errorText(result));
+          }
+        }, "Set up")
+      ),
+      createElement("section", { className: "form-section" },
+        createElement("h3", null, "Disable"),
+        input("Password", password, setPassword, "password"),
+        input("TOTP code", totp, setTotp),
+        createElement("button", {
+          onClick: async () => {
+            const result = await api("/v1/auth/password-2fa", props.session, { method: "DELETE", body: JSON.stringify(emptyToUndefined({ password, totp_code: totp })) });
+            props.setNotice(errorOrOK(result));
+            if (!result.error) {
+              setProvisioning(undefined);
+              setTotp("");
+              setPassword("");
+            }
+          }
+        }, "Disable")
+      )
+    )
   );
 }
 
@@ -629,7 +678,6 @@ function HomePage(props: PageProps) {
 
 function CertificatesPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const [selected, setSelected] = useState<any>(undefined);
   const [filters, setFilters] = useState({ domain: "", status: "", application: "", issuer: "", key_type: "", expires_before: "" });
   const query = queryString({ ...filters, limit: "100" });
   const list = useAsync<{ certificates: any[] }> (props.session, `/v1/certificates?${query}`, [refresh, query]);
@@ -641,23 +689,22 @@ function CertificatesPage(props: PageProps) {
       createElement("button", { className: "primary", disabled: manageableApps.length === 0, onClick: () => props.navigate("/certificates/new") }, createElement(BadgeCheck, { size: 16 }), "Create Certificate"),
       createElement(GenericCreate, { title: "Filters", fields: ["domain", "status", "application", "issuer", "key_type", "expires_before"], onSubmit: (body: Record<string, string>) => setFilters({ ...filters, ...body }) })
     ),
-    table(list, ["status", "normalized_sans", "key_type", "issuer_name", "application_id", "updated_at"], (cert) => setSelected(cert)),
-    selected ? createElement(CertificateDetail, { cert: selected, session: props.session, setNotice: props.setNotice, onRefresh: () => setRefresh(refresh + 1) }) : null
+    table(list, ["status", "normalized_sans", "key_type", "issuer_name", "application_id", "updated_at"], (cert) => props.navigate(`/certificates/${cert.id}`))
   );
 }
 
-function CertificateDetail(props: { cert: any; session: Session; setNotice: (s: string) => void; onRefresh: () => void }) {
+function CertificateDetailPage(props: PageProps) {
+  const id = resourceID(props);
   const [refresh, setRefresh] = useState(0);
-  const detail = useAsync<{ certificate: any }>(props.session, `/v1/certificates/${props.cert.id}`, [props.cert.id, refresh]);
-  const cert = detail.data?.certificate || props.cert;
-  const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "/v1/applications/00000000-0000-0000-0000-000000000000", [cert.application_id]);
-  const versions = useAsync<{ versions: any[] }>(props.session, `/v1/certificates/${props.cert.id}/versions?limit=20`, [props.cert.id, refresh]);
-  const events = useAsync<{ audit_events: any[] }>(props.session, `/v1/certificates/${props.cert.id}/events?limit=20`, [props.cert.id, refresh]);
+  const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
+  const cert = detail.data?.certificate || {};
+  const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id]);
+  const versions = useAsync<{ versions: any[] }>(props.session, id ? `/v1/certificates/${id}/versions?limit=20` : "", [id, refresh]);
+  const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/certificates/${id}/events?limit=20` : "", [id, refresh]);
   const action = (path: string, body?: unknown, method = "POST") =>
-    api(`/v1/certificates/${props.cert.id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
+    api(`/v1/certificates/${id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
       props.setNotice(r.error ? errorText(r) : "request accepted");
       setRefresh(refresh + 1);
-      props.onRefresh();
     });
   const revoked = cert.status === "revoked" || cert.revoked_at;
   const expired = cert.status === "expired";
@@ -666,17 +713,10 @@ function CertificateDetail(props: { cert: any; session: Session; setNotice: (s: 
   const appReserved = appAccess.data?.application?.system_kind === "certhub_server" || appAccess.data?.application?.name === "certhub_server";
   const canReadMaterial = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "certificate_reader" || appRole === "manager");
   const canLifecycle = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "manager");
-  return createElement(
-    "section",
-    { className: "detail" },
-    createElement("h2", null, "Certificate detail"),
-    kv("ID", cert.id),
-    kv("Domains", (cert.normalized_sans || []).join(", ")),
-    kv("Status", cert.status),
-    kv("Latest not after", cert.latest_version?.not_after || ""),
-    kv("Fingerprint", cert.latest_version?.fingerprint_sha256 || ""),
-    revoked ? kv("Revoked", `${cert.revocation_reason || ""} ${cert.revoked_at || ""}`) : null,
-    createElement("div", { className: "toolbar" },
+  return pageFrame(
+    "Certificate",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate("/certificates") }, "Back"),
       canReadMaterial && !revoked && !expired ? createElement("button", { onClick: () => downloadMaterial(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "TLS material") : null,
       canReadMaterial && !revoked && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Archive") : null,
       canLifecycle ? createElement("button", { onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
@@ -685,61 +725,77 @@ function CertificateDetail(props: { cert: any; session: Session; setNotice: (s: 
       canLifecycle ? createElement("button", { onClick: () => action("", { revoke: false }, "DELETE") }, createElement(Trash2, { size: 16 }), "Local delete") : null,
       canLifecycle ? createElement("button", { onClick: () => action("", { revoke: true, reason: "cessation_of_operation" }, "DELETE") }, createElement(Trash2, { size: 16 }), "Revoke and delete") : null
     ),
-    createElement("h3", null, "Versions"),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, (cert.normalized_sans || []).join(", ") || cert.id || id),
+      kv("ID", cert.id),
+      kv("Application ID", cert.application_id),
+      kv("Domains", (cert.normalized_sans || []).join(", ")),
+      kv("Status", cert.status),
+      kv("Key type", cert.key_type),
+      kv("Issuer ID", cert.issuer_id),
+      kv("Latest not after", cert.latest_version?.not_after || ""),
+      kv("Fingerprint", cert.latest_version?.fingerprint_sha256 || ""),
+      revoked ? kv("Revoked", `${cert.revocation_reason || ""} ${cert.revoked_at || ""}`) : null,
+      kv("Created at", cert.created_at),
+      kv("Updated at", cert.updated_at)
+    ),
+    createElement("h2", null, "Versions"),
     table(versions, ["version", "status", "reason", "not_after", "failure_code"]),
-    createElement("h3", null, "Events"),
+    createElement("h2", null, "Events"),
     table(events, ["created_at", "action", "result", "request_id"])
   );
 }
 
 function ApplicationsPage(props: PageProps) {
-  const [refresh, setRefresh] = useState(0);
-  const [selected, setSelected] = useState<any>(undefined);
-  const list = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const list = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", []);
   return pageFrame(
     "Applications",
     isAdmin(props.session) ? createElement("button", { className: "primary", onClick: () => props.navigate("/applications/new") }, "Create Application") : null,
-    table(list, ["name", "status", "current_user_role", "domain_scope_count", "token_count", "trusted_source_cidr_count", "certificate_count", "system_kind"], setSelected),
-    selected ? createElement(ApplicationDetail, { key: selected.id, app: selected, session: props.session, setNotice: props.setNotice, navigate: props.navigate }) : null
+    table(list, ["name", "status", "current_user_role", "domain_scope_count", "token_count", "trusted_source_cidr_count", "certificate_count", "system_kind"], (app) => props.navigate(`/applications/${app.id}`))
   );
 }
 
-function ApplicationDetail(props: { app: any; session: Session; setNotice: (s: string) => void; navigate: (path: string) => void }) {
-  const base = `/v1/applications/${props.app.id}`;
+function ApplicationDetailPage(props: PageProps) {
+  const id = resourceID(props);
+  const base = `/v1/applications/${id}`;
   const [refresh, setRefresh] = useState(0);
   const [tokenValue, setTokenValue] = useState("");
   useEffect(() => {
     setTokenValue("");
-  }, [props.app.id]);
-  const detail = useAsync<{ application: any }>(props.session, base, [props.app.id, refresh]);
-  const app = detail.data?.application || props.app;
-  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, `${base}/domain-scopes?limit=100`, [props.app.id, refresh]);
-  const tokens = useAsync<{ tokens: any[] }>(props.session, `${base}/tokens?limit=100`, [props.app.id, refresh]);
-  const grants = useAsync<{ grants: any[] }>(props.session, `${base}/users?limit=100`, [props.app.id, refresh]);
-  const certs = useAsync<{ certificates: any[] }>(props.session, `/v1/certificates?application=${encodeURIComponent(props.app.id)}&limit=100`, [props.app.id, refresh]);
-  const events = useAsync<{ audit_events: any[] }>(props.session, `/v1/audit-events?application_id=${encodeURIComponent(props.app.id)}&limit=50`, [props.app.id, refresh]);
-  const reserved = props.app.system_kind === "certhub_server" || props.app.name === "certhub_server";
+  }, [id]);
+  const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
+  const app = detail.data?.application || {};
+  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, id ? `${base}/domain-scopes?limit=100` : "", [id, refresh]);
+  const tokens = useAsync<{ tokens: any[] }>(props.session, id ? `${base}/tokens?limit=100` : "", [id, refresh]);
+  const grants = useAsync<{ grants: any[] }>(props.session, id ? `${base}/users?limit=100` : "", [id, refresh]);
+  const certs = useAsync<{ certificates: any[] }>(props.session, id ? `/v1/certificates?application=${encodeURIComponent(id)}&limit=100` : "", [id, refresh]);
+  const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh]);
+  const reserved = app.system_kind === "certhub_server" || app.name === "certhub_server";
   const canManage = !reserved && canManageApplication(app, props.session);
-  return createElement("section", { className: "detail" },
-    createElement("h2", null, app.name),
-    reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
-    kv("Status", app.status),
-    kv("Trusted CIDRs", (app.trusted_source_cidrs || []).join(", ") || "none"),
-    canManage ? createElement(GenericCreate, {
-      title: "Update application",
-      fields: ["display_name", "description", "status", "trusted_source_cidrs comma separated"],
-      onSubmit: (body: Record<string, string>) => patchJSON({ session: props.session, setNotice: props.setNotice }, base, {
-        display_name: body.display_name || undefined,
-        description: body.description || null,
-        status: body.status || undefined,
-        trusted_source_cidrs: splitList(body["trusted_source_cidrs comma separated"])
-      }, () => setRefresh(refresh + 1))
-    }) : null,
-    createElement("h3", null, "Domain scopes"),
+  return pageFrame(app.name || "Application",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
+      canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/applications/${id}/edit`) }, "Edit") : null
+    ),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, appLabel(app)),
+      reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
+      kv("ID", app.id),
+      kv("Status", app.status),
+      kv("Current user role", app.current_user_role),
+      kv("Description", app.description || ""),
+      kv("Trusted CIDRs", (app.trusted_source_cidrs || []).join(", ") || "none"),
+      kv("Domain scopes", app.domain_scope_count),
+      kv("Tokens", app.token_count),
+      kv("Certificates", app.certificate_count),
+      kv("Created at", app.created_at),
+      kv("Updated at", app.updated_at)
+    ),
+    createElement("h2", null, "Domain scopes"),
     canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh(refresh + 1)) }) : null,
     table(scopes, ["value", "kind", "created_at"]),
     canManage ? rowActions(scopes, (scope) => createElement("button", { key: scope.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)) }, `Delete ${scope.value}`)) : null,
-    createElement("h3", null, "Tokens"),
+    createElement("h2", null, "Tokens"),
     canManage ? createElement(GenericCreate, { title: "Create token", fields: ["name", "expires_at"], onSubmit: (body: Record<string, string>) => {
       setTokenValue("");
         api<any>(`${base}/tokens`, props.session, { method: "POST", body: JSON.stringify(tokenCreateBody(body)) }).then((r) => {
@@ -755,140 +811,281 @@ function ApplicationDetail(props: { app: any; session: Session; setNotice: (s: s
     ) : null,
     table(tokens, ["name", "status", "expires_at", "last_used_at"]),
     canManage ? rowActions(tokens, (token) => createElement("button", { key: token.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)) }, `Revoke ${token.name}`)) : null,
-    createElement("h3", null, "Grants"),
+    createElement("h2", null, "Grants"),
     canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null,
     table(grants, ["user_id", "role", "created_at"]),
     canManage ? rowActions(grants, (grant) => createElement("button", { key: grant.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)) }, `Remove ${grant.user?.email || grant.user_id}`)) : null,
     createElement("div", { className: "section-head" },
-      createElement("h3", null, "Certificates"),
+      createElement("h2", null, "Certificates"),
       canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/certificates/new?application_id=${encodeURIComponent(app.id)}`) }, createElement(BadgeCheck, { size: 16 }), "Create Certificate") : null
     ),
-    table(certs, ["status", "normalized_sans", "key_type", "issuer_name", "updated_at"]),
-    createElement("h3", null, "Audit events"),
+    table(certs, ["status", "normalized_sans", "key_type", "issuer_name", "updated_at"], (cert) => props.navigate(`/certificates/${cert.id}`)),
+    createElement("h2", null, "Audit events"),
     table(events, ["created_at", "action", "result", "request_id"])
   );
 }
 
-function UsersPage(props: PageProps) {
-  const [refresh, setRefresh] = useState(0);
-  const [selected, setSelected] = useState<any>(undefined);
-  const list = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
-  if (!isAdmin(props.session)) return forbiddenPage("Users");
-  return pageFrame("Users",
-    createElement("button", { className: "primary", onClick: () => props.navigate("/users/new") }, "Create User"),
-    table(list, ["email", "display_name", "global_role", "status", "oidc_linked", "application_grant_count", "last_login_at"], setSelected),
-    selected ? createElement(UserDetail, { user: selected, session: props.session, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null
+function ApplicationEditPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ application: any }>(props.session, id ? `/v1/applications/${id}` : "", [id]);
+  const app = detail.data?.application;
+  const [body, setBody] = useState({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] as string[] });
+  useEffect(() => {
+    if (!app) return;
+    setBody({ display_name: app.display_name || "", description: app.description || "", status: app.status || "active", trusted_source_cidrs: app.trusted_source_cidrs || [] });
+  }, [app?.id]);
+  const submit = (e: Event) => {
+    e.preventDefault();
+    const cidrError = listError(body.trusted_source_cidrs, "trusted_source_cidrs", "ip_or_cidr");
+    const error = required(body.display_name, "display_name") || validateField("status", body.status) || cidrError;
+    if (error) return props.setNotice(error);
+    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/applications/${id}`, {
+      display_name: body.display_name,
+      description: body.description || null,
+      status: body.status,
+      trusted_source_cidrs: body.trusted_source_cidrs
+    }, () => props.navigate(`/applications/${id}`));
+  };
+  return createPage("Edit Application", `/applications/${id}`, props.navigate,
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+      createElement("form", { className: "create-form", onSubmit: submit },
+        input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
+        textAreaInput("description", body.description, (v) => setBody({ ...body, description: v })),
+        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
+        createElement(ListInput, { label: "trusted_source_cidrs", values: body.trusted_source_cidrs, onChange: (v: string[]) => setBody({ ...body, trusted_source_cidrs: v }), mode: "ip_or_cidr", placeholder: "203.0.113.10" }),
+        formActions("Save", `/applications/${id}`, props.navigate)
+      )
   );
 }
 
-function UserDetail(props: { user: any; session: Session; setNotice: (s: string) => void; onDone: () => void }) {
-  const [refresh, setRefresh] = useState(0);
-  const [password2FA, setPassword2FA] = useState<any>(undefined);
-  const detail = useAsync<{ user: any }>(props.session, `/v1/users/${props.user.id}`, [props.user.id, refresh]);
-  const user = detail.data?.user || props.user;
-  return createElement("section", { className: "detail" },
-    createElement("h2", null, user.email),
-    kv("Password login", user.password_login_enabled ? "enabled" : "disabled"),
-    kv("Password 2FA", user.password_2fa_enabled ? "enabled" : "disabled"),
-    kv("OIDC", user.oidc_linked ? "linked" : "not linked"),
-    createElement(GenericCreate, {
-      title: "Update user",
-      fields: ["display_name", "global_role", "status", "password", "provision_password_2fa", "reset_password_2fa"],
-      onSubmit: (body: Record<string, string>) => {
-        setPassword2FA(undefined);
-        api<any>(`/v1/users/${user.id}`, props.session, { method: "PATCH", body: JSON.stringify(emptyToPatch(body)) }).then((r) => {
-          if (r.data?.password_2fa) setPassword2FA(r.data.password_2fa);
-          props.setNotice(errorOrOK(r));
-          if (!r.error) {
-            setRefresh(refresh + 1);
-            props.onDone();
-          }
-        });
-      }
-    }),
-    password2FA?.provisioning_uri ? createElement("div", { className: "secret-once" }, kv("Provisioning URI", password2FA.provisioning_uri), kv("Secret", password2FA.secret)) : null,
-    createElement("h3", null, "Application grants"),
+function UsersPage(props: PageProps) {
+  const list = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", []);
+  if (!isAdmin(props.session)) return forbiddenPage("Users");
+  return pageFrame("Users",
+    createElement("button", { className: "primary", onClick: () => props.navigate("/users/new") }, "Create User"),
+    table(list, ["email", "display_name", "global_role", "status", "oidc_linked", "application_grant_count", "last_login_at"], (user) => props.navigate(`/users/${user.id}`))
+  );
+}
+
+function UserDetailPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id]);
+  const user = detail.data?.user || {};
+  if (!isAdmin(props.session)) return forbiddenPage("Users");
+  return pageFrame(user.email || "User",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate("/users") }, "Back"),
+      createElement("button", { className: "primary", onClick: () => props.navigate(`/users/${id}/edit`) }, "Edit")
+    ),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, user.email),
+      kv("ID", user.id),
+      kv("Display name", user.display_name),
+      kv("Global role", user.global_role),
+      kv("Status", user.status),
+      kv("Password login", user.password_login_enabled ? "enabled" : "disabled"),
+      kv("Password 2FA", user.password_2fa_enabled ? "enabled" : "disabled"),
+      kv("OIDC", user.oidc_linked ? "linked" : "not linked"),
+      kv("Application grants", user.application_grant_count),
+      kv("Last login", user.last_login_at || ""),
+      kv("Created at", user.created_at),
+      kv("Updated at", user.updated_at)
+    ),
+    createElement("h2", null, "Application grants"),
     table({ data: { grants: user.application_grants || [] } }, ["application_name", "role", "created_at"])
   );
 }
 
-function IssuersPage(props: PageProps) {
-  const [refresh, setRefresh] = useState(0);
-  const [selected, setSelected] = useState<any>(undefined);
-  const list = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
-  if (!isAdmin(props.session)) return forbiddenPage("Issuers");
-  return pageFrame("Issuers",
-    createElement("button", { className: "primary", onClick: () => props.navigate("/issuers/new") }, "Create Issuer"),
-    table(list, ["name", "type", "directory_url", "environment", "status", "default", "renewal_window_seconds"], setSelected),
-    selected ? createElement(IssuerDetail, { issuer: selected, session: props.session, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null
+function UserEditPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id]);
+  const user = detail.data?.user;
+  const [password2FA, setPassword2FA] = useState<any>(undefined);
+  const [body, setBody] = useState({ display_name: "", global_role: "user", status: "active", password: "", provision_password_2fa: false, reset_password_2fa: false });
+  useEffect(() => {
+    if (!user) return;
+    setBody((current) => ({ ...current, display_name: user.display_name || "", global_role: user.global_role || "user", status: user.status || "active", password: "" }));
+  }, [user?.id]);
+  if (!isAdmin(props.session)) return forbiddenPage("Users");
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    const error = required(body.display_name, "display_name") || validateField("global_role", body.global_role) || validateField("status", body.status) || (body.password && body.password.length < 12 ? "password must be at least 12 characters" : "");
+    if (error) return props.setNotice(error);
+    setPassword2FA(undefined);
+    const patch: Record<string, unknown> = {
+      display_name: body.display_name,
+      global_role: body.global_role,
+      status: body.status
+    };
+    if (body.password) {
+      patch.password = body.password;
+      patch.provision_password_2fa = body.provision_password_2fa;
+    }
+    if (body.reset_password_2fa) patch.reset_password_2fa = true;
+    const result = await api<any>(`/v1/users/${id}`, props.session, { method: "PATCH", body: JSON.stringify(patch) });
+    if (result.data?.password_2fa) setPassword2FA(result.data.password_2fa);
+    props.setNotice(errorOrOK(result));
+    if (!result.error && !result.data?.password_2fa) props.navigate(`/users/${id}`);
+  };
+  return createPage("Edit User", `/users/${id}`, props.navigate,
+    password2FA?.provisioning_uri ? createElement("div", { className: "secret-once" }, kv("Provisioning URI", password2FA.provisioning_uri), kv("Secret", password2FA.secret), createElement("button", { className: "primary", onClick: () => props.navigate(`/users/${id}`) }, "Done")) : null,
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+      createElement("form", { className: "create-form", onSubmit: submit },
+        input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
+        selectInput("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]]),
+        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
+        input("password", body.password, (v) => setBody({ ...body, password: v }), "password"),
+        checkboxInput("provision_password_2fa", body.provision_password_2fa, (v) => setBody({ ...body, provision_password_2fa: v })),
+        checkboxInput("reset_password_2fa", body.reset_password_2fa, (v) => setBody({ ...body, reset_password_2fa: v })),
+        formActions("Save", `/users/${id}`, props.navigate)
+      )
   );
 }
 
-function IssuerDetail(props: { issuer: any; session: Session; setNotice: (s: string) => void; onDone: () => void }) {
-  const [refresh, setRefresh] = useState(0);
-  const detail = useAsync<{ issuer: any }>(props.session, `/v1/issuers/${props.issuer.id}`, [props.issuer.id, refresh]);
-  const issuer = detail.data?.issuer || props.issuer;
-  return createElement("section", { className: "detail" },
-    createElement("h2", null, issuer.name),
-    kv("Directory URL", issuer.directory_url),
-    kv("Environment", issuer.environment),
-    kv("ACME account", issuer.acme_account_status || ""),
-    createElement(GenericCreate, {
-      title: "Update issuer",
-      fields: ["default", "status", "renewal_window_seconds", "contact_email"],
-      onSubmit: (body: Record<string, string>) => patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/issuers/${issuer.id}`, {
-        default: body.default ? body.default === "true" : undefined,
-        status: body.status || undefined,
-        renewal_window_seconds: body.renewal_window_seconds ? Number(body.renewal_window_seconds) : undefined,
-        contact_email: body.contact_email || undefined
-      }, () => {
-        setRefresh(refresh + 1);
-        props.onDone();
-      })
-    })
+function IssuersPage(props: PageProps) {
+  const list = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
+  if (!isAdmin(props.session)) return forbiddenPage("Issuers");
+  return pageFrame("Issuers",
+    createElement("button", { className: "primary", onClick: () => props.navigate("/issuers/new") }, "Create Issuer"),
+    table(list, ["name", "type", "directory_url", "environment", "status", "default", "renewal_window_seconds"], (issuer) => props.navigate(`/issuers/${issuer.id}`))
+  );
+}
+
+function IssuerDetailPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id]);
+  const issuer = detail.data?.issuer || {};
+  if (!isAdmin(props.session)) return forbiddenPage("Issuers");
+  return pageFrame(issuer.name || "Issuer",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate("/issuers") }, "Back"),
+      createElement("button", { className: "primary", onClick: () => props.navigate(`/issuers/${id}/edit`) }, "Edit")
+    ),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, issuer.name),
+      kv("ID", issuer.id),
+      kv("Type", issuer.type),
+      kv("Directory URL", issuer.directory_url),
+      kv("Environment", issuer.environment),
+      kv("Default", issuer.default ? "yes" : "no"),
+      kv("Status", issuer.status),
+      kv("Renewal window seconds", issuer.renewal_window_seconds),
+      kv("Contact email", issuer.contact_email),
+      kv("ACME account", issuer.acme_account_status || ""),
+      kv("Created at", issuer.created_at),
+      kv("Updated at", issuer.updated_at)
+    )
+  );
+}
+
+function IssuerEditPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id]);
+  const issuer = detail.data?.issuer;
+  const [body, setBody] = useState({ default: false, status: "active", renewal_window_seconds: "2592000", contact_email: "" });
+  useEffect(() => {
+    if (!issuer) return;
+    setBody({ default: Boolean(issuer.default), status: issuer.status || "active", renewal_window_seconds: String(issuer.renewal_window_seconds || 2592000), contact_email: issuer.contact_email || "" });
+  }, [issuer?.id]);
+  if (!isAdmin(props.session)) return forbiddenPage("Issuers");
+  const submit = (e: Event) => {
+    e.preventDefault();
+    const error = validateField("status", body.status) || validateField("contact_email", body.contact_email) || (Number(body.renewal_window_seconds) <= 0 ? "renewal_window_seconds must be positive" : "");
+    if (error) return props.setNotice(error);
+    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/issuers/${id}`, {
+      default: body.default,
+      status: body.status,
+      renewal_window_seconds: Number(body.renewal_window_seconds),
+      contact_email: body.contact_email
+    }, () => props.navigate(`/issuers/${id}`));
+  };
+  return createPage("Edit Issuer", `/issuers/${id}`, props.navigate,
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+      createElement("form", { className: "create-form", onSubmit: submit },
+        checkboxInput("default", body.default, (v) => setBody({ ...body, default: v })),
+        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
+        input("renewal_window_seconds", body.renewal_window_seconds, (v) => setBody({ ...body, renewal_window_seconds: v }), "number"),
+        input("contact_email", body.contact_email, (v) => setBody({ ...body, contact_email: v }), "email"),
+        formActions("Save", `/issuers/${id}`, props.navigate)
+      )
   );
 }
 
 function DNSPage(props: PageProps) {
-  const [selected, setSelected] = useState<any>(undefined);
-  const [refresh, setRefresh] = useState(0);
-  const list = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
+  const list = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
   if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
   return pageFrame(
     "DNS Providers",
     createElement("button", { className: "primary", onClick: () => props.navigate("/dns-providers/new") }, "Create DNS Provider"),
-    table(list, ["name", "type", "zone_mode", "status", "zone_refresh_status", "last_zone_refresh_at"], setSelected),
-    selected ? createElement(DNSDetail, { provider: selected, session: props.session, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null
+    table(list, ["name", "type", "zone_mode", "status", "zone_refresh_status", "last_zone_refresh_at"], (provider) => props.navigate(`/dns-providers/${provider.id}`))
   );
 }
 
-function DNSDetail(props: { provider: any; session: Session; setNotice: (s: string) => void; onDone: () => void }) {
+function DNSDetailPage(props: PageProps) {
+  const id = resourceID(props);
   const [refresh, setRefresh] = useState(0);
-  const detail = useAsync<{ dns_provider: any }>(props.session, `/v1/dns-providers/${props.provider.id}`, [props.provider.id, refresh]);
-  const provider = detail.data?.dns_provider || props.provider;
-  const zones = useAsync<{ zones: any[] }>(props.session, `/v1/dns-providers/${props.provider.id}/zones?limit=100`, [props.provider.id, refresh]);
-  const discovered = useAsync<{ zones: any[] }>(props.session, `/v1/dns-providers/${props.provider.id}/zones/discovered?limit=100`, [props.provider.id, refresh]);
-  const base = `/v1/dns-providers/${props.provider.id}`;
-  return createElement("section", { className: "detail" },
-    createElement("h2", null, provider.name),
-    kv("Refresh status", provider.zone_refresh_status),
-    provider.zone_refresh_failure_code ? kv("Refresh failure", `${provider.zone_refresh_failure_code}: ${provider.zone_refresh_failure_message || ""}`) : null,
-    createElement(GenericCreate, { title: "Update provider", fields: ["zone_mode", "status", "credentials_json"], onSubmit: (body: Record<string, string>) => {
-      const credentials = body.credentials_json ? safeJSON(body.credentials_json) : undefined;
-      if (body.credentials_json && !credentials) return props.setNotice("invalid credentials_json");
-      patchJSON({ session: props.session, setNotice: props.setNotice }, base, { zone_mode: body.zone_mode || undefined, status: body.status || undefined, credentials }, () => {
-        setRefresh(refresh + 1);
-        props.onDone();
-      });
-    } }),
+  const detail = useAsync<{ dns_provider: any }>(props.session, id ? `/v1/dns-providers/${id}` : "", [id, refresh]);
+  const provider = detail.data?.dns_provider || {};
+  const zones = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones?limit=100` : "", [id, refresh]);
+  const discovered = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones/discovered?limit=100` : "", [id, refresh]);
+  const base = `/v1/dns-providers/${id}`;
+  if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
+  return pageFrame(provider.name || "DNS Provider",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate("/dns-providers") }, "Back"),
+      createElement("button", { className: "primary", onClick: () => props.navigate(`/dns-providers/${id}/edit`) }, "Edit")
+    ),
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, provider.name),
+      kv("ID", provider.id),
+      kv("Type", provider.type),
+      kv("Zone mode", provider.zone_mode),
+      kv("Status", provider.status),
+      kv("Refresh status", provider.zone_refresh_status),
+      provider.zone_refresh_failure_code ? kv("Refresh failure", `${provider.zone_refresh_failure_code}: ${provider.zone_refresh_failure_message || ""}`) : null,
+      kv("Last zone refresh", provider.last_zone_refresh_at || ""),
+      kv("Created at", provider.created_at),
+      kv("Updated at", provider.updated_at)
+    ),
     createElement("div", { className: "toolbar" }, createElement("button", { onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones/refresh`, {}, () => setRefresh(refresh + 1)) }, createElement(RefreshCw, { size: 16 }), "Refresh zones")),
     provider.zone_mode === "manual" ? createElement(GenericCreate, { title: "Add zone", fields: ["zone_name"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, body, () => setRefresh(refresh + 1)) }) : null,
-    createElement("h3", null, "Zones"),
+    createElement("h2", null, "Zones"),
     table(zones, ["zone_name", "created_at"]),
     provider.zone_mode === "manual" ? rowActions(zones, (zone) => createElement("button", { key: zone.id, onClick: () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh(refresh + 1)) }, `Delete ${zone.zone_name}`)) : null,
-    createElement("h3", null, "Discovered zones"),
+    createElement("h2", null, "Discovered zones"),
     table(discovered, ["zone_name", "already_configured", "conflict_dns_provider_id"]),
     provider.zone_mode === "manual" ? rowActions(discovered, (zone) => createElement("button", { key: zone.zone_name, disabled: zone.already_configured, onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh(refresh + 1)) }, `Add ${zone.zone_name}`)) : null
+  );
+}
+
+function DNSEditPage(props: PageProps) {
+  const id = resourceID(props);
+  const detail = useAsync<{ dns_provider: any }>(props.session, id ? `/v1/dns-providers/${id}` : "", [id]);
+  const provider = detail.data?.dns_provider;
+  const [body, setBody] = useState({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
+  useEffect(() => {
+    if (!provider) return;
+    setBody({ zone_mode: provider.zone_mode || "auto", status: provider.status || "active", api_token: "", api_key: "" });
+  }, [provider?.id]);
+  if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
+  const submit = (e: Event) => {
+    e.preventDefault();
+    const error = validateField("zone_mode", body.zone_mode) || validateField("status", body.status);
+    if (error) return props.setNotice(error);
+    const payload: Record<string, unknown> = { zone_mode: body.zone_mode, status: body.status };
+    if (provider?.type === "cloudflare" && body.api_token) payload.credentials = { api_token: body.api_token };
+    if (provider?.type === "arvancloud" && body.api_key) payload.credentials = { api_key: body.api_key };
+    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/dns-providers/${id}`, payload, () => props.navigate(`/dns-providers/${id}`));
+  };
+  return createPage("Edit DNS Provider", `/dns-providers/${id}`, props.navigate,
+    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+      createElement("form", { className: "create-form", onSubmit: submit },
+        selectInput("zone_mode", body.zone_mode, (v) => setBody({ ...body, zone_mode: v }), [["auto", "Auto"], ["manual", "Manual"]]),
+        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
+        provider?.type === "cloudflare" ? input("api_token", body.api_token, (v) => setBody({ ...body, api_token: v }), "password") : null,
+        provider?.type === "arvancloud" ? input("api_key", body.api_key, (v) => setBody({ ...body, api_key: v }), "password") : null,
+        formActions("Save", `/dns-providers/${id}`, props.navigate)
+      )
   );
 }
 
@@ -1255,6 +1452,10 @@ function forbiddenPage(title: string) {
   return pageFrame(title, null, createElement("div", { className: "empty" }, "This global management view is available to admins only."));
 }
 
+function resourceID(props: PageProps) {
+  return props.route.id || "";
+}
+
 function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, columns: string[], onSelect?: (row: any) => void) {
   const rows = rowsOf(result);
   if (result.loading) return createElement("div", { className: "empty" }, "Loading");
@@ -1490,16 +1691,6 @@ function emptyToUndefined(body: Record<string, string>) {
   return Object.fromEntries(Object.entries(body).map(([k, v]) => [k, v === "" ? undefined : v]));
 }
 
-function emptyToPatch(body: Record<string, string>) {
-  return Object.fromEntries(Object.entries(body).map(([k, v]) => {
-    if (v === "") return [k, undefined];
-    if (v === "null") return [k, null];
-    if (v === "true") return [k, true];
-    if (v === "false") return [k, false];
-    return [k, v];
-  }));
-}
-
 function required(value: string, label: string) {
   return value.trim() ? "" : `${label} is required`;
 }
@@ -1553,14 +1744,6 @@ function tokenCreateBody(body: Record<string, string>) {
     name: body.name,
     expires_at: body.expires_at === "null" ? null : body.expires_at || undefined
   };
-}
-
-function safeJSON(value: string): unknown | undefined {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
 }
 
 function validateField(field: string, value: string) {

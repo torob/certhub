@@ -120,28 +120,19 @@ button:disabled {
   margin-top: 0;
 }
 
-.identity {
+.profile-nav {
   margin-top: auto;
-  padding: 10px;
   border-top: 1px solid #d7dee5;
-  color: #52616b;
   overflow-wrap: anywhere;
 }
 
 .security-panel {
   display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #d7dee5;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #d6dee4;
   border-radius: 8px;
   background: #fff;
-}
-
-.security-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
 }
 
 .workspace {
@@ -159,6 +150,11 @@ button:disabled {
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+.page-header > button {
+  justify-self: end;
+  padding-inline: 12px;
 }
 
 h1,
@@ -191,17 +187,21 @@ h3 {
   background: #fff;
 }
 
+.detail {
+  width: min(100%, 980px);
+}
+
 .inline-form {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-items: end;
 }
 
 .create-form {
-  width: min(100%, 780px);
+  width: min(100%, 820px);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  padding: 12px;
+  gap: 14px;
+  padding: 14px;
   border: 1px solid #d6dee4;
   border-radius: 8px;
   background: #fff;
@@ -209,6 +209,17 @@ h3 {
 
 .form-section {
   display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid #d6dee4;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
 }
 
@@ -315,6 +326,10 @@ tr.selectable {
 
 tr.selectable:hover td {
   background: #f7fbfb;
+}
+
+tr.selectable:focus-within td {
+  background: #eef6f5;
 }
 
 .toolbar {
@@ -502,7 +517,7 @@ tr.selectable:hover td {
     width: auto;
   }
 
-  .identity {
+  .profile-nav {
     width: 100%;
     margin-top: 0;
   }
@@ -576,10 +591,17 @@ tr.selectable:hover td {
   display: grid;
   grid-template-columns: 160px minmax(0, 1fr);
   gap: 8px;
+  align-items: start;
+  padding-block: 2px;
 }
 
 .kv span {
   color: #5a6872;
+}
+
+.kv strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .note,
