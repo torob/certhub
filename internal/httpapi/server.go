@@ -172,6 +172,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		_, ready := s.readinessSnapshot()
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(s.metrics.render(ready)))
+	case r.Method == http.MethodGet && r.URL.Path == "/certhub-runtime-config.js":
+		status = s.serveRuntimeConfig(w)
 	case isIdentityEndpoint(r.URL.Path):
 		status, errorCode = s.serveIdentity(w, r, reqctx)
 	case isCertificateEndpoint(r.URL.Path):
@@ -628,6 +630,19 @@ func (s *Server) writeStaticFile(w http.ResponseWriter, name string, index bool)
 	return http.StatusOK
 }
 
+func (s *Server) serveRuntimeConfig(w http.ResponseWriter) int {
+	oidcEnabled := "false"
+	if s.cfg != nil && s.cfg.Auth.OIDC.Enabled {
+		oidcEnabled = "true"
+	}
+	securityHeaders(w.Header())
+	noStoreHeaders(w.Header())
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("window.__CERTHUB_CONFIG__={auth:{oidcEnabled:" + oidcEnabled + "}};\n"))
+	return http.StatusOK
+}
+
 func isHashedStaticAsset(name string) bool {
 	base := path.Base(name)
 	ext := path.Ext(base)
@@ -635,14 +650,10 @@ func isHashedStaticAsset(name string) bool {
 		return false
 	}
 	stem := strings.TrimSuffix(base, ext)
-	parts := strings.Split(stem, "-")
-	if len(parts) < 2 {
+	if len(stem) < 10 || stem[len(stem)-9] != '-' {
 		return false
 	}
-	hash := parts[len(parts)-1]
-	if len(hash) < 8 {
-		return false
-	}
+	hash := stem[len(stem)-8:]
 	for _, r := range hash {
 		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
 			continue

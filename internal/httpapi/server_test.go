@@ -256,6 +256,78 @@ func TestStaticSPAFallbackAndTraversalGuard(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigScriptReflectsOIDCEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		extra    string
+		expected string
+	}{
+		{name: "disabled", expected: "oidcEnabled:false"},
+		{
+			name: "enabled",
+			extra: `
+auth:
+  oidc:
+    enabled: true
+    issuer_url: "https://idp.example.com"
+    client_id: "certhub-web"
+    redirect_url: "https://certhub.example.com/v1/auth/oidc/callback"
+`,
+			expected: "oidcEnabled:true",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := New(testConfig(t, tc.extra)).Handler()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/certhub-runtime-config.js", nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/javascript") {
+				t.Fatalf("content type = %q", ct)
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("Cache-Control = %q", rec.Header().Get("Cache-Control"))
+			}
+			if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "unsafe-inline") || csp == "" {
+				t.Fatalf("bad CSP %q", csp)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "window.__CERTHUB_CONFIG__") || !strings.Contains(body, tc.expected) {
+				t.Fatalf("body = %s", body)
+			}
+			for _, secret := range []string{"idp.example.com", "certhub-web", "callback"} {
+				if strings.Contains(body, secret) {
+					t.Fatalf("runtime config leaked OIDC provider detail %q: %s", secret, body)
+				}
+			}
+		})
+	}
+}
+
+func TestIsHashedStaticAssetAcceptsViteHashSuffixes(t *testing.T) {
+	for _, name := range []string{
+		"assets/index-CM-8UJp0.js",
+		"assets/index--n8dLrcE.css",
+		"assets/app-icon-AbC_12xY.woff2",
+	} {
+		if !isHashedStaticAsset(name) {
+			t.Fatalf("%s was not recognized as a hashed asset", name)
+		}
+	}
+	for _, name := range []string{
+		"assets/index.js",
+		"assets/runtime-config.js",
+		"certhub-runtime-config.js",
+		"index-CM-8UJp0.js",
+	} {
+		if isHashedStaticAsset(name) {
+			t.Fatalf("%s was incorrectly recognized as a hashed asset", name)
+		}
+	}
+}
+
 func TestProductionStaticAssetsFromDist(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	distWeb := filepath.Join(repoRoot, "dist", "web")

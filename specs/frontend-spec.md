@@ -138,6 +138,7 @@ Rules:
 - User access tokens have prefix `cth_uat_v1_`; refresh tokens have prefix `cth_urt_v1_`. The prefix is only a public token-class marker. The remainder is opaque.
 - Password login supports Certhub-native TOTP 2FA when enabled or required by backend policy.
 - OIDC login does not require Certhub-native 2FA and must not ask for a TOTP code.
+- The login screen must show the OIDC sign-in control only when the same-origin runtime frontend config indicates OIDC login is enabled.
 - The frontend must support TOTP setup, confirmation, and disable flows through `/v1/auth/password-2fa/*`.
 - OIDC must use Certhub's backend-managed PKCE flow. The frontend must not implement implicit flow, hybrid flow, or direct provider token exchange.
 - The frontend must never handle an OIDC client secret.
@@ -701,7 +702,7 @@ Required frontend scenarios:
 - Failed backend action displays backend error code and message.
 - Forms validate user input client-side before submit and show field-level errors for invalid machine names, domains, wildcard domains, emails, URLs, enum values, duplicate SANs, invalid token expirations, and control characters in human text.
 - Backend validation errors still render correctly when server-side validation rejects an input the frontend allowed.
-- Login supports password and OIDC modes and handles `invalid_credentials`, `password_auth_disabled`, and `user_not_provisioned`.
+- Login supports password and conditionally enabled OIDC modes and handles `invalid_credentials`, `password_auth_disabled`, and `user_not_provisioned`.
 - Password login supports TOTP 2FA and handles `password_2fa_required` and `invalid_2fa_code`; OIDC login does not show TOTP prompts.
 - OIDC login uses Authorization Code with PKCE only and never uses implicit flow or client secrets.
 - Login stores access and refresh tokens only in `sessionStorage`; refresh rotates both values; logout clears them.

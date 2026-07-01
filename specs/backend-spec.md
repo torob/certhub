@@ -454,6 +454,7 @@ Static response cache rules:
 - `index.html` must use `Cache-Control: no-store` or a short revalidation policy so clients do not pin old asset references.
 - Hashed JavaScript, CSS, font, icon, and image assets may use long-lived immutable cache headers such as `Cache-Control: public, max-age=31536000, immutable`.
 - Non-hashed static assets must use `Cache-Control: no-store` or a short revalidation policy.
+- The same-origin runtime frontend config script must use `Cache-Control: no-store` and may expose only non-secret startup UI capability booleans such as whether OIDC login is enabled.
 - Backend API responses, auth responses, certificate material responses, and archive responses must never inherit static asset cache headers.
 
 Static response security headers:
@@ -3958,6 +3959,7 @@ Required backend scenarios:
 - Embedded web UI responses set required security headers including `X-Content-Type-Options`, `Referrer-Policy`, and restrictive `Content-Security-Policy`.
 - Production CSP for web UI responses does not allow `unsafe-inline`, `unsafe-eval`, remote script origins, remote style origins, remote font origins, or remote image origins.
 - CSP and security headers are present on `index.html`, frontend route fallback responses, static asset responses, and embedded web UI `404` responses.
+- The runtime frontend config script is served by the backend with no-store cache headers and does not expose OIDC issuer URLs, client IDs, redirect URLs, tokens, or provider metadata.
 - Static asset content types are allowlisted and paired with `X-Content-Type-Options: nosniff`; unknown embedded asset types are not served as executable script or style content.
 - Embedded web UI cache headers distinguish `index.html`, hashed static assets, non-hashed static assets, and backend API responses.
 - Only content-hashed immutable assets receive long-lived public cache headers; `index.html`, frontend route fallbacks, non-hashed assets, and errors do not.

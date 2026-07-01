@@ -54,6 +54,17 @@ type TableColumn = string | {
   label?: string;
   render?: (row: any) => unknown;
 };
+type RuntimeConfig = {
+  auth?: {
+    oidcEnabled?: boolean;
+  };
+};
+
+declare global {
+  interface Window {
+    __CERTHUB_CONFIG__?: RuntimeConfig;
+  }
+}
 
 const queryClient = new QueryClient();
 const sessionKey = "certhub.session.v1";
@@ -65,6 +76,10 @@ const toastFadeMs = 3_000;
 let refreshInFlight: Promise<boolean> | undefined;
 let nextNoticeID = 0;
 const noticeTimers = new Map<number, number[]>();
+
+function oidcLoginEnabled() {
+  return window.__CERTHUB_CONFIG__?.auth?.oidcEnabled === true;
+}
 
 const nav = [
   ["home", "Home", Home],
@@ -516,6 +531,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [error, setError] = useState(props.notice);
+  const showOIDCLogin = oidcLoginEnabled();
   useEffect(() => setError(props.notice), [props.notice]);
   async function submit() {
     const result = await api<{ access_token: string; access_expires_at?: string; refresh_token: string; refresh_expires_at?: string }>("/v1/auth/login", undefined, {
@@ -537,7 +553,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
       input("Password", password, setPassword, "password"),
       input("TOTP code", totp, setTotp, "text"),
       createElement("button", { className: "primary", onClick: submit }, createElement(Lock, { size: 16 }), "Sign in"),
-      createElement("button", { className: "secondary", onClick: () => (window.location.href = "/v1/auth/oidc/login") }, "OIDC sign in"),
+      showOIDCLogin ? createElement("button", { className: "secondary", onClick: () => (window.location.href = "/v1/auth/oidc/login") }, "OIDC sign in") : null,
       error ? createElement("p", { className: "error" }, error) : null
     )
   );
