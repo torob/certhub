@@ -154,10 +154,14 @@ func TestParseCertificateListParamsExpiresBefore(t *testing.T) {
 func TestSerializeCertificateIncludesLatestVersion(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	cert := fixture.cert
+	cert.IssuerName = "letsencrypt_production"
 	cert.LatestVersion = &fixture.version
 	out := serializeCertificate(cert)
 	if out.LatestVersion == nil || out.LatestVersion.ID != fixture.version.ID || out.LatestVersion.NotAfter == nil {
 		t.Fatalf("latest_version = %#v", out.LatestVersion)
+	}
+	if out.IssuerName == nil || *out.IssuerName != "letsencrypt_production" {
+		t.Fatalf("issuer_name = %#v", out.IssuerName)
 	}
 }
 

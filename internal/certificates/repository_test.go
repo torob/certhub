@@ -28,6 +28,9 @@ func TestCreateOrReuseNormalizesIdentityAndUsesPartialConflict(t *testing.T) {
 	if cert.KeyType != KeyTypeECDSAP256 || cert.NormalizedSANs[0] != "api.example.com" {
 		t.Fatalf("certificate = %#v", cert)
 	}
+	if cert.IssuerName != "letsencrypt_production" {
+		t.Fatalf("issuer_name = %q", cert.IssuerName)
+	}
 	if got := db.args[3].([]string); got[0] != "api.example.com" || got[1] != "www.example.com" {
 		t.Fatalf("normalized args = %#v", db.args)
 	}
@@ -252,6 +255,7 @@ func certificateRowValues(now time.Time, sans []string, status string, failureCo
 		sans,
 		string(KeyTypeECDSAP256),
 		"32345678-1234-4234-9234-123456789abc",
+		"letsencrypt_production",
 		"22345678-1234-4234-9234-123456789abc",
 		status,
 		stringValue(failureCode),

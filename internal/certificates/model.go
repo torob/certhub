@@ -108,6 +108,7 @@ type Certificate struct {
 	NormalizedSANs   []string
 	KeyType          KeyType
 	IssuerID         string
+	IssuerName       string
 	ApplicationID    string
 	Status           Status
 	FailureCode      *string

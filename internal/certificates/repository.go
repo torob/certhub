@@ -1121,6 +1121,7 @@ func (r Repository) listEventsQuery(params ListEventsParams) (string, []any, err
 
 func certificateSelectSQL(prefix string) string {
 	return prefix + `.id, ` + prefix + `.normalized_sans, ` + prefix + `.key_type, ` + prefix + `.issuer_id, ` +
+		`(select i.name from issuers i where i.id = ` + prefix + `.issuer_id), ` +
 		prefix + `.application_id, ` + prefix + `.status, ` + prefix + `.failure_code, ` + prefix + `.failure_message, ` +
 		prefix + `.revocation_reason, ` + prefix + `.revoked_at, ` + prefix + `.revoked_by_user_id, ` +
 		prefix + `.created_at, ` + prefix + `.updated_at, ` + prefix + `.deleted_at, ` +
@@ -1128,7 +1129,7 @@ func certificateSelectSQL(prefix string) string {
 }
 
 func certificateReturningSQL() string {
-	return `id, normalized_sans, key_type, issuer_id, application_id, status, failure_code, failure_message,
+	return `id, normalized_sans, key_type, issuer_id, (select i.name from issuers i where i.id = certificates.issuer_id), application_id, status, failure_code, failure_message,
     revocation_reason, revoked_at, revoked_by_user_id, created_at, updated_at, deleted_at,
     (select count(*) from certificate_versions where certificate_id = certificates.id)::bigint`
 }
@@ -1183,13 +1184,14 @@ type scanner interface {
 func scanCertificate(row scanner) (Certificate, error) {
 	var cert Certificate
 	var keyType, status string
-	var failureCode, failureMessage, revocationReason, revokedByUserID sql.NullString
+	var issuerName, failureCode, failureMessage, revocationReason, revokedByUserID sql.NullString
 	var revokedAt, deletedAt sql.NullTime
 	if err := row.Scan(
 		&cert.ID,
 		&cert.NormalizedSANs,
 		&keyType,
 		&cert.IssuerID,
+		&issuerName,
 		&cert.ApplicationID,
 		&status,
 		&failureCode,
@@ -1206,6 +1208,9 @@ func scanCertificate(row scanner) (Certificate, error) {
 	}
 	cert.KeyType = KeyType(keyType)
 	cert.Status = Status(status)
+	if issuerName.Valid {
+		cert.IssuerName = issuerName.String
+	}
 	cert.FailureCode = stringPtr(failureCode)
 	cert.FailureMessage = stringPtr(failureMessage)
 	if revocationReason.Valid {

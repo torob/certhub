@@ -38,6 +38,7 @@ type apiCertificate struct {
 	NormalizedSANs   []string               `json:"normalized_sans"`
 	KeyType          string                 `json:"key_type"`
 	IssuerID         string                 `json:"issuer_id"`
+	IssuerName       *string                `json:"issuer_name,omitempty"`
 	Status           string                 `json:"status"`
 	LatestVersion    *apiCertificateVersion `json:"latest_version,omitempty"`
 	FailureCode      *string                `json:"failure_code,omitempty"`
@@ -570,6 +571,9 @@ func serializeCertificate(cert certdomain.Certificate) apiCertificate {
 		CreatedAt:       cert.CreatedAt,
 		UpdatedAt:       cert.UpdatedAt,
 		DeletedAt:       cert.DeletedAt,
+	}
+	if cert.IssuerName != "" {
+		out.IssuerName = &cert.IssuerName
 	}
 	if cert.RevocationReason != nil {
 		raw := string(*cert.RevocationReason)
