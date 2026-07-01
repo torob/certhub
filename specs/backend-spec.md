@@ -687,7 +687,7 @@ Server-managed local sync:
 - If no valid CertificateVersion exists yet for the desired reserved Certificate, self-sync records a sanitized warning/metric and preserves the last local material unchanged.
 - Self-sync must never delete or overwrite a previously synced valid local certificate merely because the database is temporarily unavailable, decryption fails, issuance is pending, issuance fails, or the Certificate is revoked/deleted. It must stop publishing new material and surface the condition through logs, metrics, readiness details, and audit events where applicable.
 - If the reserved Certificate is revoked or deleted, the server must stop publishing new material. It may keep the last local files on disk for operator recovery, but must report the state clearly; operators decide when to remove files or disable direct TLS.
-- Each successful publish writes a `server_self_certificate_synced` audit event with `identity_type=system`, `scope_application_id`, `scope_certificate_id`, CertificateVersion ID, material ETag, and non-secret file target metadata.
+- Each material-changing publish writes a `server_self_certificate_synced` audit event with `identity_type=system`, `scope_application_id`, `scope_certificate_id`, CertificateVersion ID, material ETag, and non-secret file target metadata. No-op syncs where the local `current` files already match the desired material must not emit this audit event.
 - Failed publish attempts write sanitized logs and metrics. Audit events for repeated failures should be rate-limited or state-change based to avoid audit spam.
 
 Serving behavior:
@@ -3939,7 +3939,7 @@ Required backend scenarios:
 - Server self-certificate sync writes `cert.pem`, `chain.pem`, `fullchain.pem`, `privkey.pem`, and metadata using the same atomic release-directory semantics and private-key permissions as the CLI.
 - Server self-certificate sync reads only the reserved `certhub_server` Application's latest valid CertificateVersion and never calls public `/v1/sync/...` endpoints or requires an Application token.
 - Server self-certificate sync preserves the last local material unchanged when PostgreSQL is unavailable, decryption fails, issuance is pending, issuance fails, or the reserved Certificate is revoked/deleted.
-- Server self-certificate sync records sanitized logs, metrics, and `server_self_certificate_synced` audit events without logging PEM material or private keys.
+- Server self-certificate sync records sanitized logs, metrics, and material-changing `server_self_certificate_synced` audit events without logging PEM material or private keys.
 - Direct TLS reload tests prove that when self-sync publishes a new valid release, the backend automatically loads it for future TLS handshakes without restart, signal, API call, CLI command, or manual operator action.
 - Direct TLS reload tests prove that malformed, mismatched, expired, not-yet-valid, unreadable, or wrong-hostname replacement material is rejected and the previously loaded certificate remains active for future TLS handshakes.
 - Reserved `certhub_server` Application tests prove normal Users cannot create that name and no public API identity can rename, patch, disable, delete it, create/delete its domain scopes, create Application tokens for it, assign User grants to it, create Certificates for it, or run lifecycle mutations on its Certificate.

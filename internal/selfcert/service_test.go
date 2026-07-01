@@ -43,6 +43,9 @@ func TestPublishAtomicPreservesCurrentOnReleaseCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !first.Changed {
+		t.Fatalf("first publish Changed = false")
+	}
 	if _, err := Publish(context.Background(), PublishOptions{OutputDir: dir, Material: newMaterial, Now: func() time.Time { return now }}); err == nil {
 		t.Fatalf("second publish unexpectedly succeeded despite immutable release collision")
 	}
@@ -59,6 +62,63 @@ func TestPublishAtomicPreservesCurrentOnReleaseCollision(t *testing.T) {
 	}
 	if keyInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("privkey mode = %o", keyInfo.Mode().Perm())
+	}
+}
+
+func TestPublishIdenticalMaterialIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	material := testMaterial("certhub.example.com", "FULLCHAIN", "KEY")
+
+	first, err := Publish(context.Background(), PublishOptions{OutputDir: dir, Material: material, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Changed {
+		t.Fatalf("first publish Changed = false")
+	}
+	second, err := Publish(context.Background(), PublishOptions{OutputDir: dir, Material: material, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Changed {
+		t.Fatalf("identical publish Changed = true")
+	}
+	if second.ReleaseDir != first.ReleaseDir {
+		t.Fatalf("release dir = %q want %q", second.ReleaseDir, first.ReleaseDir)
+	}
+	if got := releaseCount(t, dir); got != 1 {
+		t.Fatalf("release count = %d want 1", got)
+	}
+}
+
+func TestPublishRepublishesWhenCurrentPEMChanges(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	material := testMaterial("certhub.example.com", "FULLCHAIN", "KEY")
+
+	if _, err := Publish(context.Background(), PublishOptions{OutputDir: dir, Material: material, Now: func() time.Time { return now }}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "current", "fullchain.pem"), []byte("TAMPERED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	published, err := Publish(context.Background(), PublishOptions{OutputDir: dir, Material: material, Now: func() time.Time { return now.Add(time.Second) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !published.Changed {
+		t.Fatalf("tampered publish Changed = false")
+	}
+	currentFullchain, err := os.ReadFile(filepath.Join(dir, "current", "fullchain.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentFullchain) != "FULLCHAIN" {
+		t.Fatalf("current fullchain = %q want FULLCHAIN", string(currentFullchain))
+	}
+	if got := releaseCount(t, dir); got != 2 {
+		t.Fatalf("release count = %d want 2", got)
 	}
 }
 
@@ -213,6 +273,15 @@ func generateTLSPEM(t *testing.T, dnsName string) (string, string) {
 
 func contains(s, substr string) bool {
 	return len(substr) == 0 || (len(s) >= len(substr) && (s == substr || contains(s[1:], substr) || s[:len(substr)] == substr))
+}
+
+func releaseCount(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, "releases"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
 }
 
 type fakeApplications struct {

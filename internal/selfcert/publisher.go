@@ -1,6 +1,7 @@
 package selfcert
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ type PublishOptions struct {
 type PublishResult struct {
 	ReleaseDir string
 	Current    string
+	Changed    bool
 }
 
 func Publish(ctx context.Context, opts PublishOptions) (PublishResult, error) {
@@ -41,6 +43,9 @@ func Publish(ctx context.Context, opts PublishOptions) (PublishResult, error) {
 	if err := prepareOutputDir(outputDir); err != nil {
 		return PublishResult{}, err
 	}
+	if matches, releaseDir := currentMatches(outputDir, opts.Material); matches {
+		return PublishResult{ReleaseDir: releaseDir, Current: filepath.Join(outputDir, "current"), Changed: false}, nil
+	}
 	releasesDir := filepath.Join(outputDir, "releases")
 	stagingDir := filepath.Join(outputDir, ".staging-"+releaseName(opts.Material, opts.Now()))
 	if err := os.MkdirAll(releasesDir, 0o700); err != nil {
@@ -55,31 +60,10 @@ func Publish(ctx context.Context, opts PublishOptions) (PublishResult, error) {
 			_ = os.RemoveAll(stagingDir)
 		}
 	}()
-	for _, file := range []struct {
-		name string
-		data string
-		mode os.FileMode
-	}{
-		{name: "cert.pem", data: opts.Material.CertPEM, mode: 0o644},
-		{name: "chain.pem", data: opts.Material.ChainPEM, mode: 0o644},
-		{name: "fullchain.pem", data: opts.Material.FullchainPEM, mode: 0o644},
-		{name: "privkey.pem", data: opts.Material.PrivateKeyPEM, mode: 0o600},
-	} {
-		if err := writeFileSync(filepath.Join(stagingDir, file.name), []byte(file.data), file.mode); err != nil {
+	for _, file := range publishFiles(opts.Material) {
+		if err := writeFileSync(filepath.Join(stagingDir, file.name), file.data, file.mode); err != nil {
 			return PublishResult{}, err
 		}
-	}
-	metadata := opts.Material
-	metadata.CertPEM = ""
-	metadata.ChainPEM = ""
-	metadata.FullchainPEM = ""
-	metadata.PrivateKeyPEM = ""
-	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		return PublishResult{}, err
-	}
-	if err := writeFileSync(filepath.Join(stagingDir, ".certhub-material.json"), append(metadataBytes, '\n'), 0o644); err != nil {
-		return PublishResult{}, err
 	}
 	if err := fsyncDir(stagingDir); err != nil {
 		return PublishResult{}, err
@@ -104,7 +88,59 @@ func Publish(ctx context.Context, opts PublishOptions) (PublishResult, error) {
 	if err := fsyncDir(outputDir); err != nil {
 		return PublishResult{}, err
 	}
-	return PublishResult{ReleaseDir: releaseDir, Current: filepath.Join(outputDir, "current")}, nil
+	return PublishResult{ReleaseDir: releaseDir, Current: filepath.Join(outputDir, "current"), Changed: true}, nil
+}
+
+type publishFile struct {
+	name string
+	data []byte
+	mode os.FileMode
+}
+
+func publishFiles(material tlsmaterial.TLSMaterial) []publishFile {
+	return []publishFile{
+		{name: "cert.pem", data: []byte(material.CertPEM), mode: 0o644},
+		{name: "chain.pem", data: []byte(material.ChainPEM), mode: 0o644},
+		{name: "fullchain.pem", data: []byte(material.FullchainPEM), mode: 0o644},
+		{name: "privkey.pem", data: []byte(material.PrivateKeyPEM), mode: 0o600},
+		{name: ".certhub-material.json", data: metadataBytes(material), mode: 0o644},
+	}
+}
+
+func metadataBytes(material tlsmaterial.TLSMaterial) []byte {
+	metadata := material
+	metadata.CertPEM = ""
+	metadata.ChainPEM = ""
+	metadata.FullchainPEM = ""
+	metadata.PrivateKeyPEM = ""
+	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return nil
+	}
+	return append(metadataBytes, '\n')
+}
+
+func currentMatches(outputDir string, material tlsmaterial.TLSMaterial) (bool, string) {
+	current := filepath.Join(outputDir, "current")
+	for _, file := range publishFiles(material) {
+		existing, err := os.ReadFile(filepath.Join(current, file.name))
+		if err != nil || !bytes.Equal(existing, file.data) {
+			return false, ""
+		}
+	}
+	return true, currentReleaseDir(outputDir)
+}
+
+func currentReleaseDir(outputDir string) string {
+	current := filepath.Join(outputDir, "current")
+	target, err := os.Readlink(current)
+	if err != nil {
+		return current
+	}
+	if filepath.IsAbs(target) {
+		return target
+	}
+	return filepath.Clean(filepath.Join(outputDir, target))
 }
 
 func prepareOutputDir(outputDir string) error {

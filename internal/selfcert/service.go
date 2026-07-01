@@ -173,22 +173,24 @@ func (s *Service) SyncOnce(ctx context.Context) (Result, error) {
 		s.status.record("failed", "publish_failed", err)
 		return Result{}, err
 	}
-	if s.cfg.TLSReloader != nil {
+	if published.Changed && s.cfg.TLSReloader != nil {
 		if err := s.cfg.TLSReloader.ReloadIfChanged(); err != nil {
 			s.status.record("failed", "tls_reload_failed", err)
 			return Result{}, err
 		}
 	}
-	if err := appendSyncedAudit(ctx, audit.NewRepository(s.cfg.DB), desired, version, material, published); err != nil {
-		s.status.record("failed", "audit_failed", err)
-		return Result{}, err
+	if published.Changed {
+		if err := appendSyncedAudit(ctx, audit.NewRepository(s.cfg.DB), desired, version, material, published); err != nil {
+			s.status.record("failed", "audit_failed", err)
+			return Result{}, err
+		}
 	}
 	result := Result{
 		ApplicationID:        desired.Application.ID,
 		CertificateID:        desired.Certificate.ID,
 		CertificateVersionID: version.ID,
 		MaterialETag:         material.MaterialETag,
-		Published:            true,
+		Published:            published.Changed,
 		ReleaseDir:           published.ReleaseDir,
 	}
 	s.status.recordSuccess(result)
