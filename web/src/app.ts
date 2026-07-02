@@ -43,6 +43,10 @@ type APIResult<T> = {
   requestID: string;
   retryAfter?: number;
 };
+type AsyncState<T> = APIResult<T> & {
+  loading: boolean;
+  path?: string;
+};
 type PageMeta = {
   limit?: number;
   offset?: number;
@@ -382,7 +386,7 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
 }
 
 function useAsync<T>(session: Session | undefined, path: string, deps: unknown[] = []) {
-  const [state, setState] = useState<APIResult<T> & { loading: boolean }>({ status: 0, requestID: "", loading: true });
+  const [state, setState] = useState<AsyncState<T>>({ status: 0, requestID: "", loading: true });
   useEffect(() => {
     let canceled = false;
     if (!path) {
@@ -391,15 +395,20 @@ function useAsync<T>(session: Session | undefined, path: string, deps: unknown[]
         canceled = true;
       };
     }
-    setState((s) => ({ ...s, loading: true }));
+    setState((s) => s.path === path ? { ...s, loading: true } : { status: 0, requestID: "", loading: true, path });
     api<T>(path, session)
-      .then((result) => !canceled && setState({ ...result, loading: false }))
-      .catch((err: Error) => !canceled && setState({ ...clientError(`network error: ${err.message}`, true), loading: false }));
+      .then((result) => !canceled && setState((s) => ({ ...preserveRefreshData(s, path, result), loading: false, path })))
+      .catch((err: Error) => !canceled && setState((s) => ({ ...preserveRefreshData(s, path, clientError(`network error: ${err.message}`, true)), loading: false, path })));
     return () => {
       canceled = true;
     };
   }, deps);
   return state;
+}
+
+function preserveRefreshData<T>(state: AsyncState<T>, path: string, result: APIResult<T>): APIResult<T> {
+  if (!result.error || state.path !== path || state.data === undefined) return result;
+  return { ...result, data: state.data };
 }
 
 function AppShell() {
@@ -920,37 +929,40 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
 }
 
 function HomePage(props: PageProps) {
-  const ready = useAsync<{ ready: boolean; checks: { name: string; status: string }[] }>(props.session, "/readyz", []);
-  const applications = useAsync<{ applications: any[]; pagination?: PageMeta }>(props.session, "/v1/applications?limit=100", []);
-  const certificates = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=100", []);
-  const pendingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=pending", []);
-  const validatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=validating_dns", []);
-  const issuingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=issuing", []);
-  const renewingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=renewing", []);
-  const rotatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=rotating_key", []);
-  const failedCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=failed", []);
+  const [refresh, setRefresh] = useState(0);
+  const ready = useAsync<{ ready: boolean; checks: { name: string; status: string }[] }>(props.session, "/readyz", [refresh]);
+  const applications = useAsync<{ applications: any[]; pagination?: PageMeta }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const certificates = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=100", [refresh]);
+  const pendingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=pending", [refresh]);
+  const validatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=validating_dns", [refresh]);
+  const issuingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=issuing", [refresh]);
+  const renewingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=renewing", [refresh]);
+  const rotatingCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=rotating_key", [refresh]);
+  const failedCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=failed", [refresh]);
   const expiresBefore = useMemo(() => new Date(Date.now() + 30 * 86400 * 1000).toISOString(), []);
-  const expiringCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, `/v1/certificates?limit=1&expires_before=${encodeURIComponent(expiresBefore)}`, [expiresBefore]);
-  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=1&status=active" : "", []);
-  const providers = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=100", []);
-  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/dns-providers?limit=1&status=active" : "", []);
+  const expiringCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, `/v1/certificates?limit=1&expires_before=${encodeURIComponent(expiresBefore)}`, [expiresBefore, refresh]);
+  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=1&status=active" : "", [refresh]);
+  const providers = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
+  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/dns-providers?limit=1&status=active" : "", [refresh]);
   const firstProvider = rowsOf(providers)[0];
-  const zones = useAsync<{ zones: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) && firstProvider ? `/v1/dns-providers/${firstProvider.id}/zones?limit=100` : "", [firstProvider?.id]);
+  const zones = useAsync<{ zones: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) && firstProvider ? `/v1/dns-providers/${firstProvider.id}/zones?limit=100` : "", [firstProvider?.id, refresh]);
   const apps = rowsOf(applications).filter((app) => app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const manageableApps = apps.filter((app) => canManageApplication(app, props.session));
   const certs = rowsOf(certificates);
   const inProgressCounts = [pendingCerts, validatingCerts, issuingCerts, renewingCerts, rotatingCerts];
-  const inProgress = inProgressCounts.some((result) => result.loading) ? "Loading" : String(inProgressCounts.reduce((sum, result) => sum + pageTotal(result, 0), 0));
-  const setup = activeIssuerCount.loading || activeProviderCount.loading || zones.loading ? "Loading" : setupStatusFromCounts(pageTotal(activeIssuerCount, 0), pageTotal(activeProviderCount, 0), firstProvider ? pageTotal(zones, 0) : 0);
+  const inProgress = inProgressCounts.some((result) => initialLoading(result)) ? "Loading" : String(inProgressCounts.reduce((sum, result) => sum + pageTotal(result, 0), 0));
+  const setup = initialLoadingAny(activeIssuerCount, activeProviderCount, zones) ? "Loading" : setupStatusFromCounts(pageTotal(activeIssuerCount, 0), pageTotal(activeProviderCount, 0), firstProvider ? pageTotal(zones, 0) : 0);
+  const refreshing = loadingAny(ready, applications, certificates, pendingCerts, validatingCerts, issuingCerts, renewingCerts, rotatingCerts, failedCerts, expiringCerts, activeIssuerCount, providers, activeProviderCount, zones);
   return pageFrame(
     "Home",
     createElement("div", { className: "toolbar" },
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", disabled: manageableApps.length === 0, onClick: () => props.navigate("/certificates/new") }, createElement(BadgeCheck, { size: 16 }), "Create Certificate"),
       createElement("button", { onClick: () => props.navigate("/certificates") }, "Certificates"),
       createElement("button", { onClick: () => props.navigate("/applications") }, "Applications")
     ),
     createElement("section", { className: "dashboard-grid" },
-      readinessCard("Service", ready.loading ? "Loading" : ready.data?.ready ? "Ready" : "Attention", ready.data?.checks?.map((check) => `${check.name}: ${check.status}`) || (ready.error ? [errorText(ready)] : [])),
+      readinessCard("Service", initialLoading(ready) ? "Loading" : ready.data?.ready ? "Ready" : "Attention", ready.data?.checks?.map((check) => `${check.name}: ${check.status}`) || (ready.error ? [errorText(ready)] : [])),
       readinessCard("Applications", countText(applications), [
         `${manageableApps.length} manageable shown`,
         `${apps.reduce((sum, app) => sum + Number(app.domain_scope_count || 0), 0)} domain scopes shown`,
@@ -964,7 +976,7 @@ function HomePage(props: PageProps) {
       isAdmin(props.session) ? readinessCard("Issuance setup", setup, [
         `${countText(activeIssuerCount)} active issuers`,
         `${countText(activeProviderCount)} active DNS providers`,
-        firstProvider ? zones.loading ? `loading zones on ${firstProvider.name}` : `${pageTotal(zones, rowsOf(zones).length)} zones on ${firstProvider.name}` : "no DNS provider selected"
+        firstProvider ? initialLoading(zones) ? `loading zones on ${firstProvider.name}` : `${pageTotal(zones, rowsOf(zones).length)} zones on ${firstProvider.name}` : "no DNS provider selected"
       ]) : readinessCard("Your access", manageableApps.length ? "Can issue" : "View only", manageableApps.map((app) => `${app.name}: ${app.current_user_role}`).slice(0, 4))
     ),
     createElement("section", { className: "detail" },
@@ -988,6 +1000,7 @@ function CertificatesPage(props: PageProps) {
   const appByID = resourceMap(rowsOf(applications));
   const manageableApps = rowsOf(applications).filter((app) => canManageApplication(app, props.session) && app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const issuerOptions: FilterOption[] = rowsOf(issuers).map((issuer) => [issuer.name, `${issuer.name}${issuer.default ? " (default)" : ""}`]);
+  const refreshing = loadingAny(list, applications, issuers);
   const certificateFilterFields: FilterField[] = [
     { key: "domain", label: "Domain", placeholder: "api.example.com" },
     { key: "status", label: "Status", type: "select", options: certificateStatusOptions() },
@@ -999,6 +1012,7 @@ function CertificatesPage(props: PageProps) {
   return pageFrame(
     "Certificates",
     createElement("div", { className: "header-actions" },
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", disabled: manageableApps.length === 0, onClick: () => props.navigate("/certificates/new") }, createElement(BadgeCheck, { size: 16 }), "Create Certificate"),
       createElement(ListFilters, {
         values: filters,
@@ -1023,18 +1037,18 @@ function CertificateDetailPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
-  const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id]);
+  const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
   const versions = useAsync<{ versions: any[] }>(props.session, id ? `/v1/certificates/${id}/versions?limit=20` : "", [id, refresh]);
   const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/certificates/${id}/events?limit=20` : "", [id, refresh]);
   const action = (path: string, body?: unknown, method = "POST") =>
     api(`/v1/certificates/${id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
       props.setNotice(r.error ? errorText(r) : "request accepted");
-      setRefresh(refresh + 1);
+      setRefresh((value) => value + 1);
     });
   const versionAction = (version: any, path: string, body?: unknown) =>
     api(`/v1/certificates/${id}/versions/${version.id}${path}`, props.session, { method: "POST", body: body ? JSON.stringify(body) : undefined }).then((r) => {
       props.setNotice(r.error ? errorText(r) : "request accepted");
-      setRefresh(refresh + 1);
+      setRefresh((value) => value + 1);
     });
   const expired = cert.status === "expired";
   const appRole = appAccess.data?.application?.current_user_role;
@@ -1047,16 +1061,18 @@ function CertificateDetailPage(props: PageProps) {
   const hasIssuingVersion = cert.has_issuing_version === true;
   const activeVersionRequired = "Requires an active valid certificate version";
   const reissueUnavailable = hasActiveValidVersion ? "Reissue is only available when there is no active valid certificate version" : "Reissue is unavailable while a certificate version is issuing";
+  const refreshing = loadingAny(detail, appAccess, versions, events);
   return pageFrame(
     "Certificate",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/certificates") }, "Back"),
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       canDownloadArchive && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Download") : null,
       canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
       canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/rotate-key") }, "Rotate key") : null,
       canLifecycle ? createElement("button", { disabled: hasActiveValidVersion || hasIssuingVersion, title: hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, certificateLabel(cert)),
       kv("Application", applicationLabel),
       kv("Domains", (cert.normalized_sans || []).join(", ")),
@@ -1081,10 +1097,14 @@ function CertificateDetailPage(props: PageProps) {
 }
 
 function ApplicationsPage(props: PageProps) {
-  const list = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", []);
+  const [refresh, setRefresh] = useState(0);
+  const list = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
   return pageFrame(
     "Applications",
-    isAdmin(props.session) ? createElement("button", { className: "primary", onClick: () => props.navigate("/applications/new") }, "Create Application") : null,
+    createElement("div", { className: "header-actions" },
+      refreshButton(list.loading, () => setRefresh((value) => value + 1)),
+      isAdmin(props.session) ? createElement("button", { className: "primary", onClick: () => props.navigate("/applications/new") }, "Create Application") : null
+    ),
     table(list, ["name", "status", "current_user_role", "domain_scope_count", "token_count", "trusted_source_cidr_count", "certificate_count", "system_kind"], (app) => props.navigate(`/applications/${app.id}`))
   );
 }
@@ -1135,8 +1155,8 @@ function ApplicationDetailPage(props: PageProps) {
     activeTab === "overview" ? overview :
     activeTab === "scopes" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Domain scopes")),
-      canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh(refresh + 1)) }) : null,
-      table(scopes, ["value", "kind", "created_at", canManage ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
+      canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh((value) => value + 1)) }) : null,
+      table(scopes, ["value", "kind", "created_at", canManage ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),
@@ -1145,7 +1165,7 @@ function ApplicationDetailPage(props: PageProps) {
         api<any>(`${base}/tokens`, props.session, { method: "POST", body: JSON.stringify(tokenCreateBody(body)) }).then((r) => {
           if (!r.error && r.data?.token_value) setTokenValue(r.data.token_value);
           props.setNotice(errorOrOK(r));
-          setRefresh(refresh + 1);
+          setRefresh((value) => value + 1);
         });
       } }) : null,
       tokenValue ? createElement("div", { className: "secret-once" },
@@ -1153,12 +1173,12 @@ function ApplicationDetailPage(props: PageProps) {
         createElement("code", null, tokenValue),
         createElement("button", { onClick: () => setTokenValue("") }, "Clear")
       ) : null,
-      table(tokens, ["name", "status", "expires_at", "last_used_at", canManage ? actionsColumn((token) => rowAction("Revoke", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Revoke ${token.name}` })) : null].filter(Boolean) as TableColumn[])
+      table(tokens, ["name", "status", "expires_at", "last_used_at", canManage ? actionsColumn((token) => rowAction("Revoke", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Revoke ${token.name}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "access" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Access")),
-      canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh(refresh + 1) }) : null,
-      table(grants, [{ key: "user", render: (grant: any) => userLabel(grant.user) || "User not visible" }, "role", "created_at", canManage ? actionsColumn((grant) => rowAction("Remove", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Remove ${userLabel(grant.user) || "user"}` })) : null].filter(Boolean) as TableColumn[])
+      canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh((value) => value + 1) }) : null,
+      table(grants, [{ key: "user", render: (grant: any) => userLabel(grant.user) || "User not visible" }, "role", "created_at", canManage ? actionsColumn((grant) => rowAction("Remove", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/users/${grant.user_id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Remove ${userLabel(grant.user) || "user"}` })) : null].filter(Boolean) as TableColumn[])
     ) :
     activeTab === "certificates" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" },
@@ -1171,12 +1191,14 @@ function ApplicationDetailPage(props: PageProps) {
       createElement("div", { className: "section-head" }, createElement("h2", null, "Audit events")),
       table(events, auditColumns({ application: app }))
     );
+  const refreshing = loadingAny(detail, scopes, tokens, grants, certs, events);
   return pageFrame(app.name || "Application",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/applications/${id}/edit`) }, "Edit") : null
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("div", { className: "tabbed-detail" },
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("div", { className: "tabbed-detail" },
       createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
       tabContent
     )
@@ -1205,7 +1227,7 @@ function ApplicationEditPage(props: PageProps) {
     }, () => props.navigate(`/applications/${id}`));
   };
   return createPage("Edit Application", `/applications/${id}`, props.navigate,
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
       createElement("form", { className: "create-form", onSubmit: submit },
         input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
         textAreaInput("description", body.description, (v) => setBody({ ...body, description: v })),
@@ -1217,25 +1239,31 @@ function ApplicationEditPage(props: PageProps) {
 }
 
 function UsersPage(props: PageProps) {
-  const list = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", []);
+  const [refresh, setRefresh] = useState(0);
+  const list = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("Users");
   return pageFrame("Users",
-    createElement("button", { className: "primary", onClick: () => props.navigate("/users/new") }, "Create User"),
+    createElement("div", { className: "header-actions" },
+      refreshButton(list.loading, () => setRefresh((value) => value + 1)),
+      createElement("button", { className: "primary", onClick: () => props.navigate("/users/new") }, "Create User")
+    ),
     table(list, ["email", "display_name", "global_role", "status", "oidc_linked", "application_grant_count", "last_login_at"], (user) => props.navigate(`/users/${user.id}`))
   );
 }
 
 function UserDetailPage(props: PageProps) {
   const id = resourceID(props);
-  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id]);
+  const [refresh, setRefresh] = useState(0);
+  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id, refresh]);
   const user = detail.data?.user || {};
   if (!isAdmin(props.session)) return forbiddenPage("Users");
   return pageFrame(user.email || "User",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/users") }, "Back"),
+      refreshButton(detail.loading, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", onClick: () => props.navigate(`/users/${id}/edit`) }, "Edit")
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, user.email),
       kv("Display name", user.display_name),
       kv("Global role", user.global_role),
@@ -1288,14 +1316,18 @@ function UserEditPage(props: PageProps) {
   const disable2FA = async () => {
     const result = await api<any>(`/v1/users/${id}/password-2fa`, props.session, { method: "DELETE" });
     props.setNotice(errorOrOK(result));
-    if (!result.error) setRefresh(refresh + 1);
+    if (!result.error) setRefresh((value) => value + 1);
   };
   const copyReset = async () => {
     if (!resetLink?.reset_url) return;
     await navigator.clipboard.writeText(resetLink.reset_url);
     props.setNotice("copied");
   };
-  return createPage("Edit User", `/users/${id}`, props.navigate,
+  return pageFrame("Edit User",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate(`/users/${id}`) }, "Back"),
+      refreshButton(detail.loading, () => setRefresh((value) => value + 1))
+    ),
     resetLink ? createElement("section", { className: "detail secret-once" },
       createElement("h2", null, "Password Reset Link"),
       kv("Email", resetLink.email),
@@ -1306,7 +1338,7 @@ function UserEditPage(props: PageProps) {
         createElement("button", { type: "button", onClick: () => setResetLink(undefined) }, "Clear")
       )
     ) : null,
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
       createElement("form", { className: "create-form", onSubmit: submit },
         input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
         selectInput("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]]),
@@ -1326,25 +1358,31 @@ function UserEditPage(props: PageProps) {
 }
 
 function IssuersPage(props: PageProps) {
-  const list = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
+  const [refresh, setRefresh] = useState(0);
+  const list = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
   return pageFrame("Issuers",
-    createElement("button", { className: "primary", onClick: () => props.navigate("/issuers/new") }, "Create Issuer"),
+    createElement("div", { className: "header-actions" },
+      refreshButton(list.loading, () => setRefresh((value) => value + 1)),
+      createElement("button", { className: "primary", onClick: () => props.navigate("/issuers/new") }, "Create Issuer")
+    ),
     table(list, ["name", "type", "directory_url", "environment", "status", "default", "renewal_window_seconds"], (issuer) => props.navigate(`/issuers/${issuer.id}`))
   );
 }
 
 function IssuerDetailPage(props: PageProps) {
   const id = resourceID(props);
-  const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id]);
+  const [refresh, setRefresh] = useState(0);
+  const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id, refresh]);
   const issuer = detail.data?.issuer || {};
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
   return pageFrame(issuer.name || "Issuer",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/issuers") }, "Back"),
+      refreshButton(detail.loading, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", onClick: () => props.navigate(`/issuers/${id}/edit`) }, "Edit")
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, issuer.name),
       kv("Type", issuer.type),
       kv("Directory URL", issuer.directory_url),
@@ -1382,7 +1420,7 @@ function IssuerEditPage(props: PageProps) {
     }, () => props.navigate(`/issuers/${id}`));
   };
   return createPage("Edit Issuer", `/issuers/${id}`, props.navigate,
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
       createElement("form", { className: "create-form", onSubmit: submit },
         checkboxInput("default", body.default, (v) => setBody({ ...body, default: v })),
         selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
@@ -1394,11 +1432,15 @@ function IssuerEditPage(props: PageProps) {
 }
 
 function DNSPage(props: PageProps) {
-  const list = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
+  const [refresh, setRefresh] = useState(0);
+  const list = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
   return pageFrame(
     "DNS Providers",
-    createElement("button", { className: "primary", onClick: () => props.navigate("/dns-providers/new") }, "Create DNS Provider"),
+    createElement("div", { className: "header-actions" },
+      refreshButton(list.loading, () => setRefresh((value) => value + 1)),
+      createElement("button", { className: "primary", onClick: () => props.navigate("/dns-providers/new") }, "Create DNS Provider")
+    ),
     table(list, ["name", "type", "zone_mode", "status", "zone_refresh_status", "last_zone_refresh_at"], (provider) => props.navigate(`/dns-providers/${provider.id}`))
   );
 }
@@ -1414,12 +1456,14 @@ function DNSDetailPage(props: PageProps) {
   const discovered = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones/discovered?limit=100` : "", [id, refresh]);
   const base = `/v1/dns-providers/${id}`;
   if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
+  const refreshing = loadingAny(detail, providers, zones, discovered);
   return pageFrame(provider.name || "DNS Provider",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/dns-providers") }, "Back"),
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", onClick: () => props.navigate(`/dns-providers/${id}/edit`) }, "Edit")
     ),
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, provider.name),
       kv("Type", provider.type),
       kv("Zone mode", provider.zone_mode),
@@ -1430,12 +1474,12 @@ function DNSDetailPage(props: PageProps) {
       kv("Created at", provider.created_at),
       kv("Updated at", provider.updated_at)
     ),
-    createElement("div", { className: "toolbar" }, createElement("button", { onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones/refresh`, {}, () => setRefresh(refresh + 1)) }, createElement(RefreshCw, { size: 16 }), "Refresh zones")),
-    provider.zone_mode === "manual" ? createElement(GenericCreate, { title: "Add zone", fields: ["zone_name"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, body, () => setRefresh(refresh + 1)) }) : null,
+    createElement("div", { className: "toolbar" }, createElement("button", { onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones/refresh`, {}, () => setRefresh((value) => value + 1)) }, createElement(RefreshCw, { size: 16 }), "Refresh zones")),
+    provider.zone_mode === "manual" ? createElement(GenericCreate, { title: "Add zone", fields: ["zone_name"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, body, () => setRefresh((value) => value + 1)) }) : null,
     createElement("h2", null, "Zones"),
-    table(zones, ["zone_name", "created_at", provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh(refresh + 1)), { icon: Trash2, danger: true, label: `Delete ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[]),
+    table(zones, ["zone_name", "created_at", provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[]),
     createElement("h2", null, "Discovered zones"),
-    table(discovered, ["zone_name", "already_configured", { key: "conflict_dns_provider", render: (zone: any) => dnsProviderLabel(providerByID.get(zone.conflict_dns_provider_id)) || (zone.conflict_dns_provider_id ? "Configured by another provider" : "") }, provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Add", () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh(refresh + 1)), { icon: Plus, disabled: zone.already_configured, label: `Add ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[])
+    table(discovered, ["zone_name", "already_configured", { key: "conflict_dns_provider", render: (zone: any) => dnsProviderLabel(providerByID.get(zone.conflict_dns_provider_id)) || (zone.conflict_dns_provider_id ? "Configured by another provider" : "") }, provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Add", () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh((value) => value + 1)), { icon: Plus, disabled: zone.already_configured, label: `Add ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[])
   );
 }
 
@@ -1459,7 +1503,7 @@ function DNSEditPage(props: PageProps) {
     patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/dns-providers/${id}`, payload, () => props.navigate(`/dns-providers/${id}`));
   };
   return createPage("Edit DNS Provider", `/dns-providers/${id}`, props.navigate,
-    detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
       createElement("form", { className: "create-form", onSubmit: submit },
         selectInput("zone_mode", body.zone_mode, (v) => setBody({ ...body, zone_mode: v }), [["auto", "Auto"], ["manual", "Manual"]]),
         selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
@@ -1471,14 +1515,15 @@ function DNSEditPage(props: PageProps) {
 }
 
 function AuditPage(props: PageProps) {
+  const [refresh, setRefresh] = useState(0);
   const [filters, setFilters] = useState({ identity_id: "", identity_type: "", action: "", certificate_id: "", application_id: "", target_type: "", target_id: "", result: "", created_at_from: "", created_at_to: "" });
   const query = queryString({ ...filters, limit: "100" });
-  const list = useAsync<{ audit_events: any[] }>(props.session, `/v1/audit-events?${query}`, [query]);
-  const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", []);
-  const users = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", []);
-  const certificates = useAsync<{ certificates: any[] }>(props.session, "/v1/certificates?limit=100", []);
-  const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
-  const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
+  const list = useAsync<{ audit_events: any[] }>(props.session, `/v1/audit-events?${query}`, [query, refresh]);
+  const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const users = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
+  const certificates = useAsync<{ certificates: any[] }>(props.session, "/v1/certificates?limit=100", [refresh]);
+  const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
+  const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   const labels = {
     applications: resourceMap(rowsOf(applications)),
     users: resourceMap(rowsOf(users)),
@@ -1500,12 +1545,15 @@ function AuditPage(props: PageProps) {
   ];
   if (!isAdmin(props.session)) return forbiddenPage("Audit Events");
   return pageFrame("Audit Events",
-    createElement(ListFilters, {
-      values: filters,
-      quick: auditFields.slice(0, 4),
-      advanced: auditFields.slice(4),
-      onApply: (next: Record<string, string>) => setFilters({ ...filters, ...next })
-    }),
+    createElement("div", { className: "header-actions" },
+      refreshButton(loadingAny(list, applications, users, certificates, issuers, providers), () => setRefresh((value) => value + 1)),
+      createElement(ListFilters, {
+        values: filters,
+        quick: auditFields.slice(0, 4),
+        advanced: auditFields.slice(4),
+        onApply: (next: Record<string, string>) => setFilters({ ...filters, ...next })
+      })
+    ),
     table(list, auditColumns(labels))
   );
 }
@@ -1963,8 +2011,8 @@ function Tabs<T extends string>(props: { activeTab: T; tabs: { id: T; label: str
 
 function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, columns: TableColumn[], onSelect?: (row: any) => void) {
   const rows = rowsOf(result);
-  if (result.loading) return createElement("div", { className: "empty" }, "Loading");
-  if (result.error) return createElement("div", { className: "error" }, result.error.code, ": ", result.error.message);
+  if (initialLoading(result)) return createElement("div", { className: "empty" }, "Loading");
+  if (blockingError(result)) return createElement("div", { className: "error" }, result.error?.code, ": ", result.error?.message);
   const meta = pageMeta(result);
   const shown = rows.length;
   const specs = columns.map((column) => typeof column === "string" ? { key: column, label: labelForColumn(column), render: undefined } : { ...column, label: column.label || labelForColumn(column.key) });
@@ -1992,8 +2040,35 @@ function pageTotal(result: { data?: { pagination?: PageMeta } }, fallback: numbe
 }
 
 function countText(result: { data?: { pagination?: PageMeta }; loading?: boolean }): string {
-  if (result.loading) return "Loading";
+  if (initialLoading(result)) return "Loading";
   return String(pageTotal(result, 0));
+}
+
+function initialLoading(result: { data?: any; loading?: boolean }): boolean {
+  return Boolean(result.loading && result.data === undefined);
+}
+
+function initialLoadingAny(...results: { data?: any; loading?: boolean }[]): boolean {
+  return results.some(initialLoading);
+}
+
+function blockingError(result: { data?: any; error?: ErrorBody }): boolean {
+  return Boolean(result.error && result.data === undefined);
+}
+
+function loadingAny(...results: { loading?: boolean }[]): boolean {
+  return results.some((result) => result.loading);
+}
+
+function refreshButton(loading: boolean, onRefresh: () => void) {
+  return createElement("button", {
+    type: "button",
+    className: "refresh-button",
+    disabled: loading,
+    title: loading ? "Refreshing" : "Refresh page data",
+    "aria-busy": loading ? "true" : "false",
+    onClick: onRefresh
+  }, createElement(RefreshCw, { size: 16, className: loading ? "spin" : undefined }), "Refresh");
 }
 
 function actionsColumn(render: (row: any) => unknown): TableColumn {

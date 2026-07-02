@@ -46,6 +46,16 @@ button:disabled {
   opacity: 0.55;
 }
 
+.spin {
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .primary {
   border-color: #1e6b5c;
   background: #1e6b5c;

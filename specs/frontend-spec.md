@@ -173,6 +173,8 @@ Main navigation:
 
 The application must show only actions allowed by the current User's global role and per-Application grants.
 
+Stateful server-data views must provide a manual metadata refresh control. This applies to dashboard, list, detail, status, and audit views that show backend state. The refresh control must re-fetch visible page data in place without a browser reload, route change, tab reset, filter reset, or replacing existing content with a loading placeholder. While refresh is in progress, existing rows and detail content must remain visible, the refresh button must be disabled, and its refresh icon must animate so the User can see that the view is updating.
+
 ## Management Coverage
 
 The web interface must cover every management operation exposed by the backend's User-authenticated public API. A management workflow is complete only when the UI supports the relevant list, detail, create, update, delete, or action flow; mirrors backend validation for operator-entered fields; handles permission-specific states; and shows backend error and audit context.
@@ -754,3 +756,4 @@ Required frontend scenarios:
 - DNS provider auto mode shows refreshed zones, last refresh status, and disables manual zone edits.
 - DNS provider manual mode lets admins add/delete zones manually and add discovered zones as zones; zone updates are represented as delete plus insert.
 - Domain scope UI rejects invalid wildcard values such as `*.*.torob.dev`.
+- Manual refresh buttons on stateful pages re-fetch visible data in place, keep existing content visible while refreshing, disable while refreshing, animate the refresh icon during loading, and preserve the current route, filters, and selected tabs.
