@@ -529,6 +529,8 @@ Filters:
 - Result.
 - Date range.
 
+List filters must use typed controls where values are known, show active filter chips, and keep advanced filters in a compact expandable area rather than a generic raw field form.
+
 Private-key read events must be easy to filter.
 
 ## Observability

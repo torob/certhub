@@ -11,9 +11,11 @@ import {
   LogOut,
   Plus,
   Settings,
+  Search,
   RefreshCw,
   ServerCog,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Users,
   X
@@ -53,6 +55,14 @@ type TableColumn = string | {
   key: string;
   label?: string;
   render?: (row: any) => unknown;
+};
+type FilterOption = [string, string];
+type FilterField = {
+  key: string;
+  label: string;
+  type?: "text" | "select" | "datetime" | "datalist";
+  options?: FilterOption[];
+  placeholder?: string;
 };
 type RuntimeConfig = {
   auth?: {
@@ -747,17 +757,32 @@ function HomePage(props: PageProps) {
 
 function CertificatesPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const [filters, setFilters] = useState({ domain: "", status: "", application: "", issuer: "", key_type: "", expires_before: "" });
+  const [filters, setFilters] = useState({ domain: "", status: "", application_id: "", issuer: "", key_type: "", expires_before: "" });
   const query = queryString({ ...filters, limit: "100" });
   const list = useAsync<{ certificates: any[] }> (props.session, `/v1/certificates?${query}`, [refresh, query]);
   const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const issuers = useAsync<{ issuers: any[] }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=100" : "", [refresh]);
   const appByID = resourceMap(rowsOf(applications));
   const manageableApps = rowsOf(applications).filter((app) => canManageApplication(app, props.session) && app.system_kind !== "certhub_server" && app.name !== "certhub_server");
+  const issuerOptions: FilterOption[] = rowsOf(issuers).map((issuer) => [issuer.name, `${issuer.name}${issuer.default ? " (default)" : ""}`]);
+  const certificateFilterFields: FilterField[] = [
+    { key: "domain", label: "Domain", placeholder: "api.example.com" },
+    { key: "status", label: "Status", type: "select", options: certificateStatusOptions() },
+    { key: "application_id", label: "Application", type: "select", options: rowsOf(applications).map((app) => [app.id, appLabel(app)]) },
+    issuerOptions.length ? { key: "issuer", label: "Issuer", type: "select", options: issuerOptions } : { key: "issuer", label: "Issuer", placeholder: "letsencrypt_production" },
+    { key: "key_type", label: "Key type", type: "select", options: keyTypeOptions() },
+    { key: "expires_before", label: "Expires before", type: "datetime" }
+  ];
   return pageFrame(
     "Certificates",
     createElement("div", { className: "header-actions" },
       createElement("button", { className: "primary", disabled: manageableApps.length === 0, onClick: () => props.navigate("/certificates/new") }, createElement(BadgeCheck, { size: 16 }), "Create Certificate"),
-      createElement(GenericCreate, { title: "Filters", fields: ["domain", "status", "application", "issuer", "key_type", "expires_before"], onSubmit: (body: Record<string, string>) => setFilters({ ...filters, ...body }) })
+      createElement(ListFilters, {
+        values: filters,
+        quick: certificateFilterFields.slice(0, 2),
+        advanced: certificateFilterFields.slice(2),
+        onApply: (next: Record<string, string>) => setFilters({ ...filters, ...next })
+      })
     ),
     table(list, [
       "status",
@@ -1214,9 +1239,26 @@ function AuditPage(props: PageProps) {
     issuers: resourceMap(rowsOf(issuers)),
     providers: resourceMap(rowsOf(providers))
   };
+  const auditFields: FilterField[] = [
+    { key: "action", label: "Action", type: "datalist", options: auditActionOptions(), placeholder: "private_key_read" },
+    { key: "result", label: "Result", type: "select", options: [["success", "Success"], ["failure", "Failure"]] },
+    { key: "created_at_from", label: "From", type: "datetime" },
+    { key: "created_at_to", label: "To", type: "datetime" },
+    { key: "identity_type", label: "Identity type", type: "select", options: [["user", "User"], ["application", "Application"], ["system", "System"]] },
+    { key: "identity_id", label: "Identity ID", placeholder: "UUID" },
+    { key: "application_id", label: "Application", type: "select", options: rowsOf(applications).map((app) => [app.id, appLabel(app)]) },
+    { key: "certificate_id", label: "Certificate", type: "select", options: rowsOf(certificates).map((cert) => [cert.id, certificateLabel(cert)]) },
+    { key: "target_type", label: "Target type", type: "datalist", options: targetTypeOptions(), placeholder: "certificate" },
+    { key: "target_id", label: "Target ID", placeholder: "UUID" }
+  ];
   if (!isAdmin(props.session)) return forbiddenPage("Audit Events");
   return pageFrame("Audit Events",
-    createElement(GenericCreate, { title: "Filters", fields: ["identity_id", "identity_type", "action", "certificate_id", "application_id", "target_type", "target_id", "result", "created_at_from", "created_at_to"], onSubmit: (body: Record<string, string>) => setFilters({ ...filters, ...body }) }),
+    createElement(ListFilters, {
+      values: filters,
+      quick: auditFields.slice(0, 4),
+      advanced: auditFields.slice(4),
+      onApply: (next: Record<string, string>) => setFilters({ ...filters, ...next })
+    }),
     table(list, auditColumns(labels))
   );
 }
@@ -1463,6 +1505,107 @@ function DNSCreatePage(props: PageProps) {
 }
 
 type PageProps = { session: Session; setNotice: (s: string) => void; navigate: (path: string, replace?: boolean) => void; route: RouteState; refreshIdentity: () => Promise<boolean> };
+
+function ListFilters(props: { values: Record<string, string>; quick: FilterField[]; advanced: FilterField[]; onApply: (values: Record<string, string>) => void }) {
+  const allFields = [...props.quick, ...props.advanced];
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>(props.values);
+  const fieldSignature = allFields.map((field) => `${field.key}:${field.options?.map(([value]) => value).join(",") || ""}`).join("|");
+  useEffect(() => {
+    setDraft(props.values);
+  }, [JSON.stringify(props.values), fieldSignature]);
+  const activeFields = allFields.filter((field) => props.values[field.key]);
+  const apply = (next = draft) => props.onApply(cleanFilterValues(next, allFields));
+  const reset = () => {
+    const empty = emptyFilterValues(allFields);
+    setDraft(empty);
+    props.onApply(empty);
+  };
+  const remove = (key: string) => {
+    const next = { ...props.values, [key]: "" };
+    setDraft(next);
+    props.onApply(cleanFilterValues(next, allFields));
+  };
+  return createElement("form", { className: "filter-panel", onSubmit: (e: Event) => {
+    e.preventDefault();
+    apply();
+  } },
+    createElement("div", { className: "filter-toolbar" },
+      createElement("div", { className: "filter-quick" },
+        props.quick.map((field) => renderFilterField(field, draft[field.key] || "", (value) => setDraft({ ...draft, [field.key]: value })))
+      ),
+      createElement("div", { className: "filter-actions" },
+        createElement("button", { className: "primary", type: "submit" }, createElement(Search, { size: 15 }), "Apply"),
+        createElement("button", { type: "button", onClick: () => setOpen(!open), "aria-expanded": open },
+          createElement(SlidersHorizontal, { size: 15 }),
+          "Filters",
+          activeFields.length ? createElement("span", { className: "filter-count" }, activeFields.length) : null
+        ),
+        activeFields.length ? createElement("button", { type: "button", onClick: reset }, "Clear") : null
+      )
+    ),
+    open ? createElement("div", { className: "filter-drawer" },
+      createElement("div", { className: "filter-grid" },
+        props.advanced.map((field) => renderFilterField(field, draft[field.key] || "", (value) => setDraft({ ...draft, [field.key]: value })))
+      )
+    ) : null,
+    activeFields.length ? createElement("div", { className: "filter-chips" },
+      activeFields.map((field) => createElement("button", { key: field.key, type: "button", className: "filter-chip", onClick: () => remove(field.key), title: `Remove ${field.label}` },
+        createElement("span", null, `${field.label}: ${filterValueLabel(field, props.values[field.key])}`),
+        createElement(X, { size: 13 })
+      ))
+    ) : null
+  );
+}
+
+function renderFilterField(field: FilterField, value: string, onChange: (value: string) => void) {
+  const listID = `filter-${field.key}-options`;
+  if (field.type === "select") {
+    return createElement("label", { key: field.key, className: "filter-field" },
+      createElement("span", null, field.label),
+      createElement("select", { value, onChange: (e: Event) => onChange((e.target as HTMLSelectElement).value) },
+        createElement("option", { value: "" }, "Any"),
+        (field.options || []).map(([optionValue, optionLabel]) => createElement("option", { key: optionValue, value: optionValue }, optionLabel))
+      )
+    );
+  }
+  if (field.type === "datetime") {
+    return createElement("label", { key: field.key, className: "filter-field" },
+      createElement("span", null, field.label),
+      createElement("input", {
+        value: localDateTimeInputValue(value),
+        type: "datetime-local",
+        onChange: (e: Event) => onChange(rfc3339FromLocalInput((e.target as HTMLInputElement).value)),
+        autoComplete: "off"
+      })
+    );
+  }
+  return createElement("label", { key: field.key, className: "filter-field" },
+    createElement("span", null, field.label),
+    createElement("input", {
+      value,
+      list: field.type === "datalist" ? listID : undefined,
+      placeholder: field.placeholder || "",
+      onChange: (e: Event) => onChange((e.target as HTMLInputElement).value),
+      autoComplete: "off"
+    }),
+    field.type === "datalist" ? createElement("datalist", { id: listID }, (field.options || []).map(([optionValue, optionLabel]) => createElement("option", { key: optionValue, value: optionValue, label: optionLabel }))) : null
+  );
+}
+
+function filterValueLabel(field: FilterField, value: string) {
+  if (field.type === "datetime") return formatDateTime(value);
+  const option = field.options?.find(([optionValue]) => optionValue === value);
+  return option?.[1] || value;
+}
+
+function cleanFilterValues(values: Record<string, string>, fields: FilterField[]) {
+  return Object.fromEntries(fields.map((field) => [field.key, values[field.key] || ""]));
+}
+
+function emptyFilterValues(fields: FilterField[]) {
+  return Object.fromEntries(fields.map((field) => [field.key, ""]));
+}
 
 function GenericCreate(props: { title: string; fields: string[]; onSubmit: (body: Record<string, string>) => void }) {
   const initial = useMemo(() => Object.fromEntries(props.fields.map((f) => [f, ""])), [props.fields.join("|")]);
@@ -1743,6 +1886,117 @@ function ListInput(props: { label: string; values: string[]; onChange: (values: 
 
 function statusOptions() {
   return [["active", "Active"], ["disabled", "Disabled"]];
+}
+
+function certificateStatusOptions(): FilterOption[] {
+  return [
+    ["pending", "Pending"],
+    ["validating_dns", "Validating DNS"],
+    ["issuing", "Issuing"],
+    ["ready", "Ready"],
+    ["renewing", "Renewing"],
+    ["rotating_key", "Rotating key"],
+    ["expired", "Expired"],
+    ["revoked", "Revoked"],
+    ["failed", "Failed"],
+    ["deleted", "Deleted"]
+  ];
+}
+
+function keyTypeOptions(): FilterOption[] {
+  return [
+    ["ecdsa-p256", "ECDSA P-256"],
+    ["ecdsa-p384", "ECDSA P-384"],
+    ["rsa-2048", "RSA 2048"],
+    ["rsa-3072", "RSA 3072"],
+    ["rsa-4096", "RSA 4096"]
+  ];
+}
+
+function targetTypeOptions(): FilterOption[] {
+  return [
+    ["user", "User"],
+    ["application", "Application"],
+    ["certificate", "Certificate"],
+    ["issuer", "Issuer"],
+    ["dns_provider", "DNS provider"],
+    ["domain_scope", "Domain scope"],
+    ["application_token", "Application token"],
+    ["application_user_grant", "Application user grant"],
+    ["session", "Session"]
+  ];
+}
+
+function auditActionOptions(): FilterOption[] {
+  return [
+    "bootstrap_admin_created",
+    "user_created",
+    "user_updated",
+    "user_login_succeeded",
+    "user_login_failed",
+    "user_session_created",
+    "user_session_refreshed",
+    "user_session_revoked",
+    "password_2fa_setup_started",
+    "password_2fa_enabled",
+    "password_2fa_disabled",
+    "application_created",
+    "application_updated",
+    "application_token_created",
+    "application_token_revoked",
+    "domain_scope_created",
+    "domain_scope_deleted",
+    "application_access_granted",
+    "application_access_revoked",
+    "issuer_created",
+    "issuer_updated",
+    "issuer_disabled",
+    "acme_account_created",
+    "dns_provider_created",
+    "dns_provider_updated",
+    "dns_provider_credentials_replaced",
+    "dns_provider_zone_added",
+    "dns_provider_zone_removed",
+    "dns_provider_zone_refresh_started",
+    "dns_provider_zone_refreshed",
+    "dns_zone_discovery_failed",
+    "certificate_created",
+    "certificate_issuance_started",
+    "certificate_issuance_succeeded",
+    "certificate_issuance_failed",
+    "certificate_renewal_started",
+    "certificate_renewal_succeeded",
+    "certificate_renewal_failed",
+    "certificate_key_rotation_started",
+    "certificate_key_rotation_succeeded",
+    "certificate_key_rotation_failed",
+    "certificate_revoked",
+    "certificate_revocation_retried",
+    "certificate_revocation_failed",
+    "certificate_deleted",
+    "private_key_read",
+    "server_self_certificate_synced"
+  ].map((action) => [action, labelForColumn(action)]);
+}
+
+function localDateTimeInputValue(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function rfc3339FromLocalInput(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function formatDateTime(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function formActions(primary: string, cancelPath: string, navigate: (path: string) => void) {
