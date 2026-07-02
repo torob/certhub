@@ -115,11 +115,11 @@ type RouteState = {
   page: NavID;
   create?: "certificate" | "application" | "user" | "issuer" | "dns";
   detail?: ResourceType;
-  edit?: ResourceType;
   id?: string;
   profile?: boolean;
   signup?: boolean;
   resetPassword?: boolean;
+  invalid?: boolean;
   path: string;
   query: URLSearchParams;
 };
@@ -154,15 +154,12 @@ function parseRoute(): RouteState {
   if (path === "/signup") return { page: "home", signup: true, path, query };
   if (path === "/reset-password") return { page: "home", resetPassword: true, path, query };
   if (path === "/profile") return { page: "home", profile: true, path, query };
+  if (parts.length === 3 && ["applications", "users", "issuers", "dns-providers"].includes(parts[0]) && parts[2] === "edit") return { page: "home", invalid: true, path, query };
   if (parts.length === 2 && parts[0] === "certificates" && parts[1] !== "new") return { page: "certificates", detail: "certificate", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "applications" && parts[1] !== "new") return { page: "applications", detail: "application", id: parts[1], path, query };
-  if (parts.length === 3 && parts[0] === "applications" && parts[2] === "edit") return { page: "applications", detail: "application", edit: "application", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "users" && parts[1] !== "new") return { page: "users", detail: "user", id: parts[1], path, query };
-  if (parts.length === 3 && parts[0] === "users" && parts[2] === "edit") return { page: "users", detail: "user", edit: "user", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "issuers" && parts[1] !== "new") return { page: "issuers", detail: "issuer", id: parts[1], path, query };
-  if (parts.length === 3 && parts[0] === "issuers" && parts[2] === "edit") return { page: "issuers", detail: "issuer", edit: "issuer", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "dns-providers" && parts[1] !== "new") return { page: "dns", detail: "dns", id: parts[1], path, query };
-  if (parts.length === 3 && parts[0] === "dns-providers" && parts[2] === "edit") return { page: "dns", detail: "dns", edit: "dns", id: parts[1], path, query };
   switch (path) {
     case "/":
       return { page: "home", path, query };
@@ -189,7 +186,7 @@ function parseRoute(): RouteState {
     case "/audit":
       return { page: "audit", path, query };
     default:
-      return { page: "home", path: "/", query };
+      return { page: "home", invalid: true, path, query };
   }
 }
 
@@ -547,11 +544,8 @@ function AppShell() {
     return createElement(Login, { onLogin: setSession, notice: loginNotice });
   }
 
-  const Page = route.profile ? ProfilePage :
-    route.edit === "application" ? ApplicationEditPage :
-    route.edit === "user" ? UserEditPage :
-    route.edit === "issuer" ? IssuerEditPage :
-    route.edit === "dns" ? DNSEditPage :
+  const Page = route.invalid ? NotFoundPage :
+    route.profile ? ProfilePage :
     route.detail === "certificate" ? CertificateDetailPage :
     route.detail === "application" ? ApplicationDetailPage :
     route.detail === "user" ? UserDetailPage :
@@ -1114,6 +1108,8 @@ function ApplicationDetailPage(props: PageProps) {
   const base = `/v1/applications/${id}`;
   const [refresh, setRefresh] = useState(0);
   const [tokenValue, setTokenValue] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [body, setBody] = useState({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] as string[] });
   const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
   const app = detail.data?.application || {};
   const reserved = app.system_kind === "certhub_server" || app.name === "certhub_server";
@@ -1138,9 +1134,53 @@ function ApplicationDetailPage(props: PageProps) {
     if (!id || !appLoaded || rawTab === activeTab) return;
     props.navigate(applicationTabPath(id, activeTab), true);
   }, [id, appLoaded, rawTab, activeTab]);
-  const overview = createElement("section", { className: "detail" },
-    createElement("h2", null, appLabel(app)),
+  useEffect(() => {
+    if (activeTab !== "overview") setEditing(false);
+  }, [activeTab]);
+  useEffect(() => {
+    setEditing(false);
+    setBody({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] });
+  }, [id]);
+  const beginEdit = () => {
+    setBody({ display_name: app.display_name || "", description: app.description || "", status: app.status || "active", trusted_source_cidrs: app.trusted_source_cidrs || [] });
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setBody({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] });
+  };
+  const submitEdit = (e: Event) => {
+    e.preventDefault();
+    const cidrError = listError(body.trusted_source_cidrs, "trusted_source_cidrs", "ip_or_cidr");
+    const error = required(body.display_name, "display_name") || validateField("status", body.status) || cidrError;
+    if (error) return props.setNotice(error);
+    patchJSON({ session: props.session, setNotice: props.setNotice }, base, {
+      display_name: body.display_name,
+      description: body.description || null,
+      status: body.status,
+      trusted_source_cidrs: body.trusted_source_cidrs
+    }, () => {
+      setEditing(false);
+      setRefresh((value) => value + 1);
+    });
+  };
+  const overview = editing ? createElement("form", { className: "detail", onSubmit: submitEdit },
+    detailHeader(appLabel(app), detailSaveCancelActions(cancelEdit)),
     reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
+    kvEdit("Display name", inputControl("display_name", body.display_name, (v) => setBody({ ...body, display_name: v }))),
+    kvEdit("Status", selectControl("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions())),
+    kv("Current user role", app.current_user_role),
+    kvEdit("Description", textAreaControl("description", body.description, (v) => setBody({ ...body, description: v }))),
+    kvEdit("Trusted CIDRs", createElement(ListInput, { label: "trusted_source_cidrs", values: body.trusted_source_cidrs, onChange: (v: string[]) => setBody({ ...body, trusted_source_cidrs: v }), mode: "ip_or_cidr", placeholder: "203.0.113.10", hideLabel: true })),
+    kv("Domain scopes", app.domain_scope_count),
+    kv("Tokens", app.token_count),
+    kv("Certificates", app.certificate_count),
+    kv("Created at", app.created_at),
+    kv("Updated at", app.updated_at)
+  ) : createElement("section", { className: "detail" },
+    detailHeader(appLabel(app), canManage ? detailEditButton(beginEdit) : null),
+    reserved ? createElement("p", { className: "note" }, "System-managed Application. Changes come from backend process configuration.") : null,
+    kv("Display name", app.display_name),
     kv("Status", app.status),
     kv("Current user role", app.current_user_role),
     kv("Description", app.description || ""),
@@ -1195,46 +1235,12 @@ function ApplicationDetailPage(props: PageProps) {
   return pageFrame(app.name || "Application",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
-      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
-      canManage ? createElement("button", { className: "primary", onClick: () => props.navigate(`/applications/${id}/edit`) }, "Edit") : null
+      refreshButton(refreshing, () => setRefresh((value) => value + 1))
     ),
     initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("div", { className: "tabbed-detail" },
       createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
       tabContent
     )
-  );
-}
-
-function ApplicationEditPage(props: PageProps) {
-  const id = resourceID(props);
-  const detail = useAsync<{ application: any }>(props.session, id ? `/v1/applications/${id}` : "", [id]);
-  const app = detail.data?.application;
-  const [body, setBody] = useState({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] as string[] });
-  useEffect(() => {
-    if (!app) return;
-    setBody({ display_name: app.display_name || "", description: app.description || "", status: app.status || "active", trusted_source_cidrs: app.trusted_source_cidrs || [] });
-  }, [app?.id]);
-  const submit = (e: Event) => {
-    e.preventDefault();
-    const cidrError = listError(body.trusted_source_cidrs, "trusted_source_cidrs", "ip_or_cidr");
-    const error = required(body.display_name, "display_name") || validateField("status", body.status) || cidrError;
-    if (error) return props.setNotice(error);
-    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/applications/${id}`, {
-      display_name: body.display_name,
-      description: body.description || null,
-      status: body.status,
-      trusted_source_cidrs: body.trusted_source_cidrs
-    }, () => props.navigate(`/applications/${id}`));
-  };
-  return createPage("Edit Application", `/applications/${id}`, props.navigate,
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
-      createElement("form", { className: "create-form", onSubmit: submit },
-        input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
-        textAreaInput("description", body.description, (v) => setBody({ ...body, description: v })),
-        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        createElement(ListInput, { label: "trusted_source_cidrs", values: body.trusted_source_cidrs, onChange: (v: string[]) => setBody({ ...body, trusted_source_cidrs: v }), mode: "ip_or_cidr", placeholder: "203.0.113.10" }),
-        formActions("Save", `/applications/${id}`, props.navigate)
-      )
   );
 }
 
@@ -1256,55 +1262,37 @@ function UserDetailPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id, refresh]);
   const user = detail.data?.user || {};
-  if (!isAdmin(props.session)) return forbiddenPage("Users");
-  return pageFrame(user.email || "User",
-    createElement("div", { className: "header-actions" },
-      createElement("button", { onClick: () => props.navigate("/users") }, "Back"),
-      refreshButton(detail.loading, () => setRefresh((value) => value + 1)),
-      createElement("button", { className: "primary", onClick: () => props.navigate(`/users/${id}/edit`) }, "Edit")
-    ),
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
-      createElement("h2", null, user.email),
-      kv("Display name", user.display_name),
-      kv("Global role", user.global_role),
-      kv("Status", user.status),
-      kv("Password login", user.password_login_enabled ? "enabled" : "disabled"),
-      kv("Password 2FA", user.password_2fa_enabled ? "enabled" : "disabled"),
-      kv("OIDC", user.oidc_linked ? "linked" : "not linked"),
-      kv("Application grants", user.application_grant_count),
-      kv("Last login", user.last_login_at || ""),
-      kv("Created at", user.created_at),
-      kv("Updated at", user.updated_at)
-    ),
-    createElement("h2", null, "Application grants"),
-    table({ data: { grants: user.application_grants || [] } }, ["application_name", "role", "created_at"])
-  );
-}
-
-function UserEditPage(props: PageProps) {
-  const id = resourceID(props);
-  const [refresh, setRefresh] = useState(0);
-  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id, refresh]);
-  const user = detail.data?.user;
+  const [editing, setEditing] = useState(false);
   const [resetLink, setResetLink] = useState<any>(undefined);
   const [body, setBody] = useState({ display_name: "", global_role: "user", status: "active" });
   useEffect(() => {
-    if (!user) return;
-    setBody((current) => ({ ...current, display_name: user.display_name || "", global_role: user.global_role || "user", status: user.status || "active" }));
-  }, [user?.id]);
+    setEditing(false);
+    setResetLink(undefined);
+    setBody({ display_name: "", global_role: "user", status: "active" });
+  }, [id]);
   if (!isAdmin(props.session)) return forbiddenPage("Users");
-  const submit = async (e: Event) => {
+  const beginEdit = () => {
+    setBody({ display_name: user.display_name || "", global_role: user.global_role || "user", status: user.status || "active" });
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setBody({ display_name: "", global_role: "user", status: "active" });
+  };
+  const submitEdit = async (e: Event) => {
     e.preventDefault();
     const error = required(body.display_name, "display_name") || validateField("global_role", body.global_role) || validateField("status", body.status);
     if (error) return props.setNotice(error);
-    const patch: Record<string, unknown> = {
+    const result = await api<any>(`/v1/users/${id}`, props.session, { method: "PATCH", body: JSON.stringify({
       display_name: body.display_name,
       global_role: body.global_role,
       status: body.status
-    };
-    const result = await api<any>(`/v1/users/${id}`, props.session, { method: "PATCH", body: JSON.stringify(patch) });
+    }) });
     props.setNotice(errorOrOK(result));
-    if (!result.error) props.navigate(`/users/${id}`);
+    if (!result.error) {
+      setEditing(false);
+      setRefresh((value) => value + 1);
+    }
   };
   const getResetLink = async () => {
     const result = await api<any>(`/v1/users/${id}/password-reset-link`, props.session, { method: "POST" });
@@ -1323,9 +1311,9 @@ function UserEditPage(props: PageProps) {
     await navigator.clipboard.writeText(resetLink.reset_url);
     props.setNotice("copied");
   };
-  return pageFrame("Edit User",
+  return pageFrame(user.email || "User",
     createElement("div", { className: "header-actions" },
-      createElement("button", { onClick: () => props.navigate(`/users/${id}`) }, "Back"),
+      createElement("button", { onClick: () => props.navigate("/users") }, "Back"),
       refreshButton(detail.loading, () => setRefresh((value) => value + 1))
     ),
     resetLink ? createElement("section", { className: "detail secret-once" },
@@ -1338,22 +1326,40 @@ function UserEditPage(props: PageProps) {
         createElement("button", { type: "button", onClick: () => setResetLink(undefined) }, "Clear")
       )
     ) : null,
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
-      createElement("form", { className: "create-form", onSubmit: submit },
-        input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
-        selectInput("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]]),
-        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        createElement("section", { className: "form-section" },
-          createElement("h3", null, "Password"),
-          createElement("button", { type: "button", onClick: getResetLink }, createElement(KeyRound, { size: 16 }), "Get password reset link")
-        ),
-        createElement("section", { className: "form-section" },
-          createElement("h3", null, "Password 2FA"),
-          kv("Status", user?.password_2fa_enabled ? "enabled" : "disabled"),
-          createElement("button", { type: "button", disabled: !user?.password_2fa_enabled, onClick: disable2FA }, createElement(ShieldCheck, { size: 16 }), "Disable 2FA")
-        ),
-        formActions("Save", `/users/${id}`, props.navigate)
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : editing ? createElement("form", { className: "detail", onSubmit: submitEdit },
+      detailHeader(user.email, detailSaveCancelActions(cancelEdit)),
+      kvEdit("Display name", inputControl("display_name", body.display_name, (v) => setBody({ ...body, display_name: v }))),
+      kvEdit("Global role", selectControl("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]])),
+      kvEdit("Status", selectControl("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions())),
+      kv("Password login", user.password_login_enabled ? "enabled" : "disabled"),
+      kv("Password 2FA", user.password_2fa_enabled ? "enabled" : "disabled"),
+      kv("OIDC", user.oidc_linked ? "linked" : "not linked"),
+      kv("Application grants", user.application_grant_count),
+      kv("Last login", user.last_login_at || ""),
+      kv("Created at", user.created_at),
+      kv("Updated at", user.updated_at)
+    ) : createElement("section", { className: "detail" },
+      detailHeader(user.email, detailEditButton(beginEdit)),
+      kv("Display name", user.display_name),
+      kv("Global role", user.global_role),
+      kv("Status", user.status),
+      kv("Password login", user.password_login_enabled ? "enabled" : "disabled"),
+      kv("Password 2FA", user.password_2fa_enabled ? "enabled" : "disabled"),
+      kv("OIDC", user.oidc_linked ? "linked" : "not linked"),
+      kv("Application grants", user.application_grant_count),
+      kv("Last login", user.last_login_at || ""),
+      kv("Created at", user.created_at),
+      kv("Updated at", user.updated_at)
+    ),
+    !initialLoading(detail) && !blockingError(detail) ? createElement("section", { className: "detail" },
+      createElement("h2", null, "Security actions"),
+      createElement("div", { className: "toolbar" },
+        createElement("button", { type: "button", onClick: getResetLink }, createElement(KeyRound, { size: 16 }), "Get password reset link"),
+        createElement("button", { type: "button", disabled: !user?.password_2fa_enabled, onClick: disable2FA }, createElement(ShieldCheck, { size: 16 }), "Disable 2FA")
       )
+    ) : null,
+    createElement("h2", null, "Application grants"),
+    table({ data: { grants: user.application_grants || [] } }, ["application_name", "role", "created_at"])
   );
 }
 
@@ -1375,15 +1381,54 @@ function IssuerDetailPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id, refresh]);
   const issuer = detail.data?.issuer || {};
+  const [editing, setEditing] = useState(false);
+  const [body, setBody] = useState({ default: false, status: "active", renewal_window_seconds: "2592000", contact_email: "" });
+  useEffect(() => {
+    setEditing(false);
+    setBody({ default: false, status: "active", renewal_window_seconds: "2592000", contact_email: "" });
+  }, [id]);
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
+  const beginEdit = () => {
+    setBody({ default: Boolean(issuer.default), status: issuer.status || "active", renewal_window_seconds: String(issuer.renewal_window_seconds || 2592000), contact_email: issuer.contact_email || "" });
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setBody({ default: false, status: "active", renewal_window_seconds: "2592000", contact_email: "" });
+  };
+  const submitEdit = (e: Event) => {
+    e.preventDefault();
+    const error = validateField("status", body.status) || validateField("contact_email", body.contact_email) || (Number(body.renewal_window_seconds) <= 0 ? "renewal_window_seconds must be positive" : "");
+    if (error) return props.setNotice(error);
+    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/issuers/${id}`, {
+      default: body.default,
+      status: body.status,
+      renewal_window_seconds: Number(body.renewal_window_seconds),
+      contact_email: body.contact_email
+    }, () => {
+      setEditing(false);
+      setRefresh((value) => value + 1);
+    });
+  };
   return pageFrame(issuer.name || "Issuer",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/issuers") }, "Back"),
-      refreshButton(detail.loading, () => setRefresh((value) => value + 1)),
-      createElement("button", { className: "primary", onClick: () => props.navigate(`/issuers/${id}/edit`) }, "Edit")
+      refreshButton(detail.loading, () => setRefresh((value) => value + 1))
     ),
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
-      createElement("h2", null, issuer.name),
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : editing ? createElement("form", { className: "detail", onSubmit: submitEdit },
+      detailHeader(issuer.name, detailSaveCancelActions(cancelEdit)),
+      kv("Type", issuer.type),
+      kv("Directory URL", issuer.directory_url),
+      kv("Environment", issuer.environment),
+      kvEdit("Default", checkboxControl("default", body.default, (v) => setBody({ ...body, default: v }))),
+      kvEdit("Status", selectControl("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions())),
+      kvEdit("Renewal window seconds", inputControl("renewal_window_seconds", body.renewal_window_seconds, (v) => setBody({ ...body, renewal_window_seconds: v }), "number")),
+      kvEdit("Contact email", inputControl("contact_email", body.contact_email, (v) => setBody({ ...body, contact_email: v }), "email")),
+      kv("ACME account", issuer.acme_account_status || ""),
+      kv("Created at", issuer.created_at),
+      kv("Updated at", issuer.updated_at)
+    ) : createElement("section", { className: "detail" },
+      detailHeader(issuer.name, detailEditButton(beginEdit)),
       kv("Type", issuer.type),
       kv("Directory URL", issuer.directory_url),
       kv("Environment", issuer.environment),
@@ -1395,39 +1440,6 @@ function IssuerDetailPage(props: PageProps) {
       kv("Created at", issuer.created_at),
       kv("Updated at", issuer.updated_at)
     )
-  );
-}
-
-function IssuerEditPage(props: PageProps) {
-  const id = resourceID(props);
-  const detail = useAsync<{ issuer: any }>(props.session, id ? `/v1/issuers/${id}` : "", [id]);
-  const issuer = detail.data?.issuer;
-  const [body, setBody] = useState({ default: false, status: "active", renewal_window_seconds: "2592000", contact_email: "" });
-  useEffect(() => {
-    if (!issuer) return;
-    setBody({ default: Boolean(issuer.default), status: issuer.status || "active", renewal_window_seconds: String(issuer.renewal_window_seconds || 2592000), contact_email: issuer.contact_email || "" });
-  }, [issuer?.id]);
-  if (!isAdmin(props.session)) return forbiddenPage("Issuers");
-  const submit = (e: Event) => {
-    e.preventDefault();
-    const error = validateField("status", body.status) || validateField("contact_email", body.contact_email) || (Number(body.renewal_window_seconds) <= 0 ? "renewal_window_seconds must be positive" : "");
-    if (error) return props.setNotice(error);
-    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/issuers/${id}`, {
-      default: body.default,
-      status: body.status,
-      renewal_window_seconds: Number(body.renewal_window_seconds),
-      contact_email: body.contact_email
-    }, () => props.navigate(`/issuers/${id}`));
-  };
-  return createPage("Edit Issuer", `/issuers/${id}`, props.navigate,
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
-      createElement("form", { className: "create-form", onSubmit: submit },
-        checkboxInput("default", body.default, (v) => setBody({ ...body, default: v })),
-        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        input("renewal_window_seconds", body.renewal_window_seconds, (v) => setBody({ ...body, renewal_window_seconds: v }), "number"),
-        input("contact_email", body.contact_email, (v) => setBody({ ...body, contact_email: v }), "email"),
-        formActions("Save", `/issuers/${id}`, props.navigate)
-      )
   );
 }
 
@@ -1450,21 +1462,59 @@ function DNSDetailPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const detail = useAsync<{ dns_provider: any }>(props.session, id ? `/v1/dns-providers/${id}` : "", [id, refresh]);
   const provider = detail.data?.dns_provider || {};
+  const [editing, setEditing] = useState(false);
+  const [body, setBody] = useState({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
   const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   const providerByID = resourceMap(rowsOf(providers));
   const zones = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones?limit=100` : "", [id, refresh]);
   const discovered = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones/discovered?limit=100` : "", [id, refresh]);
   const base = `/v1/dns-providers/${id}`;
+  useEffect(() => {
+    setEditing(false);
+    setBody({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
+  }, [id]);
   if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
+  const beginEdit = () => {
+    setBody({ zone_mode: provider.zone_mode || "auto", status: provider.status || "active", api_token: "", api_key: "" });
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setBody({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
+  };
+  const submitEdit = (e: Event) => {
+    e.preventDefault();
+    const error = validateField("zone_mode", body.zone_mode) || validateField("status", body.status);
+    if (error) return props.setNotice(error);
+    const payload: Record<string, unknown> = { zone_mode: body.zone_mode, status: body.status };
+    if (provider?.type === "cloudflare" && body.api_token) payload.credentials = { api_token: body.api_token };
+    if (provider?.type === "arvancloud" && body.api_key) payload.credentials = { api_key: body.api_key };
+    patchJSON({ session: props.session, setNotice: props.setNotice }, base, payload, () => {
+      setEditing(false);
+      setBody({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
+      setRefresh((value) => value + 1);
+    });
+  };
   const refreshing = loadingAny(detail, providers, zones, discovered);
   return pageFrame(provider.name || "DNS Provider",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/dns-providers") }, "Back"),
-      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
-      createElement("button", { className: "primary", onClick: () => props.navigate(`/dns-providers/${id}/edit`) }, "Edit")
+      refreshButton(refreshing, () => setRefresh((value) => value + 1))
     ),
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
-      createElement("h2", null, provider.name),
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : editing ? createElement("form", { className: "detail", onSubmit: submitEdit },
+      detailHeader(provider.name, detailSaveCancelActions(cancelEdit)),
+      kv("Type", provider.type),
+      kvEdit("Zone mode", selectControl("zone_mode", body.zone_mode, (v) => setBody({ ...body, zone_mode: v }), [["auto", "Auto"], ["manual", "Manual"]])),
+      kvEdit("Status", selectControl("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions())),
+      provider?.type === "cloudflare" ? kvEdit("API token", inputControl("api_token", body.api_token, (v) => setBody({ ...body, api_token: v }), "password")) : null,
+      provider?.type === "arvancloud" ? kvEdit("API key", inputControl("api_key", body.api_key, (v) => setBody({ ...body, api_key: v }), "password")) : null,
+      kv("Refresh status", provider.zone_refresh_status),
+      provider.zone_refresh_failure_code ? kv("Refresh failure", `${provider.zone_refresh_failure_code}: ${provider.zone_refresh_failure_message || ""}`) : null,
+      kv("Last zone refresh", provider.last_zone_refresh_at || ""),
+      kv("Created at", provider.created_at),
+      kv("Updated at", provider.updated_at)
+    ) : createElement("section", { className: "detail" },
+      detailHeader(provider.name, detailEditButton(beginEdit)),
       kv("Type", provider.type),
       kv("Zone mode", provider.zone_mode),
       kv("Status", provider.status),
@@ -1480,37 +1530,6 @@ function DNSDetailPage(props: PageProps) {
     table(zones, ["zone_name", "created_at", provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/zones/${zone.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[]),
     createElement("h2", null, "Discovered zones"),
     table(discovered, ["zone_name", "already_configured", { key: "conflict_dns_provider", render: (zone: any) => dnsProviderLabel(providerByID.get(zone.conflict_dns_provider_id)) || (zone.conflict_dns_provider_id ? "Configured by another provider" : "") }, provider.zone_mode === "manual" ? actionsColumn((zone) => rowAction("Add", () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, { zone_name: zone.zone_name }, () => setRefresh((value) => value + 1)), { icon: Plus, disabled: zone.already_configured, label: `Add ${zone.zone_name}` })) : null].filter(Boolean) as TableColumn[])
-  );
-}
-
-function DNSEditPage(props: PageProps) {
-  const id = resourceID(props);
-  const detail = useAsync<{ dns_provider: any }>(props.session, id ? `/v1/dns-providers/${id}` : "", [id]);
-  const provider = detail.data?.dns_provider;
-  const [body, setBody] = useState({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
-  useEffect(() => {
-    if (!provider) return;
-    setBody({ zone_mode: provider.zone_mode || "auto", status: provider.status || "active", api_token: "", api_key: "" });
-  }, [provider?.id]);
-  if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
-  const submit = (e: Event) => {
-    e.preventDefault();
-    const error = validateField("zone_mode", body.zone_mode) || validateField("status", body.status);
-    if (error) return props.setNotice(error);
-    const payload: Record<string, unknown> = { zone_mode: body.zone_mode, status: body.status };
-    if (provider?.type === "cloudflare" && body.api_token) payload.credentials = { api_token: body.api_token };
-    if (provider?.type === "arvancloud" && body.api_key) payload.credentials = { api_key: body.api_key };
-    patchJSON({ session: props.session, setNotice: props.setNotice }, `/v1/dns-providers/${id}`, payload, () => props.navigate(`/dns-providers/${id}`));
-  };
-  return createPage("Edit DNS Provider", `/dns-providers/${id}`, props.navigate,
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) :
-      createElement("form", { className: "create-form", onSubmit: submit },
-        selectInput("zone_mode", body.zone_mode, (v) => setBody({ ...body, zone_mode: v }), [["auto", "Auto"], ["manual", "Manual"]]),
-        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        provider?.type === "cloudflare" ? input("api_token", body.api_token, (v) => setBody({ ...body, api_token: v }), "password") : null,
-        provider?.type === "arvancloud" ? input("api_key", body.api_key, (v) => setBody({ ...body, api_key: v }), "password") : null,
-        formActions("Save", `/dns-providers/${id}`, props.navigate)
-      )
   );
 }
 
@@ -1972,6 +1991,10 @@ function forbiddenPage(title: string) {
   return pageFrame(title, null, createElement("div", { className: "empty" }, "This global management view is available to admins only."));
 }
 
+function NotFoundPage() {
+  return pageFrame("Not Found", null, createElement("div", { className: "empty" }, "The requested page was not found."));
+}
+
 function resourceID(props: PageProps) {
   return props.route.id || "";
 }
@@ -2095,6 +2118,10 @@ function input(label: string, value: string, onChange: (v: string) => void, type
   return createElement("label", null, createElement("span", null, label), createElement("input", { value, type, onChange: (e: Event) => onChange((e.target as HTMLInputElement).value), autoComplete: "off" }));
 }
 
+function inputControl(label: string, value: string, onChange: (v: string) => void, type = "text") {
+  return createElement("input", { "aria-label": label, value, type, onChange: (e: Event) => onChange((e.target as HTMLInputElement).value), autoComplete: "off" });
+}
+
 function QRCodeImage(props: { value: string }) {
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   useEffect(() => {
@@ -2123,11 +2150,19 @@ function selectInput(label: string, value: string, onChange: (v: string) => void
   );
 }
 
+function selectControl(label: string, value: string, onChange: (v: string) => void, options: string[][]) {
+  return createElement("select", { "aria-label": label, value, onChange: (e: Event) => onChange((e.target as HTMLSelectElement).value) }, options.map(([optionValue, optionLabel]) => createElement("option", { key: optionValue || "empty", value: optionValue }, optionLabel)));
+}
+
 function textAreaInput(label: string, value: string, onChange: (v: string) => void, placeholder = "") {
   return createElement("label", null,
     createElement("span", null, label),
     createElement("textarea", { value, placeholder, rows: 3, onChange: (e: Event) => onChange((e.target as HTMLTextAreaElement).value), autoComplete: "off" })
   );
+}
+
+function textAreaControl(label: string, value: string, onChange: (v: string) => void, placeholder = "") {
+  return createElement("textarea", { "aria-label": label, value, placeholder, rows: 3, onChange: (e: Event) => onChange((e.target as HTMLTextAreaElement).value), autoComplete: "off" });
 }
 
 function checkboxInput(label: string, checked: boolean, onChange: (v: boolean) => void) {
@@ -2137,9 +2172,13 @@ function checkboxInput(label: string, checked: boolean, onChange: (v: boolean) =
   );
 }
 
+function checkboxControl(label: string, checked: boolean, onChange: (v: boolean) => void) {
+  return createElement("input", { "aria-label": label, checked, type: "checkbox", onChange: (e: Event) => onChange((e.target as HTMLInputElement).checked) });
+}
+
 type ListInputMode = "domain" | "ip_or_cidr";
 
-function ListInput(props: { label: string; values: string[]; onChange: (values: string[]) => void; mode: ListInputMode; placeholder: string }) {
+function ListInput(props: { label: string; values: string[]; onChange: (values: string[]) => void; mode: ListInputMode; placeholder: string; hideLabel?: boolean }) {
   const [draft, setDraft] = useState("");
   const add = (raw: string) => {
     const next = normalizeListValues([...props.values, ...splitList(raw)], props.mode);
@@ -2149,9 +2188,10 @@ function ListInput(props: { label: string; values: string[]; onChange: (values: 
   const draftError = draft ? listItemError(draft, props.mode) : "";
   const valuesError = listError(props.values, props.label, props.mode);
   return createElement("div", { className: "list-input" },
-    createElement("span", { className: "list-label" }, props.label),
+    props.hideLabel ? null : createElement("span", { className: "list-label" }, props.label),
     createElement("div", { className: "list-entry" },
       createElement("input", {
+        "aria-label": props.label,
         value: draft,
         placeholder: props.placeholder,
         autoComplete: "off",
@@ -2315,6 +2355,26 @@ function formActions(primary: string, cancelPath: string, navigate: (path: strin
   );
 }
 
+function detailHeader(title: unknown, actions?: unknown) {
+  return createElement("div", { className: "detail-header" },
+    createElement("h2", null, title),
+    actions
+  );
+}
+
+function detailEditButton(onEdit: () => void) {
+  return createElement("div", { className: "toolbar detail-actions" },
+    createElement("button", { type: "button", className: "primary", onClick: onEdit }, "Edit")
+  );
+}
+
+function detailSaveCancelActions(onCancel: () => void) {
+  return createElement("div", { className: "toolbar detail-actions" },
+    createElement("button", { className: "primary" }, "Save"),
+    createElement("button", { type: "button", onClick: onCancel }, "Cancel")
+  );
+}
+
 function createPage(title: string, backPath: string, navigate: (path: string) => void, ...children: unknown[]) {
   return pageFrame(
     title,
@@ -2361,6 +2421,10 @@ function labelForColumn(key: string) {
 
 function kv(label: string, value: unknown) {
   return createElement("div", { className: "kv" }, createElement("span", null, label), createElement("strong", null, cell(value)));
+}
+
+function kvEdit(label: string, editor: unknown) {
+  return createElement("div", { className: "kv kv-edit" }, createElement("span", null, label), createElement("div", { className: "kv-value" }, editor));
 }
 
 function resourceMap(rows: any[]) {

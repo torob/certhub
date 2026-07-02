@@ -175,6 +175,8 @@ The application must show only actions allowed by the current User's global role
 
 Stateful server-data views must provide a manual metadata refresh control. This applies to dashboard, list, detail, status, and audit views that show backend state. The refresh control must re-fetch visible page data in place without a browser reload, route change, tab reset, filter reset, or replacing existing content with a loading placeholder. While refresh is in progress, existing rows and detail content must remain visible, the refresh button must be disabled, and its refresh icon must animate so the User can see that the view is updating.
 
+Detail views edit mutable metadata inline. The Edit action appears in the detail card header. Clicking Edit must keep the User on the detail route, preserve the existing detail card rows, replace only editable value cells with inputs, and replace the card-header Edit action with adjacent Save and Cancel actions. Separate `/.../edit` frontend routes are not valid in v1. Create workflows may remain separate pages.
+
 ## Management Coverage
 
 The web interface must cover every management operation exposed by the backend's User-authenticated public API. A management workflow is complete only when the UI supports the relevant list, detail, create, update, delete, or action flow; mirrors backend validation for operator-entered fields; handles permission-specific states; and shows backend error and audit context.
@@ -313,7 +315,7 @@ Application list:
 Application detail:
 
 - Metadata.
-- Edit mutable fields: display name, description, status, and trusted source CIDRs.
+- Inline-edit mutable value cells on the Overview tab: display name, description, status, and trusted source CIDRs. Read-only overview rows remain visible while editing.
 - User grants.
 - Tokens.
 - Domain scopes.
@@ -422,9 +424,9 @@ User detail:
 - Metadata.
 - Global role.
 - Status.
+- Inline-edit mutable value cells: display name, global role, and status. Read-only User detail rows remain visible while editing.
 - Password login availability.
-- Password replacement/removal controls for admins.
-- Password 2FA status and administrative provisioning/reset controls where backend policy allows them.
+- Password reset-link and password-2FA reset controls for admins as separate detail-page actions, not as part of metadata edit mode.
 - OIDC link status.
 - Application grants.
 - Private-key access audit events.
@@ -468,6 +470,7 @@ Issuer management:
 - The UI must show the default issuer constraint: at most one active issuer can be default.
 - The UI must show that omitted-issuer certificate requests require exactly one active default issuer.
 - The UI must expose issuer detail and edit workflows for mutable fields: default issuer, status, renewal window, and contact email. Immutable fields such as name, type, directory URL, and environment must be shown as read-only after creation.
+- Issuer metadata edits must happen inline on the issuer detail page; immutable fields remain visible and read-only during edit mode.
 
 ## DNS Providers
 
@@ -491,8 +494,8 @@ Provider credentials must be write-only. The UI can allow replacement but must n
 DNS provider detail page:
 
 - Shows configured `zone_mode`: `auto` or `manual`.
-- Allows admins to update mutable provider metadata and status.
-- Allows admins to replace credentials without showing existing credentials.
+- Allows admins to inline-edit mutable provider metadata and status while preserving read-only provider detail rows.
+- Allows admins to replace credentials with blank write-only fields during inline edit mode without showing existing credentials.
 - Shows zones used for DNS-01 provider selection.
 - Shows discovered zones when the provider supports zone discovery.
 - Allows admins to trigger zone refresh in `auto` mode.
@@ -706,6 +709,7 @@ Required frontend scenarios:
 - User with `manager` access can list and revoke Application tokens, add/delete domain scopes, and create/replace/remove Application User grants.
 - Non-admin User cannot create Applications.
 - Admin can create Applications and update mutable Application fields.
+- Admin detail-page edit actions use inline edit mode and do not navigate to a separate edit page.
 - Admin can generate User invite links from email and selected global role, update mutable User fields, configure password availability for existing Users, and inspect OIDC link status without setting, replacing, or clearing the link fields.
 - Invited Users can open `/signup?invite=...` without an existing session, review the invited email/role, enter display name, set password, and complete signup.
 - If forced password 2FA is configured, invite signup shows a QR code for the TOTP provisioning URI and blocks completion until the User enters a valid current TOTP code.

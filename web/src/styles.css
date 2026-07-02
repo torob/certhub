@@ -789,6 +789,18 @@ tr.selectable:focus-within td {
   padding-block: 2px;
 }
 
+.detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.detail-actions {
+  flex: 0 0 auto;
+}
+
 .kv span {
   color: #5a6872;
 }
@@ -796,6 +808,19 @@ tr.selectable:focus-within td {
 .kv strong {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.kv-value {
+  min-width: 0;
+}
+
+.kv-edit {
+  align-items: center;
+}
+
+.kv-edit textarea,
+.kv-edit .list-input {
+  align-self: stretch;
 }
 
 .note,
