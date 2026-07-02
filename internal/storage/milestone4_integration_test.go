@@ -44,7 +44,6 @@ func TestMilestone4RepositoriesWithPostgres(t *testing.T) {
 	issuer, err := issuerRepo.Create(ctx, issuers.CreateIssuerParams{
 		Name:         "m4_issuer",
 		DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
-		Environment:  issuers.EnvironmentStaging,
 		ContactEmail: "M4.Issuer@Example.COM",
 	})
 	if err != nil {

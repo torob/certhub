@@ -283,7 +283,7 @@ certhub-server migrate --config <path>
 certhub-server bootstrap --interactive --config <path>
 certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password-stdin] [--allow-existing-admin]
 certhub-server bootstrap create-admin --interactive --config <path> [--allow-existing-admin]
-certhub-server bootstrap create-issuer --config <path> --name <machine_name> --environment <production|staging> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
+certhub-server bootstrap create-issuer --config <path> --name <machine_name> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
 certhub-server bootstrap create-dns-provider --config <path> --name <machine_name> --type <cloudflare|arvancloud> --zone-mode <auto|manual> [--credentials-stdin|--credentials-env <env>|--credentials-file <path>]
 certhub-server bootstrap add-dns-provider-zone --config <path> --dns-provider <name-or-id> --zone <dns_name>
 certhub-server bootstrap refresh-dns-provider-zones --config <path> --dns-provider <name-or-id>
@@ -2657,7 +2657,6 @@ Request body:
   "name": "letsencrypt_production",
   "type": "acme",
   "directory_url": "https://acme-v02.api.letsencrypt.org/directory",
-  "environment": "production",
   "default": true,
   "status": "active",
   "renewal_window_seconds": 2592000,
@@ -2707,7 +2706,7 @@ Description and notes:
 
 - Admin-only in v1.
 - Mutable fields are `default`, `status`, `renewal_window_seconds`, and `contact_email`.
-- Immutable fields are `name`, `type`, `directory_url`, and `environment`; changing them requires creating a new issuer.
+- Immutable fields are `name`, `type`, and `directory_url`; changing them requires creating a new issuer.
 - Setting `status=active` requires a usable active ACME account.
 - Setting `default=true` must preserve the constraint that at most one active issuer is default.
 - Disabling an issuer prevents new issuance and renewal selection for that issuer but does not delete historical Certificates, CertificateVersions, ACME accounts, or audit events.
@@ -3621,7 +3620,6 @@ Configured ACME issuers.
 | `name` | string | Required, unique, format `machine_name` | Machine-friendly issuer name, such as `letsencrypt_production`. |
 | `type` | enum | Required, value `acme` in v1 | Issuer implementation type. |
 | `directory_url` | string | Required, format `https_url` | ACME directory URL. |
-| `environment` | enum | Required, one of `production`, `staging` | Issuer environment label. |
 | `default` | boolean | Required, default false | Whether this issuer is selected by default. |
 | `status` | enum | Required, one of `active`, `disabled`; default `active` | Disabled issuers cannot issue. |
 | `renewal_window_seconds` | integer | Required, positive, default `2592000`, minimum `86400` | How many seconds before `not_after` Certhub should start automatic renewal. Default is 30 days. |
@@ -3635,7 +3633,7 @@ Constraints:
 - Requests that omit issuer require exactly one active default issuer. If no active default issuer exists or more than one active issuer is marked default, omitted-issuer requests fail with `issuer_not_configured`.
 - `renewal_window_seconds` must be lower than the shortest certificate lifetime this issuer is allowed to produce.
 - `default`, `status`, `renewal_window_seconds`, and `contact_email` are mutable through `PATCH /v1/issuers/{issuer_id}`.
-- `name`, `type`, `directory_url`, and `environment` are immutable after creation.
+- `name`, `type`, and `directory_url` are immutable after creation.
 
 ### `dns_providers`
 

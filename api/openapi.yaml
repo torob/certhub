@@ -3278,9 +3278,6 @@ components:
     IssuerType:
       type: string
       enum: [acme]
-    IssuerEnvironment:
-      type: string
-      enum: [production, staging]
     DNSProviderType:
       type: string
       enum: [cloudflare, arvancloud]
@@ -4625,7 +4622,7 @@ components:
     Issuer:
       type: object
       additionalProperties: false
-      required: [id, name, type, directory_url, environment, default, status, renewal_window_seconds, contact_email, created_at, updated_at]
+      required: [id, name, type, directory_url, default, status, renewal_window_seconds, contact_email, created_at, updated_at]
       properties:
         id:
           type: string
@@ -4636,8 +4633,6 @@ components:
           $ref: '#/components/schemas/IssuerType'
         directory_url:
           $ref: '#/components/schemas/HTTPSURL'
-        environment:
-          $ref: '#/components/schemas/IssuerEnvironment'
         default:
           type: boolean
         status:
@@ -4677,7 +4672,7 @@ components:
     IssuerCreateRequest:
       type: object
       additionalProperties: false
-      required: [name, type, directory_url, environment, contact_email]
+      required: [name, type, directory_url, contact_email]
       properties:
         name:
           $ref: '#/components/schemas/MachineName'
@@ -4685,8 +4680,6 @@ components:
           $ref: '#/components/schemas/IssuerType'
         directory_url:
           $ref: '#/components/schemas/HTTPSURL'
-        environment:
-          $ref: '#/components/schemas/IssuerEnvironment'
         default:
           type: boolean
           default: false
@@ -5464,7 +5457,6 @@ components:
             name: letsencrypt_production
             type: acme
             directory_url: https://acme-v02.api.letsencrypt.org/directory
-            environment: production
             default: true
             status: active
             renewal_window_seconds: 2592000
@@ -5481,7 +5473,6 @@ components:
         name: letsencrypt_production
         type: acme
         directory_url: https://acme-v02.api.letsencrypt.org/directory
-        environment: production
         default: true
         status: active
         renewal_window_seconds: 2592000
@@ -5493,7 +5484,6 @@ components:
           name: letsencrypt_production
           type: acme
           directory_url: https://acme-v02.api.letsencrypt.org/directory
-          environment: production
           default: true
           status: active
           renewal_window_seconds: 2592000

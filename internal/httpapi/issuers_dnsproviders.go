@@ -18,7 +18,6 @@ type issuerCreateRequest struct {
 	Name                 string `json:"name"`
 	Type                 string `json:"type"`
 	DirectoryURL         string `json:"directory_url"`
-	Environment          string `json:"environment"`
 	Default              bool   `json:"default"`
 	Status               string `json:"status"`
 	RenewalWindowSeconds int    `json:"renewal_window_seconds"`
@@ -30,7 +29,6 @@ type apiIssuer struct {
 	Name                 string    `json:"name"`
 	Type                 string    `json:"type"`
 	DirectoryURL         string    `json:"directory_url"`
-	Environment          string    `json:"environment"`
 	Default              bool      `json:"default"`
 	Status               string    `json:"status"`
 	RenewalWindowSeconds int       `json:"renewal_window_seconds"`
@@ -154,14 +152,13 @@ func (s *Server) handleCreateIssuer(w http.ResponseWriter, r *http.Request, reqc
 		return status, code
 	}
 	var body issuerCreateRequest
-	if err := decodeJSONBody(r, &body); err != nil || body.Name == "" || body.Type == "" || body.DirectoryURL == "" || body.Environment == "" || body.ContactEmail == "" {
+	if err := decodeJSONBody(r, &body); err != nil || body.Name == "" || body.Type == "" || body.DirectoryURL == "" || body.ContactEmail == "" {
 		return writeIssuerError(w, issuerdomain.ErrInvalidRequest)
 	}
 	issuer, err := s.issuers.CreateIssuer(r.Context(), issuerActor(current), issuerdomain.CreateIssuerParams{
 		Name:                 body.Name,
 		Type:                 issuerdomain.Type(body.Type),
 		DirectoryURL:         body.DirectoryURL,
-		Environment:          issuerdomain.Environment(body.Environment),
 		IsDefault:            body.Default,
 		Status:               issuerdomain.Status(body.Status),
 		RenewalWindowSeconds: body.RenewalWindowSeconds,
@@ -592,7 +589,6 @@ func serializeIssuer(issuer issuerdomain.Issuer) apiIssuer {
 		Name:                 issuer.Name,
 		Type:                 string(issuer.Type),
 		DirectoryURL:         issuer.DirectoryURL,
-		Environment:          string(issuer.Environment),
 		Default:              issuer.IsDefault,
 		Status:               string(issuer.Status),
 		RenewalWindowSeconds: issuer.RenewalWindowSeconds,

@@ -1226,8 +1226,6 @@ export interface components {
         /** @enum {string} */
         IssuerType: "acme";
         /** @enum {string} */
-        IssuerEnvironment: "production" | "staging";
-        /** @enum {string} */
         DNSProviderType: "cloudflare" | "arvancloud";
         /** @enum {string} */
         DNSProviderZoneMode: "auto" | "manual";
@@ -1798,7 +1796,6 @@ export interface components {
             name: components["schemas"]["MachineName"];
             type: components["schemas"]["IssuerType"];
             directory_url: components["schemas"]["HTTPSURL"];
-            environment: components["schemas"]["IssuerEnvironment"];
             default: boolean;
             status: components["schemas"]["OperationalStatus"];
             /** @default 2592000 */
@@ -1821,7 +1818,6 @@ export interface components {
             name: components["schemas"]["MachineName"];
             type: components["schemas"]["IssuerType"];
             directory_url: components["schemas"]["HTTPSURL"];
-            environment: components["schemas"]["IssuerEnvironment"];
             /** @default false */
             default: boolean;
             status?: components["schemas"]["OperationalStatus"];

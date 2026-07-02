@@ -183,11 +183,10 @@ func (s *Service) createIssuer(ctx context.Context, actor Actor, params CreateIs
 		return Issuer{}, classifyWriteError(err)
 	}
 	if err := s.auditIssuerEvent(ctx, actor, "issuer_created", &issuer.ID, auditCtx, map[string]any{
-		"name":        issuer.Name,
-		"type":        string(issuer.Type),
-		"environment": string(issuer.Environment),
-		"default":     issuer.IsDefault,
-		"status":      string(issuer.Status),
+		"name":    issuer.Name,
+		"type":    string(issuer.Type),
+		"default": issuer.IsDefault,
+		"status":  string(issuer.Status),
 	}); err != nil {
 		return Issuer{}, err
 	}

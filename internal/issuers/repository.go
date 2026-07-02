@@ -15,13 +15,6 @@ type Type string
 
 const TypeACME Type = "acme"
 
-type Environment string
-
-const (
-	EnvironmentProduction Environment = "production"
-	EnvironmentStaging    Environment = "staging"
-)
-
 type Status string
 
 const (
@@ -41,7 +34,6 @@ type Issuer struct {
 	Name                 string
 	Type                 Type
 	DirectoryURL         string
-	Environment          Environment
 	IsDefault            bool
 	Status               Status
 	RenewalWindowSeconds int
@@ -76,7 +68,6 @@ type CreateIssuerParams struct {
 	Name                 string
 	Type                 Type
 	DirectoryURL         string
-	Environment          Environment
 	IsDefault            bool
 	Status               Status
 	RenewalWindowSeconds int
@@ -92,9 +83,8 @@ type UpdateIssuerParams struct {
 
 type ListIssuersParams struct {
 	storage.ListOptions
-	Status      *Status
-	Environment *Environment
-	Search      string
+	Status *Status
+	Search string
 }
 
 type CreateACMEAccountParams struct {
@@ -127,12 +117,12 @@ func (r Repository) Create(ctx context.Context, params CreateIssuerParams) (Issu
 	}
 	issuer, err := scanIssuer(r.db.QueryRow(ctx, `
 insert into issuers (
-    id, name, type, directory_url, environment, is_default,
+    id, name, type, directory_url, is_default,
     status, renewal_window_seconds, contact_email
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+) values ($1, $2, $3, $4, $5, $6, $7, $8)
 returning `+issuerReturningSQL(),
-		params.ID, params.Name, string(params.Type), params.DirectoryURL, string(params.Environment),
-		params.IsDefault, string(params.Status), params.RenewalWindowSeconds, params.ContactEmail))
+		params.ID, params.Name, string(params.Type), params.DirectoryURL, params.IsDefault,
+		string(params.Status), params.RenewalWindowSeconds, params.ContactEmail))
 	if err != nil {
 		return Issuer{}, fmt.Errorf("create issuer: %w", err)
 	}
@@ -388,13 +378,6 @@ func (r Repository) listQuery(params ListIssuersParams) (string, []any, error) {
 		args = append(args, string(*params.Status))
 		where = append(where, fmt.Sprintf("i.status = $%d", len(args)))
 	}
-	if params.Environment != nil {
-		if err := validateEnvironment(*params.Environment); err != nil {
-			return "", nil, err
-		}
-		args = append(args, string(*params.Environment))
-		where = append(where, fmt.Sprintf("i.environment = $%d", len(args)))
-	}
 	if params.Search != "" {
 		if err := storage.ValidateHumanString(params.Search, "search", 1, 255); err != nil {
 			return "", nil, err
@@ -424,13 +407,6 @@ func (r Repository) countQuery(params ListIssuersParams) (string, []any, error) 
 		args = append(args, string(*params.Status))
 		where = append(where, fmt.Sprintf("i.status = $%d", len(args)))
 	}
-	if params.Environment != nil {
-		if err := validateEnvironment(*params.Environment); err != nil {
-			return "", nil, err
-		}
-		args = append(args, string(*params.Environment))
-		where = append(where, fmt.Sprintf("i.environment = $%d", len(args)))
-	}
 	if params.Search != "" {
 		if err := storage.ValidateHumanString(params.Search, "search", 1, 255); err != nil {
 			return "", nil, err
@@ -446,14 +422,14 @@ func (r Repository) countQuery(params ListIssuersParams) (string, []any, error) 
 }
 
 func issuerSelectColumnsSQL() string {
-	return `i.id, i.name, i.type, i.directory_url, i.environment, i.is_default, i.status,
+	return `i.id, i.name, i.type, i.directory_url, i.is_default, i.status,
     i.renewal_window_seconds, i.contact_email, i.created_at, i.updated_at,
     (select count(*) from acme_accounts where issuer_id = i.id)::bigint,
     exists(select 1 from acme_accounts where issuer_id = i.id and status = 'active')`
 }
 
 func issuerReturningSQL() string {
-	return `id, name, type, directory_url, environment, is_default, status,
+	return `id, name, type, directory_url, is_default, status,
     renewal_window_seconds, contact_email, created_at, updated_at,
     (select count(*) from acme_accounts where issuer_id = issuers.id)::bigint,
     exists(select 1 from acme_accounts where issuer_id = issuers.id and status = 'active')`
@@ -469,13 +445,12 @@ type scanner interface {
 
 func scanIssuer(row scanner) (Issuer, error) {
 	var issuer Issuer
-	var typ, environment, status string
+	var typ, status string
 	if err := row.Scan(
 		&issuer.ID,
 		&issuer.Name,
 		&typ,
 		&issuer.DirectoryURL,
-		&environment,
 		&issuer.IsDefault,
 		&status,
 		&issuer.RenewalWindowSeconds,
@@ -488,7 +463,6 @@ func scanIssuer(row scanner) (Issuer, error) {
 		return Issuer{}, err
 	}
 	issuer.Type = Type(typ)
-	issuer.Environment = Environment(environment)
 	issuer.Status = Status(status)
 	return issuer, nil
 }
@@ -529,9 +503,6 @@ func validateCreateIssuer(params *CreateIssuerParams) error {
 		return errors.New("directory_url is required")
 	}
 	if err := storage.ValidatePublicHTTPSURL(&params.DirectoryURL, "directory_url"); err != nil {
-		return err
-	}
-	if err := validateEnvironment(params.Environment); err != nil {
 		return err
 	}
 	if params.Status == "" {
@@ -607,15 +578,6 @@ func validateCreateACMEAccount(params *CreateACMEAccountParams) error {
 		params.Status = ACMEAccountStatusActive
 	}
 	return validateACMEAccountStatus(params.Status)
-}
-
-func validateEnvironment(environment Environment) error {
-	switch environment {
-	case EnvironmentProduction, EnvironmentStaging:
-		return nil
-	default:
-		return errors.New("issuer environment is invalid")
-	}
 }
 
 func validateStatus(status Status) error {

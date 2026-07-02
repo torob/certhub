@@ -607,7 +607,6 @@ func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 	fs.SetOutput(r.Stderr)
 	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
 	name := fs.String("name", "", "issuer machine name")
-	environment := fs.String("environment", "", "ACME environment")
 	directoryURL := fs.String("directory-url", "", "ACME directory URL")
 	contactEmail := fs.String("contact-email", "", "ACME contact email")
 	isDefault := fs.Bool("default", false, "make issuer default")
@@ -616,8 +615,8 @@ func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || *name == "" || *environment == "" || *directoryURL == "" || *contactEmail == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, environment, directory-url, and contact-email are required"))
+	if fs.NArg() != 0 || *name == "" || *directoryURL == "" || *contactEmail == "" {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, directory-url, and contact-email are required"))
 	}
 	boot, err := r.openBootstrapServices(context.Background(), *configPath)
 	if err != nil {
@@ -628,7 +627,6 @@ func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 		Name:                 *name,
 		Type:                 issuers.TypeACME,
 		DirectoryURL:         *directoryURL,
-		Environment:          issuers.Environment(*environment),
 		IsDefault:            *isDefault,
 		RenewalWindowSeconds: *renewalWindow,
 		ContactEmail:         *contactEmail,

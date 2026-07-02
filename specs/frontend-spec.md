@@ -452,7 +452,6 @@ Issuer list:
 - Name.
 - Type.
 - ACME directory URL.
-- Environment.
 - Status.
 - Default flag.
 - Renewal window.
@@ -465,11 +464,11 @@ Common issuer examples:
 Issuer management:
 
 - Admin-only in v1.
-- Issuer creation must support `name`, `type=acme`, `directory_url`, `environment`, `default`, `status`, `renewal_window_seconds`, and contact email.
+- Issuer creation must support `name`, `type=acme`, `directory_url`, `default`, `status`, `renewal_window_seconds`, and contact email.
 - Certhub creates or reuses the ACME account during issuer creation; the UI does not manage ACME accounts directly.
 - The UI must show the default issuer constraint: at most one active issuer can be default.
 - The UI must show that omitted-issuer certificate requests require exactly one active default issuer.
-- The UI must expose issuer detail and edit workflows for mutable fields: default issuer, status, renewal window, and contact email. Immutable fields such as name, type, directory URL, and environment must be shown as read-only after creation.
+- The UI must expose issuer detail and edit workflows for mutable fields: default issuer, status, renewal window, and contact email. Immutable fields such as name, type, and directory URL must be shown as read-only after creation.
 - Issuer metadata edits must happen inline on the issuer detail page; immutable fields remain visible and read-only during edit mode.
 
 ## DNS Providers

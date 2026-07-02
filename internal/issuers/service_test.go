@@ -38,7 +38,6 @@ func TestCreateIssuerCreatesEncryptedACMEAccountAndAuditsNoSecret(t *testing.T) 
 		Name:         "letsencrypt_staging",
 		Type:         TypeACME,
 		DirectoryURL: "https://acme.example/directory",
-		Environment:  EnvironmentStaging,
 		IsDefault:    true,
 		Status:       StatusActive,
 		ContactEmail: "Platform@Example.COM",
@@ -86,7 +85,6 @@ func TestCreateIssuerWithSystemActorAuditsSystemIdentity(t *testing.T) {
 		Name:         "letsencrypt_staging",
 		Type:         TypeACME,
 		DirectoryURL: "https://acme.example/directory",
-		Environment:  EnvironmentStaging,
 		Status:       StatusActive,
 		ContactEmail: "platform@example.com",
 	}, AuditContext{CorrelationID: "bootstrap-create-issuer", Command: "certhub-server bootstrap create-issuer"})
@@ -132,7 +130,6 @@ func (s *issuerServiceStore) Create(_ context.Context, params CreateIssuerParams
 		Name:                 params.Name,
 		Type:                 params.Type,
 		DirectoryURL:         params.DirectoryURL,
-		Environment:          params.Environment,
 		IsDefault:            params.IsDefault,
 		Status:               params.Status,
 		RenewalWindowSeconds: 2592000,

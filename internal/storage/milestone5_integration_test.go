@@ -61,7 +61,6 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	issuer, err := issuerRepo.Create(ctx, issuers.CreateIssuerParams{
 		Name:         "m5_issuer",
 		DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
-		Environment:  issuers.EnvironmentStaging,
 		ContactEmail: "m5.issuer@example.com",
 	})
 	if err != nil {

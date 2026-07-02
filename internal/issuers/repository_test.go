@@ -22,7 +22,6 @@ func TestCreateIssuerNormalizesEmailAndDefaultsDisabled(t *testing.T) {
 		ID:           "12345678-1234-4234-9234-123456789abc",
 		Name:         "letsencrypt_staging",
 		DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
-		Environment:  EnvironmentStaging,
 		ContactEmail: "ADMIN@Example.COM",
 	})
 	if err != nil {
@@ -34,7 +33,7 @@ func TestCreateIssuerNormalizesEmailAndDefaultsDisabled(t *testing.T) {
 	if strings.Contains(db.query, "ADMIN@Example.COM") {
 		t.Fatalf("query contains unsanitized email: %s", db.query)
 	}
-	if db.args[6] != string(StatusDisabled) || db.args[8] != "admin@example.com" {
+	if db.args[5] != string(StatusDisabled) || db.args[7] != "admin@example.com" {
 		t.Fatalf("args = %#v", db.args)
 	}
 }
@@ -45,7 +44,6 @@ func TestCreateIssuerRejectsActiveWithoutAccount(t *testing.T) {
 		ID:           "12345678-1234-4234-9234-123456789abc",
 		Name:         "letsencrypt_production",
 		DirectoryURL: "https://acme-v02.api.letsencrypt.org/directory",
-		Environment:  EnvironmentProduction,
 		Status:       StatusActive,
 		ContactEmail: "admin@example.com",
 	})
@@ -67,7 +65,7 @@ func TestUpdateIssuerOnlyTouchesMutableColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	setClause := strings.Split(db.query, "where id")[0]
-	for _, forbidden := range []string{"name =", "type =", "directory_url =", "environment ="} {
+	for _, forbidden := range []string{"name =", "type =", "directory_url ="} {
 		if strings.Contains(setClause, forbidden) {
 			t.Fatalf("immutable column appeared in update: %s", db.query)
 		}
@@ -165,7 +163,6 @@ func issuerRowValues(now time.Time, email, status string) []any {
 		"letsencrypt_staging",
 		string(TypeACME),
 		"https://acme-staging-v02.api.letsencrypt.org/directory",
-		string(EnvironmentStaging),
 		false,
 		status,
 		2592000,

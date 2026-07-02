@@ -1377,7 +1377,7 @@ function IssuersPage(props: PageProps) {
       refreshButton(list.loading, () => setRefresh((value) => value + 1)),
       createElement("button", { className: "primary", onClick: () => props.navigate("/issuers/new") }, "Create Issuer")
     ),
-    table(list, ["name", "type", "directory_url", "environment", "status", "default", "renewal_window_seconds"], (issuer) => props.navigate(`/issuers/${issuer.id}`))
+    table(list, ["name", "type", "directory_url", "status", "default", "renewal_window_seconds"], (issuer) => props.navigate(`/issuers/${issuer.id}`))
   );
 }
 
@@ -1424,7 +1424,6 @@ function IssuerDetailPage(props: PageProps) {
       detailHeader(issuer.name, detailSaveCancelActions(cancelEdit)),
       kv("Type", issuer.type),
       kv("Directory URL", issuer.directory_url),
-      kv("Environment", issuer.environment),
       kvEdit("Default", checkboxControl("default", body.default, (v) => setBody({ ...body, default: v }))),
       kvEdit("Status", selectControl("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions())),
       kvEdit("Renewal window seconds", inputControl("renewal_window_seconds", body.renewal_window_seconds, (v) => setBody({ ...body, renewal_window_seconds: v }), "number")),
@@ -1436,7 +1435,6 @@ function IssuerDetailPage(props: PageProps) {
       detailHeader(issuer.name, detailEditButton(beginEdit)),
       kv("Type", issuer.type),
       kv("Directory URL", issuer.directory_url),
-      kv("Environment", issuer.environment),
       kv("Default", issuer.default ? "yes" : "no"),
       kv("Status", issuer.status),
       kv("Renewal window seconds", issuer.renewal_window_seconds),
@@ -1693,7 +1691,6 @@ function IssuerCreatePage(props: PageProps) {
     name: "letsencrypt_production",
     type: "acme",
     directory_url: "https://acme-v02.api.letsencrypt.org/directory",
-    environment: "production",
     default: true,
     status: "active",
     renewal_window_seconds: "2592000",
@@ -1702,18 +1699,17 @@ function IssuerCreatePage(props: PageProps) {
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
   const applyPreset = (value: string) => {
     setPreset(value);
-    if (value === "letsencrypt_production") setBody({ ...body, name: "letsencrypt_production", directory_url: "https://acme-v02.api.letsencrypt.org/directory", environment: "production" });
-    if (value === "letsencrypt_staging") setBody({ ...body, name: "letsencrypt_staging", directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory", environment: "staging", default: false });
+    if (value === "letsencrypt_production") setBody({ ...body, name: "letsencrypt_production", directory_url: "https://acme-v02.api.letsencrypt.org/directory" });
+    if (value === "letsencrypt_staging") setBody({ ...body, name: "letsencrypt_staging", directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory", default: false });
   };
   const submit = async (e: Event) => {
     e.preventDefault();
-    const error = required(body.name, "name") || required(body.directory_url, "directory_url") || required(body.contact_email, "contact_email") || validateField("name", body.name) || validateField("directory_url", body.directory_url) || validateField("environment", body.environment) || validateField("status", body.status) || validateField("contact_email", body.contact_email);
+    const error = required(body.name, "name") || required(body.directory_url, "directory_url") || required(body.contact_email, "contact_email") || validateField("name", body.name) || validateField("directory_url", body.directory_url) || validateField("status", body.status) || validateField("contact_email", body.contact_email);
     if (error) return props.setNotice(error);
     const result = await api("/v1/issuers", props.session, { method: "POST", body: JSON.stringify({
       name: body.name,
       type: "acme",
       directory_url: body.directory_url,
-      environment: body.environment,
       default: body.default,
       status: body.status,
       renewal_window_seconds: Number(body.renewal_window_seconds || 2592000),
@@ -1728,7 +1724,6 @@ function IssuerCreatePage(props: PageProps) {
       input("name", body.name, (v) => setBody({ ...body, name: v })),
       selectInput("type", body.type, (v) => setBody({ ...body, type: v }), [["acme", "ACME"]]),
       input("directory_url", body.directory_url, (v) => setBody({ ...body, directory_url: v }), "url"),
-      selectInput("environment", body.environment, (v) => setBody({ ...body, environment: v }), [["production", "Production"], ["staging", "Staging"]]),
       checkboxInput("default", body.default, (v) => setBody({ ...body, default: v })),
       selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
       input("renewal_window_seconds", body.renewal_window_seconds, (v) => setBody({ ...body, renewal_window_seconds: v }), "number"),
