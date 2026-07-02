@@ -114,25 +114,22 @@ func TestMilestone3RepositoriesWithPostgres(t *testing.T) {
 		UserID:           user.ID,
 		AuthMethod:       auth.AuthMethodPassword,
 		AccessTokenHash:  testTokenHash("access-1"),
-		RefreshTokenHash: testTokenHash("refresh-1"),
 		AccessExpiresAt:  now.Add(5 * time.Minute),
-		RefreshExpiresAt: now.Add(time.Hour),
+		SessionExpiresAt: now.Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := auth.RotateRefreshTokenTx(ctx, tx, auth.RotateRefreshTokenParams{
-		CurrentRefreshTokenHash: session.RefreshTokenHash,
-		NewAccessTokenHash:      testTokenHash("access-2"),
-		NewRefreshTokenHash:     testTokenHash("refresh-2"),
-		AccessExpiresAt:         now.Add(10 * time.Minute),
-		RefreshExpiresAt:        now.Add(2 * time.Hour),
+	rotated, err := auth.RotateAccessTokenTx(ctx, tx, auth.RotateAccessTokenParams{
+		CurrentAccessTokenHash: session.AccessTokenHash,
+		NewAccessTokenHash:     testTokenHash("access-2"),
+		AccessExpiresAt:        now.Add(10 * time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rotated.RefreshTokenHash == session.RefreshTokenHash {
-		t.Fatalf("refresh token did not rotate")
+	if rotated.AccessTokenHash == session.AccessTokenHash {
+		t.Fatalf("access token did not rotate")
 	}
 
 	authRepo := auth.NewRepository(tx)

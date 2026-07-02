@@ -114,10 +114,10 @@ func TestApplicationManagementEndpointRejectsApplicationTokenClass(t *testing.T)
 	assertErrorCode(t, rec, http.StatusForbidden, "user_token_required")
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/applications", nil)
-	req.Header.Set("Authorization", "Bearer "+auth.UserRefreshTokenPrefix+strings.Repeat("B", 43))
+	req.Header.Set("Authorization", "Bearer cth_urt_v1_"+strings.Repeat("B", 43))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	assertErrorCode(t, rec, http.StatusForbidden, "refresh_token_not_allowed")
+	assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_token")
 }
 
 func TestApplicationConflictErrorCarriesRetryAfter(t *testing.T) {
@@ -150,12 +150,13 @@ func TestCreateApplicationTokenResponseShowsRawOnceAndNoHash(t *testing.T) {
 	user := fakeUser()
 	userToken := auth.UserAccessTokenPrefix + strings.Repeat("C", 43)
 	authRepo := &identityFakeAuthRepo{session: auth.Session{
-		ID:              "52345678-1234-4234-9234-123456789abc",
-		UserID:          user.ID,
-		AuthMethod:      auth.AuthMethodPassword,
-		AccessTokenHash: keys.HashToken(userToken),
-		Status:          auth.SessionStatusActive,
-		AccessExpiresAt: time.Now().Add(time.Minute),
+		ID:               "52345678-1234-4234-9234-123456789abc",
+		UserID:           user.ID,
+		AuthMethod:       auth.AuthMethodPassword,
+		AccessTokenHash:  keys.HashToken(userToken),
+		Status:           auth.SessionStatusActive,
+		AccessExpiresAt:  time.Now().Add(time.Minute),
+		SessionExpiresAt: time.Now().Add(time.Hour),
 	}}
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository:  authRepo,

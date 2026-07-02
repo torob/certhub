@@ -656,8 +656,6 @@ func domainError(err error, unavailableCode string) (int, string, string) {
 		return http.StatusServiceUnavailable, unavailableCode, "Backend is not ready."
 	case errors.Is(err, auth.ErrInvalidToken):
 		return http.StatusUnauthorized, "invalid_token", "Authentication token is missing, invalid, or expired."
-	case errors.Is(err, auth.ErrRefreshTokenNotAllowed):
-		return http.StatusForbidden, "refresh_token_not_allowed", "Refresh tokens are accepted only by the refresh endpoint."
 	case errors.Is(err, auth.ErrUserTokenRequired):
 		return http.StatusForbidden, "user_token_required", "A User access token is required."
 	case errors.Is(err, issuerdomain.ErrForbidden), errors.Is(err, dnsdomain.ErrForbidden):

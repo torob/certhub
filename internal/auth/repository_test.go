@@ -14,56 +14,51 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestRotateRefreshTokenTxLocksHistoryAndSession(t *testing.T) {
+func TestRotateAccessTokenTxLocksHistoryAndSession(t *testing.T) {
 	now := time.Now()
 	oldHash := strings.Repeat("A", 43)
 	newAccessHash := strings.Repeat("B", 43)
-	newRefreshHash := strings.Repeat("C", 43)
 	db := &fakeTx{
 		rows: []pgx.Row{
-			fakeRow{values: refreshRowValues(now, oldHash, RefreshTokenStatusActive)},
-			fakeRow{values: sessionRowValues(now, oldHash, SessionStatusActive, nil)},
-			fakeRow{values: sessionRowValues(now, newRefreshHash, SessionStatusActive, &newAccessHash)},
+			fakeRow{values: tokenRowValues(now, oldHash, SessionTokenStatusActive)},
+			fakeRow{values: sessionRowValues(now, oldHash, SessionStatusActive)},
+			fakeRow{values: sessionRowValues(now, newAccessHash, SessionStatusActive)},
 		},
 	}
-	rotated, err := RotateRefreshTokenTx(context.Background(), db, RotateRefreshTokenParams{
-		CurrentRefreshTokenHash: oldHash,
-		NewAccessTokenHash:      newAccessHash,
-		NewRefreshTokenHash:     newRefreshHash,
-		AccessExpiresAt:         now.Add(5 * time.Minute),
-		RefreshExpiresAt:        now.Add(time.Hour),
+	rotated, err := RotateAccessTokenTx(context.Background(), db, RotateAccessTokenParams{
+		CurrentAccessTokenHash: oldHash,
+		NewAccessTokenHash:     newAccessHash,
+		AccessExpiresAt:        now.Add(5 * time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rotated.RefreshTokenHash != newRefreshHash {
-		t.Fatalf("rotated session refresh hash = %q", rotated.RefreshTokenHash)
+	if rotated.AccessTokenHash != newAccessHash {
+		t.Fatalf("rotated session access hash = %q", rotated.AccessTokenHash)
 	}
 	if len(db.queries) < 2 || !strings.Contains(db.queries[0], "for update") || !strings.Contains(db.queries[1], "for update") {
-		t.Fatalf("rotation did not lock refresh history and session: %#v", db.queries)
+		t.Fatalf("rotation did not lock token history and session: %#v", db.queries)
 	}
-	if len(db.execs) != 2 || !strings.Contains(db.execs[0], "status = 'rotated'") || !strings.Contains(db.execs[1], "insert into user_session_refresh_tokens") {
+	if len(db.execs) != 2 || !strings.Contains(db.execs[0], "status = 'rotated'") || !strings.Contains(db.execs[1], "insert into user_session_token_history") {
 		t.Fatalf("rotation execs = %#v", db.execs)
 	}
 }
 
-func TestRotateRefreshTokenCommitsReuseRevocation(t *testing.T) {
+func TestRotateAccessTokenCommitsReuseRevocation(t *testing.T) {
 	now := time.Now()
 	oldHash := strings.Repeat("A", 43)
 	tx := &fakeTx{
 		rows: []pgx.Row{
-			fakeRow{values: refreshRowValues(now, oldHash, RefreshTokenStatusRotated)},
+			fakeRow{values: tokenRowValues(now, oldHash, SessionTokenStatusRotated)},
 		},
 	}
 	repo := NewRepository(&fakeBeginner{tx: tx})
-	_, err := repo.RotateRefreshToken(context.Background(), RotateRefreshTokenParams{
-		CurrentRefreshTokenHash: oldHash,
-		NewAccessTokenHash:      strings.Repeat("B", 43),
-		NewRefreshTokenHash:     strings.Repeat("C", 43),
-		AccessExpiresAt:         now.Add(5 * time.Minute),
-		RefreshExpiresAt:        now.Add(time.Hour),
+	_, err := repo.RotateAccessToken(context.Background(), RotateAccessTokenParams{
+		CurrentAccessTokenHash: oldHash,
+		NewAccessTokenHash:     strings.Repeat("B", 43),
+		AccessExpiresAt:        now.Add(5 * time.Minute),
 	})
-	if !errors.Is(err, ErrRefreshTokenReused) {
+	if !errors.Is(err, ErrAccessTokenReused) {
 		t.Fatalf("err = %v", err)
 	}
 	if !tx.committed || tx.rolledBack {
@@ -71,6 +66,47 @@ func TestRotateRefreshTokenCommitsReuseRevocation(t *testing.T) {
 	}
 	if len(tx.execs) != 3 || !strings.Contains(tx.execs[0], "status = 'reused'") || !strings.Contains(tx.execs[1], "status = 'revoked'") || !strings.Contains(tx.execs[2], "revoked_reason") {
 		t.Fatalf("reuse execs = %#v", tx.execs)
+	}
+}
+
+func TestRotateAccessTokenRejectsExpiredAccessToken(t *testing.T) {
+	now := time.Now()
+	oldHash := strings.Repeat("A", 43)
+	db := &fakeTx{
+		rows: []pgx.Row{
+			fakeRow{values: tokenRowValuesWithExpiry(now, oldHash, SessionTokenStatusActive, now.Add(-time.Second))},
+			fakeRow{values: sessionRowValues(now, oldHash, SessionStatusActive)},
+		},
+	}
+	_, err := RotateAccessTokenTx(context.Background(), db, RotateAccessTokenParams{
+		CurrentAccessTokenHash: oldHash,
+		NewAccessTokenHash:     strings.Repeat("B", 43),
+		AccessExpiresAt:        now.Add(5 * time.Minute),
+	})
+	if !errors.Is(err, ErrAccessTokenExpired) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(db.execs) != 1 || !strings.Contains(db.execs[0], "status = 'expired'") {
+		t.Fatalf("expired token execs = %#v", db.execs)
+	}
+}
+
+func TestRotateAccessTokenRejectsExpiredSession(t *testing.T) {
+	now := time.Now()
+	oldHash := strings.Repeat("A", 43)
+	db := &fakeTx{
+		rows: []pgx.Row{
+			fakeRow{values: tokenRowValues(now, oldHash, SessionTokenStatusActive)},
+			fakeRow{values: sessionRowValuesWithExpiry(now, oldHash, SessionStatusActive, now.Add(-time.Second))},
+		},
+	}
+	_, err := RotateAccessTokenTx(context.Background(), db, RotateAccessTokenParams{
+		CurrentAccessTokenHash: oldHash,
+		NewAccessTokenHash:     strings.Repeat("B", 43),
+		AccessExpiresAt:        now.Add(5 * time.Minute),
+	})
+	if !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -168,34 +204,37 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
-func refreshRowValues(now time.Time, hash string, status RefreshTokenStatus) []any {
+func tokenRowValues(now time.Time, hash string, status SessionTokenStatus) []any {
+	return tokenRowValuesWithExpiry(now, hash, status, now.Add(time.Hour))
+}
+
+func tokenRowValuesWithExpiry(now time.Time, hash string, status SessionTokenStatus, expiresAt time.Time) []any {
 	return []any{
 		"12345678-1234-4234-9234-123456789abc",
 		"22345678-1234-4234-9234-123456789abc",
 		hash,
 		string(status),
 		now.Add(-time.Minute),
-		now.Add(time.Hour),
+		expiresAt,
 		nil,
 		nil,
 	}
 }
 
-func sessionRowValues(now time.Time, refreshHash string, status SessionStatus, accessHash *string) []any {
-	if accessHash == nil {
-		value := strings.Repeat("D", 43)
-		accessHash = &value
-	}
+func sessionRowValues(now time.Time, accessHash string, status SessionStatus) []any {
+	return sessionRowValuesWithExpiry(now, accessHash, status, now.Add(time.Hour))
+}
+
+func sessionRowValuesWithExpiry(now time.Time, accessHash string, status SessionStatus, sessionExpiresAt time.Time) []any {
 	return []any{
 		"22345678-1234-4234-9234-123456789abc",
 		"32345678-1234-4234-9234-123456789abc",
 		string(AuthMethodPassword),
-		*accessHash,
-		refreshHash,
+		accessHash,
 		string(status),
 		now.Add(-time.Minute),
 		now.Add(5 * time.Minute),
-		now.Add(time.Hour),
+		sessionExpiresAt,
 		nil,
 		nil,
 		nil,

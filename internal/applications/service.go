@@ -783,8 +783,6 @@ func validatePresentedApplicationToken(token string) error {
 			return ErrInvalidToken
 		}
 		return nil
-	case strings.HasPrefix(token, auth.UserRefreshTokenPrefix):
-		return auth.ErrRefreshTokenNotAllowed
 	case strings.HasPrefix(token, auth.UserAccessTokenPrefix):
 		return ErrApplicationTokenRequired
 	default:

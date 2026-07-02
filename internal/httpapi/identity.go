@@ -46,7 +46,7 @@ type handoffRequest struct {
 }
 
 type refreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
+	AccessToken string `json:"access_token"`
 }
 
 type userCreateRequest struct {
@@ -88,8 +88,7 @@ type apiTOTPProvisioning struct {
 type apiTokens struct {
 	AccessToken      string    `json:"access_token"`
 	AccessExpiresAt  time.Time `json:"access_expires_at"`
-	RefreshToken     string    `json:"refresh_token"`
-	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+	SessionExpiresAt time.Time `json:"session_expires_at"`
 }
 
 func isIdentityEndpoint(p string) bool {
@@ -209,8 +208,7 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request, req
 		"user":               serializeUser(result.User),
 		"access_token":       result.Tokens.AccessToken,
 		"access_expires_at":  result.Tokens.AccessExpiresAt,
-		"refresh_token":      result.Tokens.RefreshToken,
-		"refresh_expires_at": result.Tokens.RefreshExpiresAt,
+		"session_expires_at": result.Tokens.SessionExpiresAt,
 	})
 	return http.StatusOK, ""
 }
@@ -261,8 +259,7 @@ func (s *Server) handleConfirmPassword2FALoginSetup(w http.ResponseWriter, r *ht
 		"user":               serializeUser(result.User),
 		"access_token":       result.Tokens.AccessToken,
 		"access_expires_at":  result.Tokens.AccessExpiresAt,
-		"refresh_token":      result.Tokens.RefreshToken,
-		"refresh_expires_at": result.Tokens.RefreshExpiresAt,
+		"session_expires_at": result.Tokens.SessionExpiresAt,
 	})
 	return http.StatusOK, ""
 }
@@ -320,8 +317,7 @@ func (s *Server) handleOIDCHandoff(w http.ResponseWriter, r *http.Request, reqct
 		"user":               serializeUser(result.User),
 		"access_token":       result.Tokens.AccessToken,
 		"access_expires_at":  result.Tokens.AccessExpiresAt,
-		"refresh_token":      result.Tokens.RefreshToken,
-		"refresh_expires_at": result.Tokens.RefreshExpiresAt,
+		"session_expires_at": result.Tokens.SessionExpiresAt,
 	})
 	return http.StatusOK, ""
 }
@@ -363,14 +359,11 @@ func (s *Server) handleCompletePasswordReset(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
-	if token, ok := authorizationBearer(r); ok && strings.HasPrefix(token, auth.UserRefreshTokenPrefix) {
-		return writeIdentityError(w, auth.ErrRefreshTokenNotAllowed)
-	}
 	var body refreshRequest
-	if err := decodeJSONBody(r, &body); err != nil || body.RefreshToken == "" {
+	if err := decodeJSONBody(r, &body); err != nil || body.AccessToken == "" {
 		return writeIdentityError(w, userdomain.ErrInvalidRequest)
 	}
-	result, err := s.auth.Refresh(r.Context(), body.RefreshToken, s.authAuditContext(r, reqctx))
+	result, err := s.auth.Refresh(r.Context(), body.AccessToken, s.authAuditContext(r, reqctx))
 	if err != nil {
 		return writeIdentityError(w, err)
 	}
@@ -378,8 +371,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request, reqctx Re
 	writeJSON(w, http.StatusOK, apiTokens{
 		AccessToken:      result.Tokens.AccessToken,
 		AccessExpiresAt:  result.Tokens.AccessExpiresAt,
-		RefreshToken:     result.Tokens.RefreshToken,
-		RefreshExpiresAt: result.Tokens.RefreshExpiresAt,
+		SessionExpiresAt: result.Tokens.SessionExpiresAt,
 	})
 	return http.StatusOK, ""
 }
@@ -709,8 +701,6 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusServiceUnavailable, "service_unavailable", "Backend is not ready."
 	case errors.Is(err, auth.ErrInvalidToken):
 		status, code, message = http.StatusUnauthorized, "invalid_token", "Authentication token is missing, invalid, or expired."
-	case errors.Is(err, auth.ErrRefreshTokenNotAllowed):
-		status, code, message = http.StatusForbidden, "refresh_token_not_allowed", "Refresh tokens are accepted only by the refresh endpoint."
 	case errors.Is(err, auth.ErrUserTokenRequired):
 		status, code, message = http.StatusForbidden, "user_token_required", "A User access token is required."
 	case errors.Is(err, auth.ErrInvalidCredentials):
@@ -723,8 +713,6 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusForbidden, "password_auth_disabled", "Password authentication is disabled."
 	case errors.Is(err, auth.ErrPassword2FARequired), errors.Is(err, userdomain.ErrPassword2FARequired):
 		status, code, message = http.StatusForbidden, "password_2fa_required", "Password 2FA is required."
-	case errors.Is(err, auth.ErrInvalidRefreshToken):
-		status, code, message = http.StatusUnauthorized, "invalid_refresh_token", "Refresh token is invalid."
 	case errors.Is(err, auth.ErrSessionExpired):
 		status, code, message = http.StatusUnauthorized, "session_expired", "Session expired."
 	case errors.Is(err, auth.ErrUserDisabled):

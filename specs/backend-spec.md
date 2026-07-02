@@ -125,7 +125,7 @@ Configuration keys:
 | `auth.oidc.redirect_url` | Required when OIDC is enabled | `https_url` | None | Callback URL registered with the OIDC provider. |
 | `auth.oidc.allowed_return_urls` | No | string array | Empty | Optional allowlist for frontend return URLs after OIDC login. Empty means only `auth.oidc.redirect_url` origin is allowed. |
 | `auth.user_access_token_ttl_seconds` | No | integer | `300` | Lifetime for human User access tokens. Default is 5 minutes. Must be positive. |
-| `auth.user_refresh_token_ttl_seconds` | No | integer | `28800` | Lifetime for human User refresh tokens. Default is 8 hours. Must be greater than access token TTL. |
+| `auth.user_session_ttl_seconds` | No | integer | `28800` | Absolute lifetime for human User login sessions. Default is 8 hours. Must be greater than access token TTL. |
 | `application_tokens.default_ttl_seconds` | No | integer | `7776000` | Default Application token lifetime when the create request omits `expires_at`. Default is 90 days. Must be positive. |
 | `application_tokens.max_ttl_seconds` | No | integer | `31536000` | Maximum Application token lifetime for non-null `expires_at` values. Default is 365 days. Must be positive and greater than or equal to the default TTL. Does not apply to explicit `expires_at=null` non-expiring tokens. |
 
@@ -186,7 +186,7 @@ auth:
     redirect_url: ""
     allowed_return_urls: []
   user_access_token_ttl_seconds: 300
-  user_refresh_token_ttl_seconds: 28800
+  user_session_ttl_seconds: 28800
   password_reset_ttl_seconds: 3600
 application_tokens:
   default_ttl_seconds: 7776000
@@ -369,7 +369,7 @@ Sensitive database values include:
 - TOTP secrets and pending TOTP secrets for password 2FA.
 - OIDC PKCE code verifiers.
 
-Application token values, User access token values, and User refresh token values are not encrypted; only token hashes are stored.
+Application token values and User access token values are not encrypted; only token hashes are stored.
 
 ### Database Encryption Envelope
 
@@ -388,7 +388,7 @@ Required v1 encryption envelope:
 
 ### Transport Security and Request Context
 
-The normal TCP API carries bearer tokens, refresh tokens, Application tokens, certificate private keys, DNS credentials, and administration traffic. Certhub must protect those values in transit.
+The normal TCP API carries bearer tokens, Application tokens, certificate private keys, DNS credentials, and administration traffic. Certhub must protect those values in transit.
 
 Transport rules:
 
@@ -509,7 +509,7 @@ Rules:
 - Algorithm and parameters must be stored in the PHC string.
 - Verification must use a standard Argon2id implementation and constant-time comparison.
 - Certhub must rehash on successful login when the stored parameters are weaker than current policy.
-- Password hashing is only for human passwords. It must not be used for high-entropy Application tokens, User access tokens, or User refresh tokens.
+- Password hashing is only for human passwords. It must not be used for high-entropy Application tokens, User access tokens.
 
 ### Password Policy and Login Rate Limiting
 
@@ -533,7 +533,7 @@ Password login rate limiting:
 
 ### Token Hashing
 
-Application tokens, User access tokens, and User refresh tokens are high-entropy random secrets. Certhub must hash them with keyed HMAC-SHA-256, not Argon2id, bcrypt, or another password hashing algorithm.
+Application tokens and User access tokens are high-entropy random secrets. Certhub must hash them with keyed HMAC-SHA-256, not Argon2id, bcrypt, or another password hashing algorithm.
 
 Hash formula:
 
@@ -551,7 +551,7 @@ Where:
 Rules:
 
 - Store only `token_hash`, never raw token values.
-- Use the same token hash algorithm for `application_tokens.token_hash`, `user_sessions.access_token_hash`, `user_sessions.refresh_token_hash`, and `user_session_refresh_tokens.refresh_token_hash`.
+- Use the same token hash algorithm for `application_tokens.token_hash`, `user_sessions.access_token_hash`, `user_sessions.access_token_hash`, and `user_session_token_history.access_token_hash`.
 - Compare token hashes using constant-time comparison.
 - Token hash output length is the base64url-no-padding encoding of 32 bytes.
 - A future token hash algorithm must use a versioned derivation `info` string and a migration plan.
@@ -602,26 +602,25 @@ OIDC auth requirements:
 - The token request must include the matching `code_verifier` and exactly the configured `auth.oidc.redirect_url`; it must never use the frontend return URL as the provider callback URI.
 - Certhub must validate issuer, audience, signature, expiry, nonce, and state before accepting an OIDC callback.
 - OIDC state comparison must use constant-time comparison of the stored HMAC value.
-- The provider-facing callback is `GET /v1/auth/oidc/callback?code=...&state=...`. It must not return Certhub User access tokens or refresh tokens directly to the browser.
+- The provider-facing callback is `GET /v1/auth/oidc/callback?code=...&state=...`. It must not return Certhub User access tokens directly to the browser.
 - After successful provider callback validation, Certhub creates a short-lived, single-use login handoff ID, stores only its HMAC hash, and redirects the browser to the validated frontend return URL with the handoff ID.
-- The frontend exchanges the handoff ID through `POST /v1/auth/oidc/handoff` to receive Certhub User access and refresh tokens. Tokens must never appear in provider callback URLs, frontend URLs, logs, browser history, or referrers.
+- The frontend exchanges the handoff ID through `POST /v1/auth/oidc/handoff` to receive Certhub User access tokens. Tokens must never appear in provider callback URLs, frontend URLs, logs, browser history, or referrers.
 - OIDC login maps to an existing active User by `(oidc_issuer, oidc_subject)` when present. If no OIDC link exists, Certhub may link by email only when the provider asserts `email_verified=true` or equivalent provider-specific verified-email evidence, exactly one active User has the same normalized email, and both OIDC link fields are null. If the verification claim is missing or false, email-linking must be rejected. OIDC issuer and subject are internal provider-derived identifiers; they must not be set, replaced, or cleared by admins, bootstrap commands, direct public API fields, or the web UI.
 - If no active provisioned User matches the OIDC identity, login fails with `user_not_provisioned`.
 
 User login session requirements:
 
 - Users must not have personal access tokens or API tokens in v1.
-- Successful password or OIDC login creates a User login session and returns two token values: an access token and a refresh token.
-- User access tokens are opaque random bearer secrets used for normal User-authenticated API calls. They are short-lived; default lifetime is `auth.user_access_token_ttl_seconds=300`.
-- User refresh tokens are opaque random bearer secrets used only with `POST /v1/auth/refresh`. Default lifetime is `auth.user_refresh_token_ttl_seconds=28800`.
-- User access tokens and refresh tokens must not be JWTs or self-contained signed tokens in v1.
-- User access tokens and refresh tokens must be backend-generated random values with at least 128 bits of entropy; 256 bits is recommended.
-- Raw User access tokens are returned only by login and refresh. The database stores only access token hashes.
-- Raw refresh tokens are returned only by login and refresh. The database stores only refresh token hashes.
-- Refresh tokens must rotate on every successful refresh. The previous refresh token becomes invalid immediately.
-- Reuse of an already-rotated refresh token must revoke the whole login session and return an authentication failure.
-- Logout revokes the current login session and invalidates its refresh token.
-- Disabled Users, revoked sessions, expired sessions, expired access tokens, and expired refresh tokens cannot authenticate.
+- Successful password or OIDC login creates a User login session and returns one User access token plus `access_expires_at` and fixed `session_expires_at`.
+- User access tokens are opaque random bearer secrets used for normal User-authenticated API calls and pre-expiry rotation. They are short-lived; default lifetime is `auth.user_access_token_ttl_seconds=300`.
+- `session_expires_at` is fixed at login from `auth.user_session_ttl_seconds=28800` and does not slide on refresh.
+- User access tokens must not be JWTs or self-contained signed tokens in v1.
+- User access tokens must be backend-generated random values with at least 128 bits of entropy; 256 bits is recommended.
+- Raw User access tokens are returned only by login, OIDC handoff, forced 2FA setup completion, and refresh. The database stores only token hashes.
+- Refresh must rotate the access token only before `access_expires_at`; expired access tokens cannot be refreshed and require login.
+- Reuse of an already-rotated access token must revoke the whole login session and return an authentication failure.
+- Logout revokes the current login session and invalidates its current access token.
+- Disabled Users, revoked sessions, expired sessions, and expired access tokens cannot authenticate or refresh.
 
 ### Token Structure
 
@@ -632,8 +631,7 @@ Token formats:
 | Token class | Format | Used in |
 | --- | --- | --- |
 | Application token | `cth_app_v1_<secret>` | `Authorization: Bearer` for Application-authenticated APIs. |
-| User access token | `cth_uat_v1_<secret>` | `Authorization: Bearer` for User-authenticated APIs. |
-| User refresh token | `cth_urt_v1_<secret>` | `POST /v1/auth/refresh` request body only. |
+| User access token | `cth_uat_v1_<secret>` | `Authorization: Bearer` for User-authenticated APIs and `POST /v1/auth/refresh` body. |
 
 `<secret>` is `base64url_no_padding(32 random bytes)` in v1, which is exactly 43 characters matching `^[A-Za-z0-9_-]{43}$`.
 
@@ -645,9 +643,7 @@ Rules:
 - Certhub must select the lookup path by exact prefix before any database lookup.
 - `cth_app_v1_` tokens are looked up only in `application_tokens.token_hash`.
 - `cth_uat_v1_` tokens are looked up only in `user_sessions.access_token_hash`.
-- `cth_urt_v1_` tokens are accepted only by `POST /v1/auth/refresh`. Active refresh validation first matches `user_sessions.refresh_token_hash`; Certhub must also check `user_session_refresh_tokens` for active-token consistency and rotated-token reuse detection.
 - Missing bearer credentials, malformed tokens, unknown prefixes, unknown token hashes, expired tokens, and revoked tokens must fail with `401 invalid_token`.
-- Refresh tokens in the `Authorization` header must fail with `403 refresh_token_not_allowed`.
 - A valid User access token on an Application-token endpoint must fail with `403 application_token_required`.
 - A valid Application token on a User-authenticated endpoint must fail with `403 user_token_required`.
 - Unknown prefixes, malformed tokens, and tokens with the wrong prefix for the endpoint must fail authentication without trying other token stores.
@@ -982,14 +978,14 @@ Rules:
 | `GET` | `/healthz` | Return liveness for the backend process. |
 | `GET` | `/readyz` | Return readiness for serving API traffic. |
 | `GET` | `/metrics` | Expose Prometheus metrics for internal scraping. |
-| `POST` | `/v1/auth/login` | Exchange User email/password for a User access token and refresh token. |
+| `POST` | `/v1/auth/login` | Exchange User email/password for a User access token. |
 | `POST` | `/v1/auth/password-2fa/setup` | Start TOTP setup for the current User. |
 | `POST` | `/v1/auth/password-2fa/confirm` | Confirm TOTP setup for the current User. |
 | `DELETE` | `/v1/auth/password-2fa` | Disable TOTP for the current User. |
 | `GET` | `/v1/auth/oidc/login` | Start OIDC browser login. |
 | `GET` | `/v1/auth/oidc/callback` | Complete provider-facing OIDC callback and redirect to frontend with a short-lived handoff ID. |
-| `POST` | `/v1/auth/oidc/handoff` | Exchange a short-lived OIDC handoff ID for a User access token and refresh token. |
-| `POST` | `/v1/auth/refresh` | Rotate a refresh token and return a new User access token and refresh token. |
+| `POST` | `/v1/auth/oidc/handoff` | Exchange a short-lived OIDC handoff ID for a User access token. |
+| `POST` | `/v1/auth/refresh` | Rotate the current User access token before it expires. |
 | `POST` | `/v1/auth/logout` | Revoke the current User login session. |
 | `GET` | `/v1/auth/me` | Return the authenticated User or Application identity. |
 | `POST` | `/v1/sync/certificates` | Ensure a Certificate exists for criteria and start issuance when needed. |
@@ -1115,20 +1111,20 @@ Expected responses:
 
 #### POST /v1/auth/login
 
-Summary: Exchange User email/password for a User access token and refresh token.
+Summary: Exchange User email/password for a User access token.
 
 Description and notes:
 
 - Used by web password login.
 - Requires `auth.password.enabled=true`.
 - Creates a User login session only after required TOTP is satisfied.
-- Returns a short-lived User access token and longer-lived refresh token, or `password_2fa_setup_required` with a one-time setup token and TOTP provisioning payload when instance policy requires 2FA and the User has no configured password 2FA.
+- Returns a short-lived User access token and fixed session expiry, or `password_2fa_setup_required` with a one-time setup token and TOTP provisioning payload when instance policy requires 2FA and the User has no configured password 2FA.
 - If password 2FA is enabled for the User or required by `auth.password.2fa_required`, the request must include a valid TOTP code.
 - Missing TOTP may return `password_2fa_required` only after the primary password is valid and the User is otherwise eligible to authenticate. Missing configured TOTP when policy requires it returns `password_2fa_setup_required` without creating a session.
 - Unknown email, disabled User, missing password hash, and invalid password must all return the same generic `401 invalid_credentials` response.
 - OIDC users are not required to have Certhub password 2FA.
 - Must update `users.last_login_at` on success.
-- Must write `user_login_succeeded` or `user_login_failed` audit events without storing the password, access token, or raw refresh token.
+- Must write `user_login_succeeded` or `user_login_failed` audit events without storing the password, access token, or raw access token.
 
 ```http
 POST /v1/auth/login
@@ -1299,7 +1295,7 @@ Description and notes:
 - Maps the identity to an existing active User as described in `Human Authentication and User Sessions`.
 - Creates a short-lived, single-use row in `oidc_login_handoffs` for the mapped User.
 - Redirects to the validated frontend return URL with the raw handoff ID in the URL.
-- Must not include User access tokens or refresh tokens in the callback response, redirect URL, logs, audit metadata, or error pages.
+- Must not include User access tokens in the callback response, redirect URL, logs, audit metadata, or error pages.
 - Must write OIDC callback success/failure audit events without storing raw `state`, authorization code, code verifier, provider tokens, or handoff ID.
 
 ```http
@@ -1322,7 +1318,7 @@ Expected responses:
 
 #### POST /v1/auth/oidc/handoff
 
-Summary: Exchange a short-lived OIDC handoff ID for a User access token and refresh token.
+Summary: Exchange a short-lived OIDC handoff ID for a User access token.
 
 Description and notes:
 
@@ -1331,7 +1327,7 @@ Description and notes:
 - Looks up the handoff by HMAC-hashing the raw handoff ID; raw handoff IDs are never stored.
 - Rejects missing, expired, consumed, reused, unknown, or malformed handoff IDs.
 - Creates a User login session only when the handoff is valid and the User is still active.
-- Returns a short-lived opaque User access token and longer-lived opaque refresh token.
+- Returns a short-lived opaque User access token and longer-lived opaque access token.
 - Must update `users.last_login_at` on success.
 - Must write `user_login_succeeded` or `user_login_failed` audit events without storing raw handoff IDs or tokens.
 - Frontend must remove the handoff ID from the URL and browser history immediately after exchange.
@@ -1353,24 +1349,23 @@ Request body:
 
 Expected responses:
 
-- `200 OK`: OIDC login succeeded; response includes User metadata, opaque access token, access token expiry, opaque refresh token, and refresh token expiry.
+- `200 OK`: OIDC login succeeded; response includes User metadata, opaque access token, access token expiry, opaque access token, access token expiry, and fixed session expiry.
 - `400 Bad Request`: invalid body or malformed handoff ID.
 - `401 Unauthorized`: handoff is missing, expired, consumed, reused, or unknown.
 - `403 Forbidden`: OIDC auth is disabled or User is disabled.
 
 #### POST /v1/auth/refresh
 
-Summary: Rotate a refresh token and return a new User access token and refresh token.
+Summary: Rotate the current User access token before it expires.
 
 Description and notes:
 
-- Used by web clients to keep a User login session alive without re-entering credentials.
-- Does not require an access token.
-- Requires a valid, active, unexpired refresh token.
-- Must rotate refresh tokens: the submitted refresh token is invalidated and a new refresh token is returned.
-- Must return a new short-lived User access token.
-- Reuse of a refresh token that was already rotated is detected through `user_session_refresh_tokens` and must revoke the whole login session.
-- Must write `user_session_refreshed` on success and an audit failure event on invalid, expired, or reused refresh tokens.
+- Used by web clients to rotate the current User access token before it expires.
+- Requires a valid, current, active, unrotated access token in the JSON body.
+- Requires `access_expires_at > now` and `session_expires_at > now`; expired access tokens cannot be refreshed.
+- Returns a new short-lived User access token, `access_expires_at`, and the unchanged `session_expires_at`.
+- Reuse of an already-rotated access token is detected through `user_session_token_history` and must revoke the whole login session.
+- Must write `user_session_refreshed` on success and an audit failure event on invalid, expired, session-expired, or reused tokens.
 
 ```http
 POST /v1/auth/refresh
@@ -1383,15 +1378,15 @@ Request body:
 
 ```json
 {
-  "refresh_token": "opaque-refresh-token"
+  "access_token": "cth_uat_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }
 ```
 
 Expected responses:
 
-- `200 OK`: refresh succeeded; response includes new opaque access token, access token expiry, new opaque refresh token, and refresh token expiry.
+- `200 OK`: refresh succeeded; response includes new opaque access token, access token expiry, and fixed session expiry.
 - `400 Bad Request`: invalid body.
-- `401 Unauthorized`: refresh token is missing, invalid, rotated, or revoked (`invalid_refresh_token`) or the session expired (`session_expired`).
+- `401 Unauthorized`: access token is missing, invalid, expired, rotated, or revoked (`invalid_token`) or the absolute session expired (`session_expired`).
 
 #### POST /v1/auth/logout
 
@@ -1400,7 +1395,7 @@ Summary: Revoke the current User login session.
 Description and notes:
 
 - Requires a valid User access token.
-- Revokes the current login session and invalidates its refresh token.
+- Revokes the current login session and invalidates its access token.
 - Does not affect Application tokens.
 - Must write `user_session_revoked`.
 
@@ -3138,7 +3133,7 @@ Logging requirements:
 Secret redaction and external error sanitization:
 
 - Certhub must sanitize all externally sourced error strings before storing them in `failure_message`, audit metadata, logs, or public API responses.
-- Sanitization must redact Authorization and Cookie headers, raw Application tokens, raw User access and refresh tokens, passwords, TOTP codes, TOTP secrets, provisioning URIs, OIDC authorization codes, OIDC state values, OIDC code verifiers, private keys, ACME account keys, DNS provider credentials, and encrypted payloads.
+- Sanitization must redact Authorization and Cookie headers, raw Application tokens, raw User access tokens, passwords, TOTP codes, TOTP secrets, provisioning URIs, OIDC authorization codes, OIDC state values, OIDC code verifiers, private keys, ACME account keys, DNS provider credentials, and encrypted payloads.
 - Sanitization must apply before persistence, not only at render time.
 - Public `failure_message` values should prefer stable, non-secret summaries. Full provider responses may be logged only after the same sanitizer runs.
 
@@ -3208,7 +3203,7 @@ Reusable formats:
 | `ip_or_cidr` | IPv4 address, IPv6 address, IPv4 CIDR, or IPv6 CIDR. Exact IP inputs normalize to single-host CIDRs. CIDR inputs normalize to canonical network form and must reject invalid prefix lengths, hostnames, empty strings, whitespace, and control characters. |
 | `correlation_id` | Length 1-128. Regex: `^[A-Za-z0-9._:-]+$`. If an inbound correlation ID is invalid, Certhub must generate a valid internal one instead of persisting the invalid value. |
 | `token_secret_v1` | Exactly 43 base64url characters without padding. Regex: `^[A-Za-z0-9_-]{43}$`. Generated from 32 random bytes. |
-| `certhub_token_v1` | One of `cth_app_v1_<token_secret_v1>`, `cth_uat_v1_<token_secret_v1>`, or `cth_urt_v1_<token_secret_v1>`. |
+| `certhub_token_v1` | One of `cth_app_v1_<token_secret_v1>` or `cth_uat_v1_<token_secret_v1>`. |
 
 API schemas should distinguish raw input strings from normalized stored/output strings for DNS-derived formats. Request schemas may accept normalizable uppercase, trailing-root-dot, and IDN values where this section says the backend normalizes them; response schemas must return normalized lowercase ASCII/punycode values without a trailing root dot.
 
@@ -3274,7 +3269,7 @@ Constraints:
 
 ### `user_sessions`
 
-Login sessions for human Users. User access tokens and refresh tokens are opaque random bearer secrets, not JWTs. Access tokens are short-lived and used for User-authenticated API calls. Refresh tokens are longer-lived and used only to rotate the session.
+Login sessions for human Users. User access tokens are opaque random bearer secrets, not JWTs. Access tokens are short-lived and used for User-authenticated API calls and pre-expiry rotation. The absolute session deadline is fixed at login.
 
 | Field | Type | Constraints | Description |
 | --- | --- | --- | --- |
@@ -3282,49 +3277,48 @@ Login sessions for human Users. User access tokens and refresh tokens are opaque
 | `user_id` | UUID | Required, foreign key to `users.id`, indexed | User that owns the login session. |
 | `auth_method` | enum | Required, one of `password`, `oidc` | Login method that created the session. |
 | `access_token_hash` | string | Required, unique | HMAC-SHA-256 hash of the full current opaque access token value, including `cth_uat_v1_` prefix. Raw access tokens are never stored. |
-| `refresh_token_hash` | string | Required, unique | HMAC-SHA-256 hash of the full current refresh token value, including `cth_urt_v1_` prefix. Raw refresh tokens are never stored. |
 | `status` | enum | Required, one of `active`, `revoked`; default `active` | Revoked sessions cannot authenticate or refresh. |
 | `created_at` | timestamptz | Required | Creation time. |
 | `access_expires_at` | timestamptz | Required | Expiry of the most recently issued access token for this session. |
-| `refresh_expires_at` | timestamptz | Required | Expiry of the current refresh token. |
+| `session_expires_at` | timestamptz | Required | Fixed absolute login-session expiry. |
 | `last_refreshed_at` | timestamptz | Nullable | Last successful refresh time. |
 | `last_used_at` | timestamptz | Nullable | Last successful API use by an access token from this session. |
 | `revoked_at` | timestamptz | Nullable | Session revocation time. |
-| `revoked_reason` | enum | Nullable, one of `logout`, `disabled_user`, `refresh_reuse`, `admin_action`, `expired` | Why the session was revoked or closed. |
+| `revoked_reason` | enum | Nullable, one of `logout`, `disabled_user`, `token_reuse`, `admin_action`, `expired`, `password_reset`, `password_2fa_reset`, `auth_model_migration` | Why the session was revoked or closed. |
 | `user_agent` | string | Nullable, max length 1024, no control characters | Optional login client User-Agent for audit and troubleshooting. |
 | `source_ip` | string | Nullable | Derived effective login source IP when available. |
 
 Constraints:
 
-- Raw access tokens and raw refresh tokens must never be stored.
+- Raw access tokens must never be stored.
 - Access-token authentication must hash the presented opaque token and look up an active, unexpired `user_sessions` row by `access_token_hash`.
-- `refresh_expires_at` must be greater than `access_expires_at`.
+- `session_expires_at` must be greater than `access_expires_at`.
 - Expired, revoked, or disabled-User sessions must not authenticate.
-- Refresh token rotation must update `access_token_hash`, `refresh_token_hash`, `access_expires_at`, `refresh_expires_at`, and `last_refreshed_at` atomically.
-- Reuse of an old refresh token after rotation must revoke the session with `revoked_reason=refresh_reuse`.
+- Access token rotation must update `access_token_hash`, `access_expires_at`, and `last_refreshed_at` atomically without changing `session_expires_at`.
+- Reuse of an old access token after rotation must revoke the session with `revoked_reason=token_reuse`.
 
-### `user_session_refresh_tokens`
+### `user_session_token_history`
 
-Refresh-token history for detecting reuse after rotation.
+Access-token history for detecting reuse after rotation.
 
 | Field | Type | Constraints | Description |
 | --- | --- | --- | --- |
-| `id` | UUID | Primary key | Stable refresh-token history ID. |
-| `user_session_id` | UUID | Required, foreign key to `user_sessions.id`, indexed | Session that issued this refresh token. |
-| `refresh_token_hash` | string | Required, unique | HMAC-SHA-256 hash of the full refresh token value, including `cth_urt_v1_` prefix. |
-| `status` | enum | Required, one of `active`, `rotated`, `revoked`, `reused`, `expired`; default `active` | Refresh-token state. |
-| `issued_at` | timestamptz | Required | Time the refresh token was issued. |
-| `expires_at` | timestamptz | Required | Refresh token expiry. |
-| `rotated_at` | timestamptz | Nullable | Time the token was replaced by a newer refresh token. |
+| `id` | UUID | Primary key | Stable token-history ID. |
+| `user_session_id` | UUID | Required, foreign key to `user_sessions.id`, indexed | Session that issued this access token. |
+| `access_token_hash` | string | Required, unique | HMAC-SHA-256 hash of the full access token value, including `cth_uat_v1_` prefix. |
+| `status` | enum | Required, one of `active`, `rotated`, `revoked`, `reused`, `expired`; default `active` | Access-token state. |
+| `issued_at` | timestamptz | Required | Time the access token was issued. |
+| `access_expires_at` | timestamptz | Required | Access token expiry. |
+| `rotated_at` | timestamptz | Nullable | Time the token was replaced by a newer access token. |
 | `last_seen_at` | timestamptz | Nullable | Last time this token hash was presented. |
 
 Constraints:
 
-- Each User session may have at most one `active` refresh-token history row.
-- `user_sessions.refresh_token_hash` must match the active row for the session.
-- On refresh, Certhub must mark the old active row `rotated`, insert a new active row, and update `user_sessions.refresh_token_hash` atomically.
-- If a presented refresh token matches a `rotated`, `revoked`, `reused`, or `expired` row, Certhub must revoke the parent `user_sessions` row with `revoked_reason=refresh_reuse`.
-- History rows must not contain raw refresh tokens.
+- Each User session may have at most one `active` token-history row.
+- `user_sessions.access_token_hash` must match the active row for the session.
+- On refresh, Certhub must mark the old active row `rotated`, insert a new active row, and update `user_sessions.access_token_hash` atomically.
+- If a presented access token matches a `rotated`, `revoked`, `reused`, or `expired` row, Certhub must revoke the parent `user_sessions` row with `revoked_reason=token_reuse`.
+- History rows must not contain raw access tokens.
 
 ### `oidc_login_states`
 
@@ -3372,7 +3366,7 @@ Short-lived single-use bridge from the backend-owned OIDC callback to the browse
 
 Constraints:
 
-- Handoffs are single-use. `POST /v1/auth/oidc/handoff` must atomically mark the row consumed before returning User access and refresh tokens.
+- Handoffs are single-use. `POST /v1/auth/oidc/handoff` must atomically mark the row consumed before returning User access tokens.
 - Expired, consumed, reused, unknown, or malformed handoffs must not create a User session.
 - Handoff IDs must have at least 128 bits of entropy; 256 bits is recommended.
 - Raw handoff IDs must not be logged, audited, stored, or retained in browser history after frontend handling.
@@ -3884,7 +3878,7 @@ Creating an Application requires global role `admin`.
 Authentication token rules:
 
 - Missing, malformed, unknown-prefix, unknown-hash, expired, or revoked bearer tokens fail with `401 invalid_token`, except login and refresh endpoints which use their specific auth errors.
-- Refresh tokens sent in the `Authorization` header fail with `403 refresh_token_not_allowed`; refresh tokens are accepted only in the `POST /v1/auth/refresh` request body.
+- Expired, rotated, malformed, unknown-prefix, or unknown-hash User access tokens sent to `POST /v1/auth/refresh` fail with `401 invalid_token`.
 - A valid User access token sent to an Application-token endpoint fails with `403 application_token_required`.
 - A valid Application token sent to a User-authenticated endpoint fails with `403 user_token_required`.
 - Disabled Users, disabled Applications, revoked User sessions, expired User sessions, revoked Application tokens, and expired Application tokens cannot authenticate.
@@ -3923,13 +3917,12 @@ Rules:
 | `invalid_request` | `400` | No | `2` | Show request validation error. |
 | `invalid_token` | `401` | No | `3` | Clear invalid credential state or ask for a valid token. |
 | `invalid_credentials` | `401` | No | `3` | Show generic login failure without revealing whether the User exists. |
-| `invalid_refresh_token` | `401` | No | `3` | Clear local session state and require login. |
+| `invalid_token` | `401` | No | `3` | Clear local session state and require login. |
 | `session_expired` | `401` | No | `3` | Clear local session state and require login. |
 | `invalid_2fa_code` | `401` | No | `3` | Show generic invalid authentication code. |
 | `oidc_auth_failed` | `401` | No | `3` | Restart OIDC login. |
 | `application_token_required` | `403` | No | `4` | Use an Application token for Application certificate workflows. |
 | `user_token_required` | `403` | No | `4` | Use a User login session for management and web-console workflows. |
-| `refresh_token_not_allowed` | `403` | No | `3` | Refresh tokens are accepted only by `POST /v1/auth/refresh`; clear the invalid request path. |
 | `application_source_ip_denied` | `403` | No | `4` | Application token is valid, but this client source IP is not trusted for the Application. Move the client to an allowed network or update the Application trusted source CIDRs. |
 | `application_access_denied` | `403` | No | `4` | Show permission denied. |
 | `private_key_access_denied` | `403` | No | `4` | Hide/disable private-key download actions. |
@@ -4034,7 +4027,7 @@ Required backend scenarios:
 - Successful login rehashes passwords when stored Argon2id parameters are weaker than current policy.
 - Password and TOTP login rate limiting returns `rate_limited` without revealing whether the email exists and uses the derived effective `source_ip`.
 - Spoofed `X-Forwarded-For` or `Forwarded` headers from untrusted peers do not bypass rate limits or alter audit `source_ip`.
-- Application tokens, User access tokens, and User refresh tokens are hashed with `base64url_no_padding(HMAC-SHA256(token_hash_key, full_token_value))`.
+- Application tokens and User access tokens are hashed with `base64url_no_padding(HMAC-SHA256(token_hash_key, full_token_value))`.
 - `token_hash_key` is derived with `HKDF-SHA256(encryption.key, info="certhub-token-hash-v1")`.
 - Token hashing includes the full prefixed token value and does not use Argon2id, bcrypt, or another password hash.
 - Public HTTP routing tests prove no `/v1/bootstrap/...` endpoints exist on any listener.
@@ -4054,7 +4047,7 @@ Required backend scenarios:
 - Invite signup without forced 2FA creates one active User and consumes the invite exactly once.
 - Invite signup with forced 2FA returns TOTP provisioning data, requires the frontend QR-code setup step to validate a current TOTP code, and creates the User only after successful TOTP confirmation.
 - Consumed, expired, missing, and malformed invite tokens return `invalid_invite` and cannot create another User.
-- Password login succeeds for active Users with valid password hashes and returns a short-lived User access token plus a longer-lived refresh token.
+- Password login succeeds for active Users with valid password hashes and returns a short-lived User access token plus a fixed session expiry.
 - Password login failures use `invalid_credentials` without revealing whether the email exists.
 - Password login for disabled Users, Users without password hashes, unknown emails, and wrong passwords all return the same generic `invalid_credentials`.
 - Password login returns `password_2fa_required` for missing TOTP only after valid primary credentials.
@@ -4065,25 +4058,24 @@ Required backend scenarios:
 - OIDC login succeeds or fails independently from Certhub password 2FA state and never requires `totp_code`, `amr`, or `acr`.
 - Password 2FA setup stores TOTP secrets encrypted and never writes secrets or TOTP codes to logs or audit metadata.
 - Login-created access tokens use `auth.user_access_token_ttl_seconds`, defaulting to 300 seconds.
-- Refresh tokens use `auth.user_refresh_token_ttl_seconds`, are longer-lived than access tokens, and are stored only as hashes.
-- User access tokens and refresh tokens are opaque random values, are not JWTs, and are never validated by parsing embedded claims.
+- User sessions use fixed `auth.user_session_ttl_seconds`; this deadline does not slide on refresh.
+- User access tokens are opaque random values, are not JWTs, and are never validated by parsing embedded claims.
 - User access token authentication hashes the presented token and looks up `user_sessions.access_token_hash`.
-- Application tokens use `cth_app_v1_<secret>`, User access tokens use `cth_uat_v1_<secret>`, and User refresh tokens use `cth_urt_v1_<secret>`, where `<secret>` is 32 random bytes encoded as 43-character base64url without padding.
+- Application tokens use `cth_app_v1_<secret>`, User access tokens use `cth_uat_v1_<secret>`, where `<secret>` is 32 random bytes encoded as 43-character base64url without padding.
 - Token authentication chooses exactly one lookup path by token prefix and never tries multiple token stores for one presented token.
 - Token lookup uses constant-time comparison or database equality on HMAC outputs only; raw token values are never compared against stored data.
 - Token values in `Authorization` headers are redacted from request logs, audit metadata, metrics labels, panic output, and error responses.
 - Authorization parsing rejects multiple credentials, duplicate Authorization headers, non-Bearer schemes, missing bearer values, and bearer values with leading or trailing whitespace.
-- Refresh tokens in the `Authorization` header are rejected with `refresh_token_not_allowed`.
 - Valid User access tokens on Application-token endpoints are rejected with `application_token_required`.
 - Valid Application tokens on User-authenticated endpoints are rejected with `user_token_required`.
 - Missing, unknown, expired, revoked, malformed, or unknown-prefix bearer tokens return `invalid_token`.
 - Unknown or malformed token prefixes fail authentication without trying other token stores.
-- `POST /v1/auth/refresh` rotates the refresh token and invalidates the previous refresh token atomically.
-- Reusing an already-rotated refresh token revokes the whole login session.
-- Reusing a rotated refresh token is detected through `user_session_refresh_tokens`, even after `user_sessions.refresh_token_hash` has changed.
-- `POST /v1/auth/logout` revokes the current login session and invalidates its refresh token.
+- `POST /v1/auth/refresh` rotates the access token and invalidates the previous access token atomically.
+- Reusing an already-rotated access token revokes the whole login session.
+- Reusing a rotated access token is detected through `user_session_token_history`, even after `user_sessions.access_token_hash` has changed.
+- `POST /v1/auth/logout` revokes the current login session and invalidates its access token.
 - `POST /v1/auth/logout` returns `invalid_token` for missing, malformed, expired, revoked, or unknown access tokens.
-- Disabled Users, revoked sessions, expired access tokens, and expired refresh tokens cannot authenticate.
+- Disabled Users, revoked sessions, expired access tokens cannot authenticate.
 - Missing, malformed, expired, revoked, or unknown bearer tokens return `invalid_token`.
 - Expired Application tokens cannot authenticate.
 - Application token authentication always requires a valid token even when the source IP matches an Application trusted source CIDR.
@@ -4122,7 +4114,7 @@ Required backend scenarios:
 - DNS provider credential create and replace tests cover wrong provider type, missing required secret fields, unknown extra secret fields, malformed JSON, and previously valid credentials becoming unusable after replacement.
 - Failed DNS provider credential replacement preserves the previous encrypted credentials and does not leave partially updated credential metadata.
 - Raw DNS provider credentials and decrypted private keys are never returned from list/detail APIs that are not certificate material download APIs.
-- Application token raw values, User access token raw values, and User refresh token raw values are never stored; only hashes are persisted.
+- Application token raw values and User access token raw values are never stored; only hashes are persisted.
 - Standard error envelopes never include raw tokens, passwords, TOTP codes, TOTP secrets, DNS provider credentials, ACME account keys, private keys, PEM material, OIDC authorization codes, OIDC state, PKCE code verifiers, encrypted payloads, or database connection strings.
 - Redaction tests inject unique canary values for every secret type and assert they are absent from logs, metrics, audit metadata, errors, readiness details, and persisted non-secret JSON fields.
 - Same SANs in different order reuse the same certificate identity for the same Application.

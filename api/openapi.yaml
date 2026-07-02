@@ -102,7 +102,7 @@ paths:
     post:
       tags: [Authentication]
       operationId: loginUser
-      summary: Exchange User email/password for a User access token and refresh token.
+      summary: Exchange User email/password for a User access token.
       security: []
       requestBody:
         required: true
@@ -492,7 +492,7 @@ paths:
     post:
       tags: [Authentication]
       operationId: refreshUserSession
-      summary: Rotate a refresh token and return new User session tokens.
+      summary: Rotate the current User access token before it expires.
       security: []
       requestBody:
         required: true
@@ -3191,9 +3191,6 @@ components:
     UserAccessToken:
       type: string
       pattern: '^cth_uat_v1_[A-Za-z0-9_-]{43}$'
-    UserRefreshToken:
-      type: string
-      pattern: '^cth_urt_v1_[A-Za-z0-9_-]{43}$'
     ApplicationTokenValue:
       type: string
       pattern: '^cth_app_v1_[A-Za-z0-9_-]{43}$'
@@ -3378,13 +3375,11 @@ components:
         - invalid_request
         - invalid_token
         - invalid_credentials
-        - invalid_refresh_token
         - session_expired
         - invalid_2fa_code
         - oidc_auth_failed
         - application_token_required
         - user_token_required
-        - refresh_token_not_allowed
         - application_source_ip_denied
         - application_access_denied
         - private_key_access_denied
@@ -3630,16 +3625,14 @@ components:
     AuthTokens:
       type: object
       additionalProperties: false
-      required: [access_token, access_expires_at, refresh_token, refresh_expires_at]
+      required: [access_token, access_expires_at, session_expires_at]
       properties:
         access_token:
           $ref: '#/components/schemas/UserAccessToken'
         access_expires_at:
           type: string
           format: date-time
-        refresh_token:
-          $ref: '#/components/schemas/UserRefreshToken'
-        refresh_expires_at:
+        session_expires_at:
           type: string
           format: date-time
     LoginRequest:
@@ -3663,7 +3656,7 @@ components:
     LoginCompletedResponse:
       type: object
       additionalProperties: false
-      required: [user, access_token, access_expires_at, refresh_token, refresh_expires_at]
+      required: [user, access_token, access_expires_at, session_expires_at]
       properties:
         status:
           type: string
@@ -3675,9 +3668,7 @@ components:
         access_expires_at:
           type: string
           format: date-time
-        refresh_token:
-          $ref: '#/components/schemas/UserRefreshToken'
-        refresh_expires_at:
+        session_expires_at:
           type: string
           format: date-time
     Password2FASetupRequiredResponse:
@@ -3823,10 +3814,10 @@ components:
     RefreshRequest:
       type: object
       additionalProperties: false
-      required: [refresh_token]
+      required: [access_token]
       properties:
-        refresh_token:
-          $ref: '#/components/schemas/UserRefreshToken'
+        access_token:
+          $ref: '#/components/schemas/UserAccessToken'
     AuthMeResponse:
       type: object
       additionalProperties: false
@@ -5070,8 +5061,7 @@ components:
           last_login_at: '2026-06-24T12:00:00Z'
         access_token: cth_uat_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         access_expires_at: '2026-06-24T12:05:00Z'
-        refresh_token: cth_urt_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-        refresh_expires_at: '2026-06-24T20:00:00Z'
+        session_expires_at: '2026-06-24T20:00:00Z'
     Password2FAProvisioning:
       value:
         issuer: Certhub
@@ -5092,13 +5082,12 @@ components:
         handoff_id: cth_oidc_handoff_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     RefreshRequest:
       value:
-        refresh_token: cth_urt_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+        access_token: cth_uat_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     AuthTokens:
       value:
         access_token: cth_uat_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         access_expires_at: '2026-06-24T12:05:00Z'
-        refresh_token: cth_urt_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
-        refresh_expires_at: '2026-06-24T20:00:00Z'
+        session_expires_at: '2026-06-24T20:00:00Z'
     AuthMeResponse:
       value:
         identity_type: user

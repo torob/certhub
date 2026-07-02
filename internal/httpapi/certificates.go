@@ -453,10 +453,6 @@ func (s *Server) authenticateCertificateApplication(w http.ResponseWriter, r *ht
 		status, code := writeApplicationError(w, err)
 		return appdomain.AuthenticatedApplication{}, status, code, false
 	}
-	if strings.HasPrefix(token, auth.UserRefreshTokenPrefix) {
-		status, code := writeIdentityError(w, auth.ErrRefreshTokenNotAllowed)
-		return appdomain.AuthenticatedApplication{}, status, code, false
-	}
 	if !strings.HasPrefix(token, appdomain.ApplicationTokenPrefix) {
 		status, code := writeApplicationError(w, appdomain.ErrApplicationTokenRequired)
 		return appdomain.AuthenticatedApplication{}, status, code, false

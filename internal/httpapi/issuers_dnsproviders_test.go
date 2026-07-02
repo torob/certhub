@@ -60,12 +60,13 @@ func TestCreateDNSProviderResponseIsWriteOnlyForCredentials(t *testing.T) {
 	userToken := auth.UserAccessTokenPrefix + strings.Repeat("D", 43)
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
-			ID:              "52345678-1234-4234-9234-123456789abc",
-			UserID:          user.ID,
-			AuthMethod:      auth.AuthMethodPassword,
-			AccessTokenHash: keys.HashToken(userToken),
-			Status:          auth.SessionStatusActive,
-			AccessExpiresAt: time.Now().Add(time.Minute),
+			ID:               "52345678-1234-4234-9234-123456789abc",
+			UserID:           user.ID,
+			AuthMethod:       auth.AuthMethodPassword,
+			AccessTokenHash:  keys.HashToken(userToken),
+			Status:           auth.SessionStatusActive,
+			AccessExpiresAt:  time.Now().Add(time.Minute),
+			SessionExpiresAt: time.Now().Add(time.Hour),
 		}},
 		UserRepository:  &identityFakeUserRepo{user: user},
 		AuditRepository: identityFakeAudit{},

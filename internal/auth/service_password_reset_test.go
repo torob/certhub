@@ -126,7 +126,7 @@ func TestPasswordResetLinksAreOneTimeSupersedingAndRevokeSessions(t *testing.T) 
 		UserID:           target.ID,
 		Status:           SessionStatusActive,
 		AccessExpiresAt:  time.Now().Add(time.Minute),
-		RefreshExpiresAt: time.Now().Add(time.Hour),
+		SessionExpiresAt: time.Now().Add(time.Hour),
 	}
 	service := newPasswordFlowService(keys, repo, true)
 	current := AuthenticatedUser{User: admin}
@@ -218,10 +218,10 @@ func newPasswordFlowService(keys *security.KeySet, repo *passwordFlowRepo, twoFA
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			Password:                   config.PasswordConfig{Enabled: true, TwoFARequired: twoFARequired},
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
-			PasswordResetTTLSeconds:    3600,
+			Password:                  config.PasswordConfig{Enabled: true, TwoFARequired: twoFARequired},
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
+			PasswordResetTTLSeconds:   3600,
 		},
 	})
 }
@@ -264,10 +264,9 @@ func (r *passwordFlowRepo) CreateSession(_ context.Context, params CreateSession
 		UserID:           params.UserID,
 		AuthMethod:       params.AuthMethod,
 		AccessTokenHash:  params.AccessTokenHash,
-		RefreshTokenHash: params.RefreshTokenHash,
 		Status:           SessionStatusActive,
 		AccessExpiresAt:  params.AccessExpiresAt,
-		RefreshExpiresAt: params.RefreshExpiresAt,
+		SessionExpiresAt: params.SessionExpiresAt,
 	}
 	r.createdSessions = append(r.createdSessions, params)
 	r.sessions[id] = session
@@ -305,7 +304,7 @@ func (r *passwordFlowRepo) RevokeUserSessions(_ context.Context, userID string, 
 	return count, nil
 }
 
-func (r *passwordFlowRepo) RotateRefreshToken(context.Context, RotateRefreshTokenParams) (Session, error) {
+func (r *passwordFlowRepo) RotateAccessToken(context.Context, RotateAccessTokenParams) (Session, error) {
 	return Session{}, errors.New("not implemented")
 }
 

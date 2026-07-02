@@ -15,14 +15,14 @@ import (
 
 const validAppToken = ApplicationTokenPrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-func TestValidateApplicationTokenRejectsUserAndRefreshTokens(t *testing.T) {
+func TestValidateApplicationTokenRejectsUserTokens(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
 		code string
 	}{
 		{name: "user access", in: UserAccessTokenPrefix + strings.Repeat("A", 43), code: certerrors.CodeApplicationTokenRequired},
-		{name: "refresh", in: UserRefreshTokenPrefix + strings.Repeat("A", 43), code: certerrors.CodeRefreshTokenNotAllowed},
+		{name: "removed refresh prefix", in: "cth_urt_v1_" + strings.Repeat("A", 43), code: certerrors.CodeInvalidToken},
 		{name: "malformed app", in: ApplicationTokenPrefix + "example_redacted", code: certerrors.CodeInvalidToken},
 	}
 	for _, tt := range tests {

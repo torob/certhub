@@ -48,8 +48,8 @@ func TestStartOIDCLoginBuildsAuthorizationCodePKCERedirect(t *testing.T) {
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:           true,
 				IssuerURL:         provider.URL,
@@ -170,8 +170,8 @@ func TestStartOIDCLoginAllowsDefaultSameOriginReturnURLBeforeDiscovery(t *testin
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:     true,
 				IssuerURL:   provider.URL,
@@ -274,8 +274,8 @@ func TestStartOIDCLoginRejectsInvalidDiscoveryMetadata(t *testing.T) {
 				AuditRepository: repo,
 				KeySet:          keys,
 				Config: config.AuthConfig{
-					UserAccessTokenTTLSeconds:  300,
-					UserRefreshTokenTTLSeconds: 3600,
+					UserAccessTokenTTLSeconds: 300,
+					UserSessionTTLSeconds:     3600,
 					OIDC: config.OIDCConfig{
 						Enabled:           true,
 						IssuerURL:         provider.URL,
@@ -482,8 +482,8 @@ func TestCompleteOIDCCallbackExchangesCodeWithPKCEAndCreatesHandoff(t *testing.T
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:     true,
 				IssuerURL:   server.URL,
@@ -649,8 +649,8 @@ func TestCompleteOIDCCallbackLinksProvisionedUserByVerifiedEmail(t *testing.T) {
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:     true,
 				IssuerURL:   server.URL,
@@ -871,8 +871,8 @@ func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T)
 				AuditRepository: repo,
 				KeySet:          keys,
 				Config: config.AuthConfig{
-					UserAccessTokenTTLSeconds:  300,
-					UserRefreshTokenTTLSeconds: 3600,
+					UserAccessTokenTTLSeconds: 300,
+					UserSessionTTLSeconds:     3600,
 					OIDC: config.OIDCConfig{
 						Enabled:     true,
 						IssuerURL:   server.URL,
@@ -936,8 +936,8 @@ func TestExchangeOIDCHandoffConsumesSingleUseHashAndCreatesOIDCSession(t *testin
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled: true,
 			},
@@ -947,7 +947,7 @@ func TestExchangeOIDCHandoffConsumesSingleUseHashAndCreatesOIDCSession(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.User.ID != userID || !strings.HasPrefix(result.Tokens.AccessToken, UserAccessTokenPrefix) || !strings.HasPrefix(result.Tokens.RefreshToken, UserRefreshTokenPrefix) {
+	if result.User.ID != userID || !strings.HasPrefix(result.Tokens.AccessToken, UserAccessTokenPrefix) || result.Tokens.SessionExpiresAt.IsZero() {
 		t.Fatalf("unexpected OIDC handoff login result")
 	}
 	if repo.consumedHandoffHash != keys.HashToken(handoffID) || repo.consumedHandoffHash == handoffID {
@@ -966,7 +966,7 @@ func TestExchangeOIDCHandoffConsumesSingleUseHashAndCreatesOIDCSession(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{handoffID, result.Tokens.AccessToken, result.Tokens.RefreshToken} {
+	for _, forbidden := range []string{handoffID, result.Tokens.AccessToken} {
 		if strings.Contains(string(auditPayload), forbidden) {
 			t.Fatalf("audit events leaked sensitive OIDC handoff value")
 		}
@@ -1133,8 +1133,8 @@ func TestOIDCLoginFlowWithPostgresServiceTransactions(t *testing.T) {
 		AuditRepository: audit.NewRepository(pool),
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:     true,
 				IssuerURL:   provider.URL,
@@ -1218,7 +1218,7 @@ where handoff_hash = $1`, keys.HashToken(handoffID)).Scan(&storedHandoffHash, &s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if login.User.ID != user.ID || !strings.HasPrefix(login.Tokens.AccessToken, UserAccessTokenPrefix) || !strings.HasPrefix(login.Tokens.RefreshToken, UserRefreshTokenPrefix) {
+	if login.User.ID != user.ID || !strings.HasPrefix(login.Tokens.AccessToken, UserAccessTokenPrefix) || login.Tokens.SessionExpiresAt.IsZero() {
 		t.Fatalf("unexpected OIDC login result")
 	}
 	if _, err := service.ExchangeOIDCHandoff(ctx, handoffID, AuditContext{CorrelationID: correlationPrefix + "-handoff-replay"}); !errors.Is(err, ErrInvalidCredentials) {
@@ -1299,7 +1299,6 @@ order by created_at, id`, correlationPrefix+"-%")
 		tokenVerifier,
 		handoffID,
 		login.Tokens.AccessToken,
-		login.Tokens.RefreshToken,
 		providerIDToken,
 		"postgres-provider-access-canary",
 		"postgres-provider-refresh-canary",
@@ -1334,8 +1333,8 @@ func TestCompleteOIDCCallbackRejectsFakeCodeWithoutLocalBypass(t *testing.T) {
 		AuditRepository: repo,
 		KeySet:          keys,
 		Config: config.AuthConfig{
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 3600,
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
 			OIDC: config.OIDCConfig{
 				Enabled:     true,
 				IssuerURL:   "https://127.0.0.1:1",
@@ -1424,10 +1423,9 @@ func (f *oidcFakeRepo) CreateSession(_ context.Context, params CreateSessionPara
 		UserID:           params.UserID,
 		AuthMethod:       params.AuthMethod,
 		AccessTokenHash:  params.AccessTokenHash,
-		RefreshTokenHash: params.RefreshTokenHash,
 		Status:           SessionStatusActive,
 		AccessExpiresAt:  params.AccessExpiresAt,
-		RefreshExpiresAt: params.RefreshExpiresAt,
+		SessionExpiresAt: params.SessionExpiresAt,
 	}, nil
 }
 
@@ -1447,7 +1445,7 @@ func (f *oidcFakeRepo) RevokeUserSessions(context.Context, string, SessionRevoke
 	return 0, errors.New("not implemented")
 }
 
-func (f *oidcFakeRepo) RotateRefreshToken(context.Context, RotateRefreshTokenParams) (Session, error) {
+func (f *oidcFakeRepo) RotateAccessToken(context.Context, RotateAccessTokenParams) (Session, error) {
 	return Session{}, errors.New("not implemented")
 }
 

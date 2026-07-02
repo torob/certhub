@@ -114,12 +114,12 @@ type ProxyConfig struct {
 }
 
 type AuthConfig struct {
-	Password                   PasswordConfig
-	OIDC                       OIDCConfig
-	UserAccessTokenTTLSeconds  int
-	UserRefreshTokenTTLSeconds int
-	UserInviteTTLSeconds       int
-	PasswordResetTTLSeconds    int
+	Password                  PasswordConfig
+	OIDC                      OIDCConfig
+	UserAccessTokenTTLSeconds int
+	UserSessionTTLSeconds     int
+	UserInviteTTLSeconds      int
+	PasswordResetTTLSeconds   int
 }
 
 type PasswordConfig struct {
@@ -237,12 +237,12 @@ type rawDNSProviders struct {
 }
 
 type rawAuth struct {
-	Password                   rawPassword `yaml:"password"`
-	OIDC                       rawOIDC     `yaml:"oidc"`
-	UserAccessTokenTTLSeconds  *int        `yaml:"user_access_token_ttl_seconds"`
-	UserRefreshTokenTTLSeconds *int        `yaml:"user_refresh_token_ttl_seconds"`
-	UserInviteTTLSeconds       *int        `yaml:"user_invite_ttl_seconds"`
-	PasswordResetTTLSeconds    *int        `yaml:"password_reset_ttl_seconds"`
+	Password                  rawPassword `yaml:"password"`
+	OIDC                      rawOIDC     `yaml:"oidc"`
+	UserAccessTokenTTLSeconds *int        `yaml:"user_access_token_ttl_seconds"`
+	UserSessionTTLSeconds     *int        `yaml:"user_session_ttl_seconds"`
+	UserInviteTTLSeconds      *int        `yaml:"user_invite_ttl_seconds"`
+	PasswordResetTTLSeconds   *int        `yaml:"password_reset_ttl_seconds"`
 }
 
 type rawPassword struct {
@@ -333,11 +333,11 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 		},
 		OutboundHTTP: OutboundHTTPConfig{Proxies: map[string]ProxyConfig{}},
 		Auth: AuthConfig{
-			Password:                   PasswordConfig{Enabled: true, TwoFARequired: true},
-			UserAccessTokenTTLSeconds:  300,
-			UserRefreshTokenTTLSeconds: 28800,
-			UserInviteTTLSeconds:       86400,
-			PasswordResetTTLSeconds:    3600,
+			Password:                  PasswordConfig{Enabled: true, TwoFARequired: true},
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     28800,
+			UserInviteTTLSeconds:      86400,
+			PasswordResetTTLSeconds:   3600,
 		},
 		ApplicationToken: ApplicationTokenConfig{
 			DefaultTTLSeconds: 7776000,
@@ -503,7 +503,7 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 	if err := positiveInt("auth.user_access_token_ttl_seconds", raw.Auth.UserAccessTokenTTLSeconds, &cfg.Auth.UserAccessTokenTTLSeconds); err != nil {
 		return nil, err
 	}
-	if err := positiveInt("auth.user_refresh_token_ttl_seconds", raw.Auth.UserRefreshTokenTTLSeconds, &cfg.Auth.UserRefreshTokenTTLSeconds); err != nil {
+	if err := positiveInt("auth.user_session_ttl_seconds", raw.Auth.UserSessionTTLSeconds, &cfg.Auth.UserSessionTTLSeconds); err != nil {
 		return nil, err
 	}
 	if err := positiveInt("auth.user_invite_ttl_seconds", raw.Auth.UserInviteTTLSeconds, &cfg.Auth.UserInviteTTLSeconds); err != nil {
@@ -512,8 +512,8 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 	if err := positiveInt("auth.password_reset_ttl_seconds", raw.Auth.PasswordResetTTLSeconds, &cfg.Auth.PasswordResetTTLSeconds); err != nil {
 		return nil, err
 	}
-	if cfg.Auth.UserRefreshTokenTTLSeconds <= cfg.Auth.UserAccessTokenTTLSeconds {
-		return nil, fieldError("auth.user_refresh_token_ttl_seconds", "must be greater than auth.user_access_token_ttl_seconds")
+	if cfg.Auth.UserSessionTTLSeconds <= cfg.Auth.UserAccessTokenTTLSeconds {
+		return nil, fieldError("auth.user_session_ttl_seconds", "must be greater than auth.user_access_token_ttl_seconds")
 	}
 
 	if err := positiveInt("application_tokens.default_ttl_seconds", raw.ApplicationToken.DefaultTTLSeconds, &cfg.ApplicationToken.DefaultTTLSeconds); err != nil {
@@ -858,7 +858,7 @@ func fieldError(field, message string) error {
 
 func sanitizeYAMLError(err error) string {
 	msg := security.RedactString(err.Error())
-	for _, marker := range []string{"postgres://", "postgresql://", "cth_app_v1_", "cth_uat_v1_", "cth_urt_v1_", "-----BEGIN"} {
+	for _, marker := range []string{"postgres://", "postgresql://", "cth_app_v1_", "cth_uat_v1_", "-----BEGIN"} {
 		if strings.Contains(msg, marker) {
 			return "invalid YAML"
 		}

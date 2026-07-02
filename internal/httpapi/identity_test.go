@@ -21,16 +21,15 @@ func TestIdentityTokenClassRouting(t *testing.T) {
 	handler := New(testConfig(t, ""), WithIdentityServices(testAuthService(t, fakeUser()), nil)).Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
-	req.Header.Set("Authorization", "Bearer "+auth.UserRefreshTokenPrefix+strings.Repeat("A", 43))
+	req.Header.Set("Authorization", "Bearer cth_urt_v1_"+strings.Repeat("A", 43))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	assertErrorCode(t, rec, http.StatusForbidden, "refresh_token_not_allowed")
+	assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_token")
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", strings.NewReader(`{"refresh_token":"`+auth.UserRefreshTokenPrefix+strings.Repeat("B", 43)+`"}`))
-	req.Header.Set("Authorization", "Bearer "+auth.UserRefreshTokenPrefix+strings.Repeat("C", 43))
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", strings.NewReader(`{"refresh_token":"cth_urt_v1_`+strings.Repeat("B", 43)+`"}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	assertErrorCode(t, rec, http.StatusForbidden, "refresh_token_not_allowed")
+	assertErrorCode(t, rec, http.StatusBadRequest, "invalid_request")
 }
 
 func TestUserEndpointRejectsApplicationTokenByPrefix(t *testing.T) {
@@ -56,12 +55,13 @@ func TestAuthMeWithUserAccessToken(t *testing.T) {
 	user.Password2FAEnabled = true
 	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
 	repo := &identityFakeAuthRepo{session: auth.Session{
-		ID:              "22345678-1234-4234-9234-123456789abc",
-		UserID:          user.ID,
-		AuthMethod:      auth.AuthMethodPassword,
-		AccessTokenHash: testKeySet(t).HashToken(token),
-		Status:          auth.SessionStatusActive,
-		AccessExpiresAt: time.Now().Add(time.Minute),
+		ID:               "22345678-1234-4234-9234-123456789abc",
+		UserID:           user.ID,
+		AuthMethod:       auth.AuthMethodPassword,
+		AccessTokenHash:  testKeySet(t).HashToken(token),
+		Status:           auth.SessionStatusActive,
+		AccessExpiresAt:  time.Now().Add(time.Minute),
+		SessionExpiresAt: time.Now().Add(time.Hour),
 	}}
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository:  repo,
@@ -110,12 +110,13 @@ auth:
 `)
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
-			ID:              "22345678-1234-4234-9234-123456789abc",
-			UserID:          user.ID,
-			AuthMethod:      auth.AuthMethodPassword,
-			AccessTokenHash: testKeySet(t).HashToken(token),
-			Status:          auth.SessionStatusActive,
-			AccessExpiresAt: time.Now().Add(time.Minute),
+			ID:               "22345678-1234-4234-9234-123456789abc",
+			UserID:           user.ID,
+			AuthMethod:       auth.AuthMethodPassword,
+			AccessTokenHash:  testKeySet(t).HashToken(token),
+			Status:           auth.SessionStatusActive,
+			AccessExpiresAt:  time.Now().Add(time.Minute),
+			SessionExpiresAt: time.Now().Add(time.Hour),
 		}},
 		UserRepository:  &identityFakeUserRepo{user: user},
 		AuditRepository: identityFakeAudit{},
@@ -151,12 +152,13 @@ func TestUserResponsesExposeOnlyOIDCLinkedStatus(t *testing.T) {
 	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
-			ID:              "22345678-1234-4234-9234-123456789abc",
-			UserID:          user.ID,
-			AuthMethod:      auth.AuthMethodPassword,
-			AccessTokenHash: testKeySet(t).HashToken(token),
-			Status:          auth.SessionStatusActive,
-			AccessExpiresAt: time.Now().Add(time.Minute),
+			ID:               "22345678-1234-4234-9234-123456789abc",
+			UserID:           user.ID,
+			AuthMethod:       auth.AuthMethodPassword,
+			AccessTokenHash:  testKeySet(t).HashToken(token),
+			Status:           auth.SessionStatusActive,
+			AccessExpiresAt:  time.Now().Add(time.Minute),
+			SessionExpiresAt: time.Now().Add(time.Hour),
 		}},
 		UserRepository:  &identityFakeUserRepo{user: user},
 		AuditRepository: identityFakeAudit{},
@@ -198,12 +200,13 @@ func TestPatchUserRejectsOIDCLinkFields(t *testing.T) {
 	token := auth.UserAccessTokenPrefix + strings.Repeat("A", 43)
 	authSvc := auth.NewService(auth.ServiceConfig{
 		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
-			ID:              "22345678-1234-4234-9234-123456789abc",
-			UserID:          user.ID,
-			AuthMethod:      auth.AuthMethodPassword,
-			AccessTokenHash: testKeySet(t).HashToken(token),
-			Status:          auth.SessionStatusActive,
-			AccessExpiresAt: time.Now().Add(time.Minute),
+			ID:               "22345678-1234-4234-9234-123456789abc",
+			UserID:           user.ID,
+			AuthMethod:       auth.AuthMethodPassword,
+			AccessTokenHash:  testKeySet(t).HashToken(token),
+			Status:           auth.SessionStatusActive,
+			AccessExpiresAt:  time.Now().Add(time.Minute),
+			SessionExpiresAt: time.Now().Add(time.Hour),
 		}},
 		UserRepository:  &identityFakeUserRepo{user: user},
 		AuditRepository: identityFakeAudit{},
@@ -320,7 +323,7 @@ func (f *identityFakeAuthRepo) RevokeUserSessions(context.Context, string, auth.
 	return 0, errors.New("not implemented")
 }
 
-func (f *identityFakeAuthRepo) RotateRefreshToken(context.Context, auth.RotateRefreshTokenParams) (auth.Session, error) {
+func (f *identityFakeAuthRepo) RotateAccessToken(context.Context, auth.RotateAccessTokenParams) (auth.Session, error) {
 	return auth.Session{}, errors.New("not implemented")
 }
 

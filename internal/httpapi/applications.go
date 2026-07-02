@@ -467,8 +467,6 @@ func writeApplicationError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusServiceUnavailable, "service_unavailable", "Backend is not ready."
 	case errors.Is(err, appdomain.ErrInvalidToken), errors.Is(err, auth.ErrInvalidToken):
 		status, code, message = http.StatusUnauthorized, "invalid_token", "Authentication token is missing, invalid, or expired."
-	case errors.Is(err, auth.ErrRefreshTokenNotAllowed):
-		status, code, message = http.StatusForbidden, "refresh_token_not_allowed", "Refresh tokens are accepted only by the refresh endpoint."
 	case errors.Is(err, appdomain.ErrApplicationTokenRequired):
 		status, code, message = http.StatusForbidden, "application_token_required", "An Application token is required."
 	case errors.Is(err, appdomain.ErrSourceIPDenied):

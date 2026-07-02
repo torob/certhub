@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exchange User email/password for a User access token and refresh token. */
+        /** Exchange User email/password for a User access token. */
         post: operations["loginUser"];
         delete?: never;
         options?: never;
@@ -259,7 +259,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rotate a refresh token and return new User session tokens. */
+        /** Rotate the current User access token before it expires. */
         post: operations["refreshUserSession"];
         delete?: never;
         options?: never;
@@ -1175,7 +1175,6 @@ export interface components {
         /** @example req_01HZY9T8YF3KZ9F2V5G9N0E2ZP */
         CorrelationID: string;
         UserAccessToken: string;
-        UserRefreshToken: string;
         ApplicationTokenValue: string;
         /** @example "cth-mat-v1.JYjzT2o0Gd9c6SwJ5YYRWR6d9xWJ9G7dy2cW3rQpQ9E" */
         MaterialETag: string;
@@ -1256,7 +1255,7 @@ export interface components {
         /** @enum {string} */
         AuditAction: "bootstrap_admin_created" | "user_created" | "user_invite_created" | "user_invite_signup_started" | "user_invite_consumed" | "user_updated" | "user_login_succeeded" | "user_login_failed" | "user_session_created" | "user_session_refreshed" | "user_session_revoked" | "password_2fa_setup_started" | "password_2fa_enabled" | "password_2fa_disabled" | "application_created" | "application_updated" | "application_token_created" | "application_token_revoked" | "domain_scope_created" | "domain_scope_deleted" | "application_access_granted" | "application_access_revoked" | "issuer_created" | "issuer_updated" | "issuer_disabled" | "acme_account_created" | "dns_provider_created" | "dns_provider_updated" | "dns_provider_credentials_replaced" | "dns_provider_zone_added" | "dns_provider_zone_removed" | "dns_provider_zone_refresh_started" | "dns_provider_zone_refreshed" | "dns_zone_discovery_failed" | "certificate_created" | "certificate_issuance_started" | "certificate_issuance_succeeded" | "certificate_issuance_failed" | "certificate_renewal_started" | "certificate_renewal_succeeded" | "certificate_renewal_failed" | "certificate_key_rotation_started" | "certificate_key_rotation_succeeded" | "certificate_key_rotation_failed" | "certificate_revoked" | "certificate_revocation_retried" | "certificate_revocation_failed" | "certificate_deleted" | "private_key_read" | "server_self_certificate_synced";
         /** @enum {string} */
-        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "invalid_refresh_token" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "refresh_token_not_allowed" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "invalid_invite" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "certificate_no_active_version" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
+        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "invalid_invite" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "certificate_no_active_version" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
         ErrorResponse: {
             error: components["schemas"]["ErrorEnvelope"];
         };
@@ -1359,9 +1358,8 @@ export interface components {
             access_token: components["schemas"]["UserAccessToken"];
             /** Format: date-time */
             access_expires_at: string;
-            refresh_token: components["schemas"]["UserRefreshToken"];
             /** Format: date-time */
-            refresh_expires_at: string;
+            session_expires_at: string;
         };
         LoginRequest: {
             email: components["schemas"]["Email"];
@@ -1376,9 +1374,8 @@ export interface components {
             access_token: components["schemas"]["UserAccessToken"];
             /** Format: date-time */
             access_expires_at: string;
-            refresh_token: components["schemas"]["UserRefreshToken"];
             /** Format: date-time */
-            refresh_expires_at: string;
+            session_expires_at: string;
         };
         Password2FASetupRequiredResponse: {
             /** @enum {string} */
@@ -1435,7 +1432,7 @@ export interface components {
             handoff_id: string;
         };
         RefreshRequest: {
-            refresh_token: components["schemas"]["UserRefreshToken"];
+            access_token: components["schemas"]["UserAccessToken"];
         };
         AuthMeResponse: {
             /** @enum {string} */

@@ -12,7 +12,6 @@ const (
 	CodeInvalidToken               = "invalid_token"
 	CodeApplicationTokenRequired   = "application_token_required"
 	CodeUserTokenRequired          = "user_token_required"
-	CodeRefreshTokenNotAllowed     = "refresh_token_not_allowed"
 	CodeApplicationSourceIPDenied  = "application_source_ip_denied"
 	CodeDomainNotAuthorized        = "domain_not_authorized"
 	CodeCertificateNotFound        = "certificate_not_found"

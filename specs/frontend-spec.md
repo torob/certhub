@@ -38,7 +38,7 @@ Security considerations:
 - Because the web UI and API are same-origin, frontend XSS can become authenticated API access while User tokens are present in `sessionStorage`.
 - The UI must not render backend-provided or user-provided text as HTML. Avoid `dangerouslySetInnerHTML`; any future exception requires a documented sanitizer and test coverage.
 - The UI must not use `eval`, dynamic script injection, remote scripts, remote styles, remote fonts, or remote images in production.
-- The UI must never put User tokens, refresh tokens, Application tokens, certificate material, private keys, DNS credentials, OIDC authorization codes, OIDC state, PKCE code verifiers, passwords, TOTP codes, or TOTP secrets in URLs, logs, telemetry, crash reports, or persistent browser storage.
+- The UI must never put User tokens, Application tokens, certificate material, private keys, DNS credentials, OIDC authorization codes, OIDC state, PKCE code verifiers, passwords, TOTP codes, or TOTP secrets in URLs, logs, telemetry, crash reports, or persistent browser storage.
 - Client-side permission checks are only UX. Backend authorization and audit requirements remain authoritative for every action.
 
 ## Goals
@@ -59,7 +59,7 @@ Security considerations:
 - The frontend does not issue personal/User-owned certificates.
 - The frontend does not call the Application-token `POST /v1/sync/certificates` runtime endpoint with a User access token; User-authenticated certificate creation uses the Application ID-based management endpoint.
 - The frontend does not call Let's Encrypt, Cloudflare, or ArvanCloud directly.
-- The frontend does not persist User access tokens, refresh tokens, Application tokens, or private keys across browser restarts.
+- The frontend does not persist User access tokens, Application tokens, or private keys across browser restarts.
 - The frontend does not provide personal access-token creation, listing, or revocation UI.
 - The frontend does not expose raw DNS provider credentials after creation.
 - The frontend does not expose first-bootstrap or emergency-recovery server-binary commands.
@@ -133,9 +133,9 @@ The login screen supports:
 
 Rules:
 
-- Password and OIDC login return a short-lived opaque User access token and longer-lived opaque refresh token.
-- The frontend must treat User access tokens and refresh tokens as opaque strings and must not parse them as JWTs or depend on embedded claims.
-- User access tokens have prefix `cth_uat_v1_`; refresh tokens have prefix `cth_urt_v1_`. The prefix is only a public token-class marker. The remainder is opaque.
+- Password and OIDC login return a short-lived opaque User access token and fixed session expiry.
+- The frontend must treat User access tokens as opaque strings and must not parse them as JWTs or depend on embedded claims.
+- User access tokens have prefix `cth_uat_v1_`. The prefix is only a public token-class marker. The remainder is opaque.
 - Password login supports Certhub-native TOTP 2FA when enabled or required by backend policy.
 - When password login returns `password_2fa_setup_required`, the frontend must render the returned provisioning URI as a QR code, submit the setup token and TOTP code to `/v1/auth/password-2fa/login-setup/confirm`, and must not store session tokens until confirmation succeeds.
 - OIDC login does not require Certhub-native 2FA and must not ask for a TOTP code.
@@ -148,11 +148,11 @@ Rules:
 - The frontend must never handle an OIDC client secret.
 - The frontend must not store provider access tokens, ID tokens, authorization codes, OIDC handoff IDs, or PKCE code verifiers in persistent browser storage.
 - After OIDC redirect, the frontend exchanges the handoff ID once with `POST /v1/auth/oidc/handoff`, stores only the returned Certhub tokens in `sessionStorage`, and removes the handoff ID from the URL and browser history.
-- The frontend must store User access tokens and refresh tokens in browser `sessionStorage`.
-- The frontend must not store User access tokens or refresh tokens in `localStorage`, IndexedDB, cookies, or persistent browser storage.
+- The frontend must store User access tokens in browser `sessionStorage`.
+- The frontend must not store User access tokens in `localStorage`, IndexedDB, cookies, or persistent browser storage.
 - Browser restart must drop the frontend's User login session because `sessionStorage` is not restored as durable application state.
-- The frontend refreshes expired or near-expired access tokens with `POST /v1/auth/refresh`.
-- Refresh success replaces both the access token and refresh token in `sessionStorage`.
+- The frontend refreshes near-expired access tokens with `POST /v1/auth/refresh`.
+- Refresh success replaces the access token in `sessionStorage`.
 - Refresh failure clears session storage and returns the User to the login screen.
 - Logout calls `POST /v1/auth/logout` and clears session storage.
 - The frontend must not persist Application tokens, raw passwords, private keys, or DNS provider credentials in browser storage.
@@ -721,8 +721,8 @@ Required frontend scenarios:
 - Public `/reset-password?token=...` previews the reset target and completes a one-time password reset without requiring an existing session.
 - Profile/Security conditionally shows password-2FA setup, disable, or required-by-policy status from `/v1/auth/me` identity capability fields.
 - OIDC login uses Authorization Code with PKCE only and never uses implicit flow or client secrets.
-- Login stores access and refresh tokens only in `sessionStorage`; refresh rotates both values; logout clears them.
-- Access tokens, refresh tokens, and OIDC authorization codes are never written to URLs, `localStorage`, `IndexedDB`, cookies, persisted React Query caches, telemetry payloads, or browser console output.
+- Login stores the access token only in `sessionStorage`; refresh rotates that value; logout clears them.
+- Access tokens and OIDC authorization codes are never written to URLs, `localStorage`, `IndexedDB`, cookies, persisted React Query caches, telemetry payloads, or browser console output.
 - Login, OIDC handoff, refresh, and logout tests verify token-like query parameters are removed from the address bar and browser history state after handling.
 - API clients attach User bearer tokens only to same-origin Certhub API requests and never to embedded static assets, OIDC provider URLs, downloaded files, or third-party origins.
 - API client redirect tests verify bearer tokens are not forwarded when a request is redirected to a different origin or scheme.
@@ -734,7 +734,7 @@ Required frontend scenarios:
 - UI tests or static checks cover no unsafe HTML rendering, no `dangerouslySetInnerHTML` without an approved sanitizer, no `eval`, no dynamic remote script loading, and no persistent token storage.
 - XSS tests render hostile backend-controlled strings in domains, Application names, User display fields, issuer names, DNS provider names, audit metadata, validation errors, and upstream failure messages as inert text.
 - XSS tests cover HTML-like values in table cells, filters, details pages, toasts, modals, form errors, download filenames, and empty-state/error-boundary views.
-- Frontend error boundaries, API error displays, telemetry hooks, and console logging never include access tokens, refresh tokens, Application tokens, private keys, certificate PEM, DNS provider credentials, passwords, TOTP codes, OIDC state, or authorization codes.
+- Frontend error boundaries, API error displays, telemetry hooks, and console logging never include access tokens, Application tokens, private keys, certificate PEM, DNS provider credentials, passwords, TOTP codes, OIDC state, or authorization codes.
 - Raw Application token creation displays the token exactly once, clears it on navigation/reload, and never writes it to browser storage, telemetry, or logs.
 - Raw Application token creation cannot be redisplayed through browser back/forward navigation, route state restoration, or persisted component state.
 - Reserved `certhub_server` UI tests show the system/reserved/config-managed indicator and hide token, grant, domain-scope edit, Certificate creation, lifecycle, disable, rename, update, and delete controls.

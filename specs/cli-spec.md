@@ -6,7 +6,7 @@ Certhub CLI is a narrow certificate material sync tool. Its only v1 purpose is t
 
 The CLI talks only to the Certhub backend API. It does not implement ACME, DNS-01, Cloudflare, ArvanCloud, certificate lifecycle management, User login, Application administration, or User administration locally.
 
-The CLI authenticates only with an Application token. User access tokens and refresh tokens are not supported by the CLI in v1.
+The CLI authenticates only with an Application token. User access tokens are not supported by the CLI in v1.
 
 The CLI is not required for Certhub's own HTTPS serving certificate in v1. The backend server has a separate self-certificate sync path for the reserved `certhub_server` Application.
 
@@ -29,7 +29,7 @@ Each backend request must send an `X-Request-ID` correlation ID and include it i
 
 ## Non-Goals
 
-- No User login, OIDC login, refresh-token handling, logout, or 2FA commands.
+- No User login, OIDC login, User session refresh, logout, or 2FA commands.
 - No Application creation, token management, User management, grant management, issuer management, or DNS provider management.
 - No server bootstrap, first-admin creation, migration, issuer bootstrap, or DNS provider bootstrap commands. Those direct database management jobs belong to the `certhub-server` binary.
 - No explicit certificate lifecycle, version revoke, inspect, or list commands.
@@ -91,7 +91,7 @@ Rules:
 
 - `token` must be an Application token with prefix `cth_app_v1_`.
 - The backend may also require this Application token to be used from one of the Application's trusted source IP/CIDR ranges. The CLI still sends only the token; it does not send or claim a source IP.
-- User access tokens with prefix `cth_uat_v1_` and refresh tokens with prefix `cth_urt_v1_` must be rejected locally before making backend calls.
+- User access tokens with prefix `cth_uat_v1_` must be rejected locally before making backend calls.
 - The CLI must not write tokens to shell history, logs, stdout, stderr, or metadata files.
 - Config files containing tokens must have mode `0600`; otherwise the CLI must refuse to use the stored token.
 - Only `url` and `token` may be overridden by environment variables, using `CERTHUB_URL` and `CERTHUB_TOKEN`.
@@ -301,7 +301,7 @@ Errors must be printed to stderr and return non-zero exit codes. The CLI must pa
 Mapping:
 
 - `invalid_domain`, `invalid_request`, and `not_acceptable`: `2`.
-- `invalid_token`, `invalid_credentials`, `session_expired`, and `refresh_token_not_allowed`: `3`.
+- `invalid_token`, `invalid_credentials`, `session_expired`, and `invalid_token`: `3`.
 - `application_token_required`, `user_token_required`, `application_access_denied`, `application_source_ip_denied`, and `domain_not_authorized`: `4`.
 - `certificate_not_found` after the create attempt still cannot find metadata: `5`.
 - `certificate_not_ready`: `6` when not waiting.
@@ -389,7 +389,7 @@ Required CLI scenarios:
 - CLI accepts a config with multiple `certificates` entries and syncs all of them.
 - CLI does not support certificate selection flags; every configured certificate entry is synced.
 - CLI rejects configured certificate entries without `domains` or `out_dir`.
-- CLI rejects User access tokens and refresh tokens before making backend calls.
+- CLI rejects User access tokens before making backend calls.
 - CLI treats `403 application_source_ip_denied` as a non-retryable authorization failure and includes the backend request ID when available.
 - CLI never sends `Forwarded`, `X-Forwarded-For`, or other headers that attempt to claim a different source IP.
 - CLI rejects plain HTTP Certhub URLs unless config-file-only `allow_plain_http_for_local_development=true`.

@@ -12,4 +12,6 @@ auth:
   password:
     enabled: true
     2fa_required: true
+  user_access_token_ttl_seconds: 300
+  user_session_ttl_seconds: 28800
   password_reset_ttl_seconds: 3600

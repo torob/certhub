@@ -27,7 +27,6 @@ import (
 
 const (
 	UserAccessTokenPrefix  = "cth_uat_v1_"
-	UserRefreshTokenPrefix = "cth_urt_v1_"
 	OIDCHandoffPrefix      = "cth_oidc_handoff_"
 	PasswordResetPrefix    = "cth_pwd_reset_v1_"
 	Password2FASetupPrefix = "cth_pwd_2fa_setup_v1_"
@@ -51,9 +50,7 @@ var (
 	ErrPassword2FARequired        = errors.New("password 2fa required")
 	ErrInvalid2FACode             = errors.New("invalid 2fa code")
 	ErrInvalidToken               = errors.New("invalid token")
-	ErrRefreshTokenNotAllowed     = errors.New("refresh token not allowed")
 	ErrUserTokenRequired          = errors.New("user token required")
-	ErrInvalidRefreshToken        = errors.New("invalid refresh token")
 	ErrSessionExpired             = errors.New("session expired")
 	ErrConflict                   = errors.New("conflict")
 	ErrNotFound                   = errors.New("not found")
@@ -73,7 +70,7 @@ type SessionRepository interface {
 	MarkSessionUsed(context.Context, string) error
 	RevokeSession(context.Context, string, SessionRevokedReason) (bool, error)
 	RevokeUserSessions(context.Context, string, SessionRevokedReason) (int64, error)
-	RotateRefreshToken(context.Context, RotateRefreshTokenParams) (Session, error)
+	RotateAccessToken(context.Context, RotateAccessTokenParams) (Session, error)
 	CreateOIDCState(context.Context, CreateOIDCStateParams) (OIDCLoginState, error)
 	ConsumeOIDCState(context.Context, string) (OIDCLoginState, error)
 	CreateOIDCHandoff(context.Context, CreateOIDCHandoffParams) (OIDCLoginHandoff, error)
@@ -131,8 +128,7 @@ type AuthenticatedUser struct {
 type Tokens struct {
 	AccessToken      string
 	AccessExpiresAt  time.Time
-	RefreshToken     string
-	RefreshExpiresAt time.Time
+	SessionExpiresAt time.Time
 }
 
 type LoginResult struct {
@@ -296,7 +292,8 @@ func (s *Service) ValidateUserAccessToken(ctx context.Context, token string) (Au
 	if err != nil {
 		return AuthenticatedUser{}, ErrInvalidToken
 	}
-	if session.Status != SessionStatusActive || !session.AccessExpiresAt.After(time.Now().UTC()) {
+	now := time.Now().UTC()
+	if session.Status != SessionStatusActive || !session.AccessExpiresAt.After(now) || !session.SessionExpiresAt.After(now) {
 		return AuthenticatedUser{}, ErrInvalidToken
 	}
 	user, err := s.userRepo.Get(ctx, session.UserID)
@@ -312,62 +309,54 @@ func (s *Service) ValidateUserAccessToken(ctx context.Context, token string) (Au
 	return AuthenticatedUser{User: user, Session: session}, nil
 }
 
-func (s *Service) Refresh(ctx context.Context, refreshToken string, auditCtx AuditContext) (RefreshResult, error) {
+func (s *Service) Refresh(ctx context.Context, accessToken string, auditCtx AuditContext) (RefreshResult, error) {
 	if err := s.ready(); err != nil {
 		return RefreshResult{}, err
 	}
-	if err := validatePresentedRefreshToken(refreshToken); err != nil {
-		_ = s.auditSystemFailure(ctx, "user_session_refreshed", "user_session", nil, auditCtx, map[string]any{"reason": "invalid_refresh_token"})
-		return RefreshResult{}, ErrInvalidRefreshToken
+	if err := validatePresentedUserAccessToken(accessToken); err != nil {
+		_ = s.auditSystemFailure(ctx, "user_session_refreshed", "user_session", nil, auditCtx, map[string]any{"reason": "invalid_token"})
+		return RefreshResult{}, ErrInvalidToken
 	}
-	accessToken, err := randomPrefixedToken(UserAccessTokenPrefix)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	newRefreshToken, err := randomPrefixedToken(UserRefreshTokenPrefix)
+	newAccessToken, err := randomPrefixedToken(UserAccessTokenPrefix)
 	if err != nil {
 		return RefreshResult{}, err
 	}
 	now := time.Now().UTC()
 	accessExpiresAt := now.Add(time.Duration(s.cfg.UserAccessTokenTTLSeconds) * time.Second)
-	refreshExpiresAt := now.Add(time.Duration(s.cfg.UserRefreshTokenTTLSeconds) * time.Second)
-	params := RotateRefreshTokenParams{
-		CurrentRefreshTokenHash: s.keys.HashToken(refreshToken),
-		NewAccessTokenHash:      s.keys.HashToken(accessToken),
-		NewRefreshTokenHash:     s.keys.HashToken(newRefreshToken),
-		AccessExpiresAt:         accessExpiresAt,
-		RefreshExpiresAt:        refreshExpiresAt,
+	params := RotateAccessTokenParams{
+		CurrentAccessTokenHash: s.keys.HashToken(accessToken),
+		NewAccessTokenHash:     s.keys.HashToken(newAccessToken),
+		AccessExpiresAt:        accessExpiresAt,
 	}
 	if s.tx != nil {
-		return s.refreshWithTx(ctx, params, accessToken, newRefreshToken, accessExpiresAt, refreshExpiresAt, auditCtx)
+		return s.refreshWithTx(ctx, params, newAccessToken, auditCtx)
 	}
-	session, err := s.authRepo.RotateRefreshToken(ctx, params)
+	session, err := s.authRepo.RotateAccessToken(ctx, params)
 	if err != nil {
-		reason := "invalid_refresh_token"
-		if errors.Is(err, ErrRefreshTokenExpired) {
+		reason := "invalid_token"
+		if errors.Is(err, ErrSessionExpired) {
 			reason = "session_expired"
 		}
-		if errors.Is(err, ErrRefreshTokenReused) {
-			reason = "refresh_reuse"
+		if errors.Is(err, ErrAccessTokenReused) {
+			reason = "token_reuse"
 		}
 		_ = s.auditSystemFailure(ctx, "user_session_refreshed", "user_session", nil, auditCtx, map[string]any{"reason": reason})
-		if errors.Is(err, ErrRefreshTokenExpired) {
+		if errors.Is(err, ErrSessionExpired) {
 			return RefreshResult{}, ErrSessionExpired
 		}
-		return RefreshResult{}, ErrInvalidRefreshToken
+		return RefreshResult{}, ErrInvalidToken
 	}
 	user, err := s.userRepo.Get(ctx, session.UserID)
 	if err != nil || user.Status != users.StatusActive {
-		return RefreshResult{}, ErrInvalidRefreshToken
+		return RefreshResult{}, ErrInvalidToken
 	}
 	if err := s.auditUserEvent(ctx, user.ID, "user_session_refreshed", "user_session", &session.ID, auditCtx, audit.ResultSuccess, map[string]any{}); err != nil {
 		return RefreshResult{}, err
 	}
 	return RefreshResult{Tokens: Tokens{
-		AccessToken:      accessToken,
-		AccessExpiresAt:  accessExpiresAt,
-		RefreshToken:     newRefreshToken,
-		RefreshExpiresAt: refreshExpiresAt,
+		AccessToken:      newAccessToken,
+		AccessExpiresAt:  session.AccessExpiresAt,
+		SessionExpiresAt: session.SessionExpiresAt,
 	}}, nil
 }
 
@@ -921,28 +910,22 @@ func (s *Service) createSession(ctx context.Context, userID string, method AuthM
 	if err != nil {
 		return Tokens{}, Session{}, err
 	}
-	refreshToken, err := randomPrefixedToken(UserRefreshTokenPrefix)
-	if err != nil {
-		return Tokens{}, Session{}, err
-	}
 	now := time.Now().UTC()
+	sessionExpiresAt := now.Add(time.Duration(s.cfg.UserSessionTTLSeconds) * time.Second)
 	tokens := Tokens{
 		AccessToken:      accessToken,
-		AccessExpiresAt:  now.Add(time.Duration(s.cfg.UserAccessTokenTTLSeconds) * time.Second),
-		RefreshToken:     refreshToken,
-		RefreshExpiresAt: now.Add(time.Duration(s.cfg.UserRefreshTokenTTLSeconds) * time.Second),
+		AccessExpiresAt:  minTime(now.Add(time.Duration(s.cfg.UserAccessTokenTTLSeconds)*time.Second), sessionExpiresAt),
+		SessionExpiresAt: sessionExpiresAt,
 	}
 	session, err := s.authRepo.CreateSession(ctx, CreateSessionParams{
-		UserID:                userID,
-		AuthMethod:            method,
-		AccessTokenHash:       s.keys.HashToken(accessToken),
-		RefreshTokenHash:      s.keys.HashToken(refreshToken),
-		AccessExpiresAt:       tokens.AccessExpiresAt,
-		RefreshExpiresAt:      tokens.RefreshExpiresAt,
-		UserAgent:             optionalString(auditCtx.UserAgent),
-		SourceIP:              optionalString(auditCtx.SourceIP),
-		RefreshTokenIssuedAt:  now,
-		RefreshTokenExpiresAt: tokens.RefreshExpiresAt,
+		UserID:              userID,
+		AuthMethod:          method,
+		AccessTokenHash:     s.keys.HashToken(accessToken),
+		AccessExpiresAt:     tokens.AccessExpiresAt,
+		SessionExpiresAt:    tokens.SessionExpiresAt,
+		UserAgent:           optionalString(auditCtx.UserAgent),
+		SourceIP:            optionalString(auditCtx.SourceIP),
+		AccessTokenIssuedAt: now,
 	})
 	if err != nil {
 		return Tokens{}, Session{}, err
@@ -1023,7 +1006,7 @@ func (s *Service) ready() error {
 	if s == nil || s.authRepo == nil || s.userRepo == nil || s.auditRepo == nil || s.keys == nil {
 		return ErrIdentityServiceUnavailable
 	}
-	if s.cfg.UserAccessTokenTTLSeconds <= 0 || s.cfg.UserRefreshTokenTTLSeconds <= s.cfg.UserAccessTokenTTLSeconds {
+	if s.cfg.UserAccessTokenTTLSeconds <= 0 || s.cfg.UserSessionTTLSeconds <= s.cfg.UserAccessTokenTTLSeconds {
 		return ErrIdentityServiceUnavailable
 	}
 	return nil
@@ -1092,7 +1075,7 @@ func (s *Service) authorizationURL(authorizationEndpoint, state, nonce, codeVeri
 	return u.String()
 }
 
-func (s *Service) refreshWithTx(ctx context.Context, params RotateRefreshTokenParams, accessToken, refreshToken string, accessExpiresAt, refreshExpiresAt time.Time, auditCtx AuditContext) (result RefreshResult, err error) {
+func (s *Service) refreshWithTx(ctx context.Context, params RotateAccessTokenParams, accessToken string, auditCtx AuditContext) (result RefreshResult, err error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return RefreshResult{}, err
@@ -1104,32 +1087,32 @@ func (s *Service) refreshWithTx(ctx context.Context, params RotateRefreshTokenPa
 		}
 	}()
 	txAuth := NewRepository(tx)
-	session, err := txAuth.RotateRefreshToken(ctx, params)
+	session, err := txAuth.RotateAccessToken(ctx, params)
 	if err != nil {
-		if errors.Is(err, ErrRefreshTokenReused) || errors.Is(err, ErrRefreshTokenExpired) {
+		if errors.Is(err, ErrAccessTokenReused) || errors.Is(err, ErrAccessTokenExpired) || errors.Is(err, ErrSessionExpired) {
 			if commitErr := tx.Commit(ctx); commitErr != nil {
 				return RefreshResult{}, commitErr
 			}
 			commit = true
-			reason := "invalid_refresh_token"
-			if errors.Is(err, ErrRefreshTokenExpired) {
+			reason := "invalid_token"
+			if errors.Is(err, ErrSessionExpired) {
 				reason = "session_expired"
 			}
-			if errors.Is(err, ErrRefreshTokenReused) {
-				reason = "refresh_reuse"
+			if errors.Is(err, ErrAccessTokenReused) {
+				reason = "token_reuse"
 			}
 			_ = s.auditSystemFailure(ctx, "user_session_refreshed", "user_session", nil, auditCtx, map[string]any{"reason": reason})
-			if errors.Is(err, ErrRefreshTokenExpired) {
+			if errors.Is(err, ErrSessionExpired) {
 				return RefreshResult{}, ErrSessionExpired
 			}
-			return RefreshResult{}, ErrInvalidRefreshToken
+			return RefreshResult{}, ErrInvalidToken
 		}
 		return RefreshResult{}, err
 	}
 	txUsers := users.NewRepository(tx)
 	user, err := txUsers.Get(ctx, session.UserID)
 	if err != nil || user.Status != users.StatusActive {
-		return RefreshResult{}, ErrInvalidRefreshToken
+		return RefreshResult{}, ErrInvalidToken
 	}
 	txAudit := audit.NewRepository(tx)
 	txsvc := *s
@@ -1146,9 +1129,8 @@ func (s *Service) refreshWithTx(ctx context.Context, params RotateRefreshTokenPa
 	commit = true
 	return RefreshResult{Tokens: Tokens{
 		AccessToken:      accessToken,
-		AccessExpiresAt:  accessExpiresAt,
-		RefreshToken:     refreshToken,
-		RefreshExpiresAt: refreshExpiresAt,
+		AccessExpiresAt:  session.AccessExpiresAt,
+		SessionExpiresAt: session.SessionExpiresAt,
 	}}, nil
 }
 
@@ -1457,20 +1439,11 @@ func validatePresentedUserAccessToken(token string) error {
 			return ErrInvalidToken
 		}
 		return nil
-	case strings.HasPrefix(token, UserRefreshTokenPrefix):
-		return ErrRefreshTokenNotAllowed
 	case strings.HasPrefix(token, "cth_app_v1_"):
 		return ErrUserTokenRequired
 	default:
 		return ErrInvalidToken
 	}
-}
-
-func validatePresentedRefreshToken(token string) error {
-	if !strings.HasPrefix(token, UserRefreshTokenPrefix) || len(token) != len(UserRefreshTokenPrefix)+43 {
-		return ErrInvalidRefreshToken
-	}
-	return nil
 }
 
 func validatePresentedPasswordResetToken(token string) error {
@@ -1516,6 +1489,13 @@ func optionalString(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return b
+	}
+	return a
 }
 
 func totpAAD(userID string) string {

@@ -13,9 +13,9 @@ import (
 const rollbackTimeout = 5 * time.Second
 
 var (
-	ErrRefreshTokenReused  = errors.New("refresh token was already used")
-	ErrRefreshTokenExpired = errors.New("refresh token expired")
-	ErrSessionInactive     = errors.New("session is not active")
+	ErrAccessTokenReused  = errors.New("access token was already used")
+	ErrAccessTokenExpired = errors.New("access token expired")
+	ErrSessionInactive    = errors.New("session is not active")
 )
 
 type AuthMethod string
@@ -38,20 +38,22 @@ const (
 	SessionRevokedLogout           SessionRevokedReason = "logout"
 	SessionRevokedDisabledUser     SessionRevokedReason = "disabled_user"
 	SessionRevokedRefreshReuse     SessionRevokedReason = "refresh_reuse"
+	SessionRevokedTokenReuse       SessionRevokedReason = "token_reuse"
 	SessionRevokedAdminAction      SessionRevokedReason = "admin_action"
 	SessionRevokedExpired          SessionRevokedReason = "expired"
 	SessionRevokedPasswordReset    SessionRevokedReason = "password_reset"
 	SessionRevokedPassword2FAReset SessionRevokedReason = "password_2fa_reset"
+	SessionRevokedAuthModel        SessionRevokedReason = "auth_model_migration"
 )
 
-type RefreshTokenStatus string
+type SessionTokenStatus string
 
 const (
-	RefreshTokenStatusActive  RefreshTokenStatus = "active"
-	RefreshTokenStatusRotated RefreshTokenStatus = "rotated"
-	RefreshTokenStatusRevoked RefreshTokenStatus = "revoked"
-	RefreshTokenStatusReused  RefreshTokenStatus = "reused"
-	RefreshTokenStatusExpired RefreshTokenStatus = "expired"
+	SessionTokenStatusActive  SessionTokenStatus = "active"
+	SessionTokenStatusRotated SessionTokenStatus = "rotated"
+	SessionTokenStatusRevoked SessionTokenStatus = "revoked"
+	SessionTokenStatusReused  SessionTokenStatus = "reused"
+	SessionTokenStatusExpired SessionTokenStatus = "expired"
 )
 
 type HandoffStatus string
@@ -76,11 +78,10 @@ type Session struct {
 	UserID           string
 	AuthMethod       AuthMethod
 	AccessTokenHash  string
-	RefreshTokenHash string
 	Status           SessionStatus
 	CreatedAt        time.Time
 	AccessExpiresAt  time.Time
-	RefreshExpiresAt time.Time
+	SessionExpiresAt time.Time
 	LastRefreshedAt  *time.Time
 	LastUsedAt       *time.Time
 	RevokedAt        *time.Time
@@ -89,15 +90,15 @@ type Session struct {
 	SourceIP         *string
 }
 
-type RefreshToken struct {
-	ID               string
-	UserSessionID    string
-	RefreshTokenHash string
-	Status           RefreshTokenStatus
-	IssuedAt         time.Time
-	ExpiresAt        time.Time
-	RotatedAt        *time.Time
-	LastSeenAt       *time.Time
+type SessionToken struct {
+	ID              string
+	UserSessionID   string
+	AccessTokenHash string
+	Status          SessionTokenStatus
+	IssuedAt        time.Time
+	AccessExpiresAt time.Time
+	RotatedAt       *time.Time
+	LastSeenAt      *time.Time
 }
 
 type OIDCLoginState struct {
@@ -161,26 +162,22 @@ func NewRepository(db storage.DBTX) Repository {
 }
 
 type CreateSessionParams struct {
-	ID                    string
-	RefreshHistoryID      string
-	UserID                string
-	AuthMethod            AuthMethod
-	AccessTokenHash       string
-	RefreshTokenHash      string
-	AccessExpiresAt       time.Time
-	RefreshExpiresAt      time.Time
-	UserAgent             *string
-	SourceIP              *string
-	RefreshTokenIssuedAt  time.Time
-	RefreshTokenExpiresAt time.Time
+	ID                  string
+	TokenHistoryID      string
+	UserID              string
+	AuthMethod          AuthMethod
+	AccessTokenHash     string
+	AccessExpiresAt     time.Time
+	SessionExpiresAt    time.Time
+	UserAgent           *string
+	SourceIP            *string
+	AccessTokenIssuedAt time.Time
 }
 
-type RotateRefreshTokenParams struct {
-	CurrentRefreshTokenHash string
-	NewAccessTokenHash      string
-	NewRefreshTokenHash     string
-	AccessExpiresAt         time.Time
-	RefreshExpiresAt        time.Time
+type RotateAccessTokenParams struct {
+	CurrentAccessTokenHash string
+	NewAccessTokenHash     string
+	AccessExpiresAt        time.Time
 }
 
 type CreateOIDCStateParams struct {
@@ -249,42 +246,39 @@ func CreateSessionTx(ctx context.Context, db storage.DBTX, params CreateSessionP
 		}
 		params.ID = id
 	}
-	if params.RefreshHistoryID == "" {
+	if params.TokenHistoryID == "" {
 		id, err := storage.NewUUID()
 		if err != nil {
 			return Session{}, err
 		}
-		params.RefreshHistoryID = id
+		params.TokenHistoryID = id
 	}
-	if params.RefreshTokenIssuedAt.IsZero() {
-		params.RefreshTokenIssuedAt = time.Now().UTC()
-	}
-	if params.RefreshTokenExpiresAt.IsZero() {
-		params.RefreshTokenExpiresAt = params.RefreshExpiresAt
+	if params.AccessTokenIssuedAt.IsZero() {
+		params.AccessTokenIssuedAt = time.Now().UTC()
 	}
 	if err := validateCreateSession(params); err != nil {
 		return Session{}, err
 	}
 	session, err := scanSession(db.QueryRow(ctx, `
 insert into user_sessions (
-    id, user_id, auth_method, access_token_hash, refresh_token_hash,
-    access_expires_at, refresh_expires_at, user_agent, source_ip
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-returning id, user_id, auth_method, access_token_hash, refresh_token_hash,
-    status, created_at, access_expires_at, refresh_expires_at,
+    id, user_id, auth_method, access_token_hash,
+    access_expires_at, session_expires_at, user_agent, source_ip
+) values ($1, $2, $3, $4, $5, $6, $7, $8)
+returning id, user_id, auth_method, access_token_hash,
+    status, created_at, access_expires_at, session_expires_at,
     last_refreshed_at, last_used_at, revoked_at, revoked_reason, user_agent, source_ip`,
-		params.ID, params.UserID, string(params.AuthMethod), params.AccessTokenHash, params.RefreshTokenHash,
-		params.AccessExpiresAt, params.RefreshExpiresAt, params.UserAgent, params.SourceIP))
+		params.ID, params.UserID, string(params.AuthMethod), params.AccessTokenHash,
+		params.AccessExpiresAt, params.SessionExpiresAt, params.UserAgent, params.SourceIP))
 	if err != nil {
 		return Session{}, fmt.Errorf("create user session: %w", err)
 	}
 	_, err = db.Exec(ctx, `
-insert into user_session_refresh_tokens (
-    id, user_session_id, refresh_token_hash, status, issued_at, expires_at
+insert into user_session_token_history (
+    id, user_session_id, access_token_hash, status, issued_at, access_expires_at
 ) values ($1, $2, $3, 'active', $4, $5)`,
-		params.RefreshHistoryID, params.ID, params.RefreshTokenHash, params.RefreshTokenIssuedAt, params.RefreshTokenExpiresAt)
+		params.TokenHistoryID, params.ID, params.AccessTokenHash, params.AccessTokenIssuedAt, params.AccessExpiresAt)
 	if err != nil {
-		return Session{}, fmt.Errorf("create refresh token history: %w", err)
+		return Session{}, fmt.Errorf("create session token history: %w", err)
 	}
 	return session, nil
 }
@@ -336,13 +330,13 @@ where id = $1
 		return false, nil
 	}
 	_, err = r.db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = case when status = 'active' then 'revoked' else status end,
     last_seen_at = coalesce(last_seen_at, now())
 where user_session_id = $1
   and status = 'active'`, sessionID)
 	if err != nil {
-		return false, fmt.Errorf("revoke refresh token history: %w", err)
+		return false, fmt.Errorf("revoke session token history: %w", err)
 	}
 	return true, nil
 }
@@ -382,12 +376,12 @@ returning id`, userID, string(reason))
 	}
 	for _, id := range sessionIDs {
 		if _, err := r.db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = case when status = 'active' then 'revoked' else status end,
     last_seen_at = coalesce(last_seen_at, now())
 where user_session_id = $1
   and status = 'active'`, id); err != nil {
-			return 0, fmt.Errorf("revoke user refresh token history: %w", err)
+			return 0, fmt.Errorf("revoke user session token history: %w", err)
 		}
 	}
 	return int64(len(sessionIDs)), nil
@@ -536,18 +530,18 @@ returning id, setup_hash, user_id, pending_totp_secret_encrypted,
 	return setup, nil
 }
 
-func (r Repository) RotateRefreshToken(ctx context.Context, params RotateRefreshTokenParams) (Session, error) {
+func (r Repository) RotateAccessToken(ctx context.Context, params RotateAccessTokenParams) (Session, error) {
 	beginner, ok := r.db.(storage.Beginner)
 	if !ok {
-		return RotateRefreshTokenTx(ctx, r.db, params)
+		return RotateAccessTokenTx(ctx, r.db, params)
 	}
 	tx, err := beginner.Begin(ctx)
 	if err != nil {
 		return Session{}, err
 	}
-	session, err := RotateRefreshTokenTx(ctx, tx, params)
+	session, err := RotateAccessTokenTx(ctx, tx, params)
 	if err != nil {
-		if errors.Is(err, ErrRefreshTokenReused) || errors.Is(err, ErrRefreshTokenExpired) {
+		if errors.Is(err, ErrAccessTokenReused) || errors.Is(err, ErrAccessTokenExpired) || errors.Is(err, ErrSessionExpired) {
 			if commitErr := tx.Commit(ctx); commitErr != nil {
 				return Session{}, commitErr
 			}
@@ -562,85 +556,86 @@ func (r Repository) RotateRefreshToken(ctx context.Context, params RotateRefresh
 	return session, nil
 }
 
-func RotateRefreshTokenTx(ctx context.Context, db storage.DBTX, params RotateRefreshTokenParams) (Session, error) {
-	if err := validateRotateRefresh(params); err != nil {
+func RotateAccessTokenTx(ctx context.Context, db storage.DBTX, params RotateAccessTokenParams) (Session, error) {
+	if err := validateRotateAccess(params); err != nil {
 		return Session{}, err
 	}
-	refresh, err := scanRefreshToken(db.QueryRow(ctx, refreshTokenSelectSQL()+` where refresh_token_hash = $1 for update`, params.CurrentRefreshTokenHash))
+	token, err := scanSessionToken(db.QueryRow(ctx, sessionTokenSelectSQL()+` where access_token_hash = $1 for update`, params.CurrentAccessTokenHash))
 	if err != nil {
-		return Session{}, fmt.Errorf("lookup refresh token: %w", err)
+		return Session{}, fmt.Errorf("lookup session token: %w", err)
 	}
-	if refresh.Status != RefreshTokenStatusActive {
-		if err := markRefreshReuse(ctx, db, refresh.UserSessionID, refresh.ID); err != nil {
-			return Session{}, fmt.Errorf("mark refresh token reuse: %w", err)
+	if token.Status != SessionTokenStatusActive {
+		if err := markTokenReuse(ctx, db, token.UserSessionID, token.ID); err != nil {
+			return Session{}, fmt.Errorf("mark session token reuse: %w", err)
 		}
-		return Session{}, ErrRefreshTokenReused
+		return Session{}, ErrAccessTokenReused
 	}
 	now := time.Now().UTC()
-	if !refresh.ExpiresAt.After(now) {
-		_, _ = db.Exec(ctx, `
-update user_session_refresh_tokens
-set status = 'expired',
-    last_seen_at = now()
-where id = $1
-  and status = 'active'`, refresh.ID)
-		return Session{}, ErrRefreshTokenExpired
-	}
-	session, err := scanSession(db.QueryRow(ctx, sessionSelectSQL()+` where id = $1 for update`, refresh.UserSessionID))
+	session, err := scanSession(db.QueryRow(ctx, sessionSelectSQL()+` where id = $1 for update`, token.UserSessionID))
 	if err != nil {
 		return Session{}, fmt.Errorf("lock user session: %w", err)
 	}
-	if session.Status != SessionStatusActive || session.RefreshTokenHash != params.CurrentRefreshTokenHash {
-		if err := markRefreshReuse(ctx, db, refresh.UserSessionID, refresh.ID); err != nil {
-			return Session{}, fmt.Errorf("mark refresh token reuse: %w", err)
+	if session.Status != SessionStatusActive || session.AccessTokenHash != params.CurrentAccessTokenHash {
+		if err := markTokenReuse(ctx, db, token.UserSessionID, token.ID); err != nil {
+			return Session{}, fmt.Errorf("mark session token reuse: %w", err)
 		}
-		return Session{}, ErrRefreshTokenReused
+		return Session{}, ErrAccessTokenReused
 	}
-	if !session.RefreshExpiresAt.After(now) {
+	if !session.SessionExpiresAt.After(now) {
 		_, _ = db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = 'expired',
     last_seen_at = now()
 where id = $1
-  and status = 'active'`, refresh.ID)
-		return Session{}, ErrRefreshTokenExpired
+  and status = 'active'`, token.ID)
+		return Session{}, ErrSessionExpired
+	}
+	if !token.AccessExpiresAt.After(now) || !session.AccessExpiresAt.After(now) {
+		_, _ = db.Exec(ctx, `
+update user_session_token_history
+set status = 'expired',
+    last_seen_at = now()
+where id = $1
+  and status = 'active'`, token.ID)
+		return Session{}, ErrAccessTokenExpired
+	}
+	newAccessExpiresAt := params.AccessExpiresAt
+	if newAccessExpiresAt.After(session.SessionExpiresAt) {
+		newAccessExpiresAt = session.SessionExpiresAt
 	}
 	if _, err := db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = 'rotated',
     rotated_at = now(),
     last_seen_at = now()
 where id = $1
-  and status = 'active'`, refresh.ID); err != nil {
-		return Session{}, fmt.Errorf("rotate old refresh token: %w", err)
+  and status = 'active'`, token.ID); err != nil {
+		return Session{}, fmt.Errorf("rotate old session token: %w", err)
 	}
-	newRefreshID, err := storage.NewUUID()
+	newTokenID, err := storage.NewUUID()
 	if err != nil {
 		return Session{}, err
 	}
 	if _, err := db.Exec(ctx, `
-insert into user_session_refresh_tokens (
-    id, user_session_id, refresh_token_hash, status, issued_at, expires_at
+insert into user_session_token_history (
+    id, user_session_id, access_token_hash, status, issued_at, access_expires_at
 ) values ($1, $2, $3, 'active', now(), $4)`,
-		newRefreshID, refresh.UserSessionID, params.NewRefreshTokenHash, params.RefreshExpiresAt); err != nil {
-		return Session{}, fmt.Errorf("insert new refresh token: %w", err)
+		newTokenID, token.UserSessionID, params.NewAccessTokenHash, newAccessExpiresAt); err != nil {
+		return Session{}, fmt.Errorf("insert new session token: %w", err)
 	}
 	rotated, err := scanSession(db.QueryRow(ctx, `
 update user_sessions
 set access_token_hash = $2,
-    refresh_token_hash = $3,
-    access_expires_at = $4,
-    refresh_expires_at = $5,
+    access_expires_at = $3,
     last_refreshed_at = now()
 where id = $1
   and status = 'active'
-returning id, user_id, auth_method, access_token_hash, refresh_token_hash,
-    status, created_at, access_expires_at, refresh_expires_at,
+returning id, user_id, auth_method, access_token_hash,
+    status, created_at, access_expires_at, session_expires_at,
     last_refreshed_at, last_used_at, revoked_at, revoked_reason, user_agent, source_ip`,
-		refresh.UserSessionID, params.NewAccessTokenHash, params.NewRefreshTokenHash,
-		params.AccessExpiresAt, params.RefreshExpiresAt))
+		token.UserSessionID, params.NewAccessTokenHash, newAccessExpiresAt))
 	if err != nil {
-		return Session{}, fmt.Errorf("update user session refresh token: %w", err)
+		return Session{}, fmt.Errorf("update user session access token: %w", err)
 	}
 	return rotated, nil
 }
@@ -739,16 +734,16 @@ returning id, handoff_hash, user_id, oidc_login_state_id,
 }
 
 func sessionSelectSQL() string {
-	return `select id, user_id, auth_method, access_token_hash, refresh_token_hash,
-    status, created_at, access_expires_at, refresh_expires_at,
+	return `select id, user_id, auth_method, access_token_hash,
+    status, created_at, access_expires_at, session_expires_at,
     last_refreshed_at, last_used_at, revoked_at, revoked_reason, user_agent, source_ip
 from user_sessions`
 }
 
-func refreshTokenSelectSQL() string {
-	return `select id, user_session_id, refresh_token_hash, status,
-    issued_at, expires_at, rotated_at, last_seen_at
-from user_session_refresh_tokens`
+func sessionTokenSelectSQL() string {
+	return `select id, user_session_id, access_token_hash, status,
+    issued_at, access_expires_at, rotated_at, last_seen_at
+from user_session_token_history`
 }
 
 func passwordResetSelectSQL() string {
@@ -773,11 +768,10 @@ func scanSession(row scanner) (Session, error) {
 		&session.UserID,
 		&authMethod,
 		&session.AccessTokenHash,
-		&session.RefreshTokenHash,
 		&status,
 		&session.CreatedAt,
 		&session.AccessExpiresAt,
-		&session.RefreshExpiresAt,
+		&session.SessionExpiresAt,
 		&lastRefreshedAt,
 		&lastUsedAt,
 		&revokedAt,
@@ -801,23 +795,23 @@ func scanSession(row scanner) (Session, error) {
 	return session, nil
 }
 
-func scanRefreshToken(row scanner) (RefreshToken, error) {
-	var token RefreshToken
+func scanSessionToken(row scanner) (SessionToken, error) {
+	var token SessionToken
 	var status string
 	var rotatedAt, lastSeenAt sql.NullTime
 	if err := row.Scan(
 		&token.ID,
 		&token.UserSessionID,
-		&token.RefreshTokenHash,
+		&token.AccessTokenHash,
 		&status,
 		&token.IssuedAt,
-		&token.ExpiresAt,
+		&token.AccessExpiresAt,
 		&rotatedAt,
 		&lastSeenAt,
 	); err != nil {
-		return RefreshToken{}, err
+		return SessionToken{}, err
 	}
-	token.Status = RefreshTokenStatus(status)
+	token.Status = SessionTokenStatus(status)
 	token.RotatedAt = timePtr(rotatedAt)
 	token.LastSeenAt = timePtr(lastSeenAt)
 	return token, nil
@@ -929,28 +923,28 @@ type scanner interface {
 	Scan(...any) error
 }
 
-func markRefreshReuse(ctx context.Context, db storage.DBTX, sessionID, refreshTokenID string) error {
+func markTokenReuse(ctx context.Context, db storage.DBTX, sessionID, tokenID string) error {
 	if _, err := db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = 'reused',
     last_seen_at = now()
-where id = $1`, refreshTokenID); err != nil {
+where id = $1`, tokenID); err != nil {
 		return err
 	}
 	if _, err := db.Exec(ctx, `
-update user_session_refresh_tokens
+update user_session_token_history
 set status = 'revoked',
     last_seen_at = coalesce(last_seen_at, now())
 where user_session_id = $1
   and id <> $2
-  and status = 'active'`, sessionID, refreshTokenID); err != nil {
+  and status = 'active'`, sessionID, tokenID); err != nil {
 		return err
 	}
 	_, err := db.Exec(ctx, `
 update user_sessions
 set status = 'revoked',
     revoked_at = coalesce(revoked_at, now()),
-    revoked_reason = coalesce(revoked_reason, 'refresh_reuse')
+    revoked_reason = coalesce(revoked_reason, 'token_reuse')
 where id = $1
   and status = 'active'`, sessionID)
 	return err
@@ -960,7 +954,7 @@ func validateCreateSession(params CreateSessionParams) error {
 	if err := storage.ValidateUUID(params.ID, "session_id"); err != nil {
 		return err
 	}
-	if err := storage.ValidateUUID(params.RefreshHistoryID, "refresh_history_id"); err != nil {
+	if err := storage.ValidateUUID(params.TokenHistoryID, "token_history_id"); err != nil {
 		return err
 	}
 	if err := storage.ValidateUUID(params.UserID, "user_id"); err != nil {
@@ -972,14 +966,11 @@ func validateCreateSession(params CreateSessionParams) error {
 	if err := storage.ValidateTokenHash(params.AccessTokenHash, "access_token_hash"); err != nil {
 		return err
 	}
-	if err := storage.ValidateTokenHash(params.RefreshTokenHash, "refresh_token_hash"); err != nil {
-		return err
+	if params.AccessExpiresAt.IsZero() || params.SessionExpiresAt.IsZero() || !params.SessionExpiresAt.After(params.AccessExpiresAt) {
+		return errors.New("session_expires_at must be after access_expires_at")
 	}
-	if params.AccessExpiresAt.IsZero() || params.RefreshExpiresAt.IsZero() || !params.RefreshExpiresAt.After(params.AccessExpiresAt) {
-		return errors.New("refresh_expires_at must be after access_expires_at")
-	}
-	if !params.RefreshTokenExpiresAt.After(params.RefreshTokenIssuedAt) {
-		return errors.New("refresh token history expiry must be after issued_at")
+	if !params.AccessExpiresAt.After(params.AccessTokenIssuedAt) {
+		return errors.New("access token history expiry must be after issued_at")
 	}
 	if err := storage.ValidateOptionalHumanString(params.UserAgent, "user_agent", 1024); err != nil {
 		return err
@@ -990,18 +981,15 @@ func validateCreateSession(params CreateSessionParams) error {
 	return nil
 }
 
-func validateRotateRefresh(params RotateRefreshTokenParams) error {
-	if err := storage.ValidateTokenHash(params.CurrentRefreshTokenHash, "refresh_token_hash"); err != nil {
+func validateRotateAccess(params RotateAccessTokenParams) error {
+	if err := storage.ValidateTokenHash(params.CurrentAccessTokenHash, "current_access_token_hash"); err != nil {
 		return err
 	}
 	if err := storage.ValidateTokenHash(params.NewAccessTokenHash, "access_token_hash"); err != nil {
 		return err
 	}
-	if err := storage.ValidateTokenHash(params.NewRefreshTokenHash, "new_refresh_token_hash"); err != nil {
-		return err
-	}
-	if params.AccessExpiresAt.IsZero() || params.RefreshExpiresAt.IsZero() || !params.RefreshExpiresAt.After(params.AccessExpiresAt) {
-		return errors.New("refresh_expires_at must be after access_expires_at")
+	if params.AccessExpiresAt.IsZero() {
+		return errors.New("access_expires_at is required")
 	}
 	return nil
 }

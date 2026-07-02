@@ -18,7 +18,7 @@ func TestCreateUserRequiresProvisioningWhenPassword2FARequired(t *testing.T) {
 		Repository:      &serviceFakeStore{},
 		AuditRepository: &serviceFakeAudit{},
 		KeySet:          serviceTestKeySet(t),
-		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserRefreshTokenTTLSeconds: 3600},
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserSessionTTLSeconds: 3600},
 	})
 	password := "correct horse battery staple"
 	_, err := service.CreateUser(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleAdmin}, CreateUserServiceParams{
@@ -174,7 +174,7 @@ func TestLookupUserNonAdminRequiresApplicationManagerGrant(t *testing.T) {
 		Repository:      &serviceFakeStore{},
 		AuditRepository: &serviceFakeAudit{},
 		KeySet:          serviceTestKeySet(t),
-		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserRefreshTokenTTLSeconds: 3600},
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserSessionTTLSeconds: 3600},
 	})
 	appID := "22345678-1234-4234-9234-123456789abc"
 	_, err := service.LookupUser(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleUser}, "user@example.com", &appID)
@@ -195,7 +195,7 @@ func TestLookupUserNonAdminManagerCanLookupActiveUserForApplication(t *testing.T
 		AuditRepository: &serviceFakeAudit{},
 		GrantReader:     serviceFakeGrantReader{canManage: true, role: "manager"},
 		KeySet:          serviceTestKeySet(t),
-		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserRefreshTokenTTLSeconds: 3600},
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}, UserAccessTokenTTLSeconds: 300, UserSessionTTLSeconds: 3600},
 	})
 	appID := "22345678-1234-4234-9234-123456789abc"
 	result, err := service.LookupUser(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleUser}, "user@example.com", &appID)

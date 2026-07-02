@@ -213,7 +213,7 @@ func exitCodeForError(err error) int {
 	switch apiErr.Envelope.Code {
 	case certerrors.CodeInvalidRequest, "invalid_domain", "not_acceptable":
 		return ExitInvalidArguments
-	case certerrors.CodeInvalidToken, "invalid_credentials", "session_expired", certerrors.CodeRefreshTokenNotAllowed:
+	case certerrors.CodeInvalidToken, "invalid_credentials", "session_expired":
 		return ExitAuthFailed
 	case certerrors.CodeApplicationTokenRequired, certerrors.CodeUserTokenRequired, "application_access_denied", "application_source_ip_denied", "domain_not_authorized":
 		return ExitForbidden

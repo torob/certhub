@@ -30,9 +30,9 @@ type Identity = components["schemas"]["UserIdentity"] | components["schemas"]["A
 
 type Session = {
   accessToken: string;
-  refreshToken: string;
+  accessIssuedAt?: string;
   accessExpiresAt?: string;
-  refreshExpiresAt?: string;
+  sessionExpiresAt?: string;
   identity?: Identity;
 };
 
@@ -82,6 +82,7 @@ const queryClient = new QueryClient();
 const sessionKey = "certhub.session.v1";
 const authExpiredEvent = "certhub-auth-expired";
 const accessRefreshSkewMs = 60_000;
+const minAccessRefreshLeadMs = 1_000;
 const toastLimit = 4;
 const toastVisibleMs = 6_000;
 const toastFadeMs = 3_000;
@@ -240,9 +241,36 @@ function parseExpiresAt(value?: string): number | undefined {
   return Number.isFinite(expiresAt) ? expiresAt : undefined;
 }
 
-function shouldRefreshAccess(session: Session): boolean {
+function accessRefreshDelayMs(session: Session): number | undefined {
   const expiresAt = parseExpiresAt(session.accessExpiresAt);
-  return expiresAt !== undefined && expiresAt <= Date.now() + accessRefreshSkewMs;
+  if (expiresAt === undefined) return undefined;
+  if (isAccessCappedBySession(session)) return undefined;
+  const now = Date.now();
+  const issuedAt = parseExpiresAt(session.accessIssuedAt);
+  const lifetime = issuedAt !== undefined && expiresAt > issuedAt ? expiresAt - issuedAt : expiresAt - now;
+  const lead = Math.min(accessRefreshSkewMs, Math.max(minAccessRefreshLeadMs, Math.floor(lifetime * 0.2)));
+  return expiresAt - now - lead;
+}
+
+function isAccessCappedBySession(session: Session): boolean {
+  const accessExpiresAt = parseExpiresAt(session.accessExpiresAt);
+  const sessionExpiresAt = parseExpiresAt(session.sessionExpiresAt);
+  return accessExpiresAt !== undefined && sessionExpiresAt !== undefined && accessExpiresAt >= sessionExpiresAt - 1_000;
+}
+
+function shouldRefreshAccess(session: Session): boolean {
+  const delay = accessRefreshDelayMs(session);
+  return delay !== undefined && delay <= 0 && !isAccessExpired(session) && !isSessionExpired(session);
+}
+
+function isAccessExpired(session: Session): boolean {
+  const expiresAt = parseExpiresAt(session.accessExpiresAt);
+  return expiresAt !== undefined && expiresAt <= Date.now();
+}
+
+function isSessionExpired(session: Session): boolean {
+  const expiresAt = parseExpiresAt(session.sessionExpiresAt);
+  return expiresAt !== undefined && expiresAt <= Date.now();
 }
 
 function isRefreshableRequest(pathname: string): boolean {
@@ -254,53 +282,66 @@ function isRefreshableRequest(pathname: string): boolean {
   ].includes(pathname);
 }
 
-function copyLatestTokens(session: Session) {
-  const latest = loadSession();
-  if (!latest?.accessToken || !latest.refreshToken) return;
-  session.accessToken = latest.accessToken;
-  session.refreshToken = latest.refreshToken;
-  session.accessExpiresAt = latest.accessExpiresAt;
-  session.refreshExpiresAt = latest.refreshExpiresAt;
+function copyLatestSession(session: Session) {
+	const latest = loadSession();
+	if (!latest?.accessToken) return;
+	session.accessToken = latest.accessToken;
+	session.accessIssuedAt = latest.accessIssuedAt;
+	session.accessExpiresAt = latest.accessExpiresAt;
+	session.sessionExpiresAt = latest.sessionExpiresAt;
+	session.identity = latest.identity || session.identity;
 }
 
 async function performRefreshSession(session: Session): Promise<boolean> {
-  if (!session.refreshToken) return false;
-  const result = await api<{
-    access_token: string;
+	const latest = loadSession();
+	if (latest?.accessToken && latest.accessToken !== session.accessToken) {
+		copyLatestSession(session);
+		if (!isAccessExpired(session) && !isSessionExpired(session)) return true;
+	}
+	if (!session.accessToken || isAccessExpired(session) || isSessionExpired(session)) {
+		clearSession(true);
+		return false;
+	}
+	const result = await api<{
+		access_token: string;
     access_expires_at?: string;
-    refresh_token: string;
-    refresh_expires_at?: string;
+    session_expires_at?: string;
   }>("/v1/auth/refresh", undefined, {
     method: "POST",
-    body: JSON.stringify({ refresh_token: session.refreshToken })
+    body: JSON.stringify({ access_token: session.accessToken })
   }, false);
   if (!result.data) {
-    clearSession(true);
-    return false;
-  }
-  session.accessToken = result.data.access_token;
-  session.refreshToken = result.data.refresh_token;
-  session.accessExpiresAt = result.data.access_expires_at;
-  session.refreshExpiresAt = result.data.refresh_expires_at;
-  saveSession(session);
-  return true;
+		clearSession(true);
+		return false;
+	}
+	const preservedIdentity = loadSession()?.identity || session.identity;
+	session.accessToken = result.data.access_token;
+	session.accessIssuedAt = new Date().toISOString();
+	session.accessExpiresAt = result.data.access_expires_at;
+	session.sessionExpiresAt = result.data.session_expires_at;
+	session.identity = preservedIdentity;
+	saveSession(session);
+	return true;
 }
 
 async function refreshSession(session: Session): Promise<boolean> {
-  if (!session.refreshToken) return false;
+  if (!session.accessToken || isAccessExpired(session) || isSessionExpired(session)) {
+    clearSession(true);
+    return false;
+  }
   if (!refreshInFlight) {
     refreshInFlight = performRefreshSession(session).finally(() => {
       refreshInFlight = undefined;
     });
   }
-  try {
-    const refreshed = await refreshInFlight;
-    if (refreshed) copyLatestTokens(session);
-    return refreshed;
-  } catch {
-    clearSession(true);
-    return false;
-  }
+	try {
+		const refreshed = await refreshInFlight;
+		if (refreshed) copyLatestSession(session);
+		return refreshed;
+	} catch {
+		clearSession(true);
+		return false;
+	}
 }
 
 async function api<T>(path: string, session: Session | undefined, init: RequestInit = {}, allowRefresh = true): Promise<APIResult<T>> {
@@ -308,7 +349,7 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   if (url.origin !== window.location.origin) return clientError("cross-origin API requests are blocked");
   const rid = requestID();
   const requestPath = `${url.pathname}${url.search}`;
-  const canRefresh = Boolean(allowRefresh && session?.refreshToken && isRefreshableRequest(url.pathname));
+  const canRefresh = Boolean(allowRefresh && session?.accessToken && isRefreshableRequest(url.pathname));
   if (canRefresh && session && shouldRefreshAccess(session)) {
     const refreshed = await refreshSession(session);
     if (!refreshed) return authExpiredResult(rid);
@@ -324,7 +365,7 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   } catch (err) {
     return clientError(`network error: ${(err as Error).message}`, true);
   }
-  if (response.status === 401 && canRefresh && session) {
+  if (response.status === 401 && canRefresh && session && !isAccessExpired(session) && !isSessionExpired(session)) {
     const refreshed = await refreshSession(session);
     if (refreshed) return api<T>(path, session, init, false);
   }
@@ -430,28 +471,41 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (!session?.refreshToken) return;
-    const expiresAt = parseExpiresAt(session.accessExpiresAt);
-    if (expiresAt === undefined) return;
+    if (!session?.accessToken) return;
+    if (isAccessExpired(session) || isSessionExpired(session)) {
+      clearSession(true);
+      setSession(undefined);
+      return;
+    }
+    const sessionExpiresAt = parseExpiresAt(session.sessionExpiresAt);
+    const cappedBySession = isAccessCappedBySession(session);
+    const refreshDelay = accessRefreshDelayMs(session);
+    const delay = cappedBySession && sessionExpiresAt !== undefined ? sessionExpiresAt - Date.now() : refreshDelay;
+    if (delay === undefined) return;
     let canceled = false;
     const timeout = window.setTimeout(() => {
+      if (cappedBySession) {
+        clearSession(true);
+        setSession(undefined);
+        return;
+      }
       refreshSession(session).then((refreshed) => {
         if (canceled) return;
         if (!refreshed) return;
         const latest = loadSession();
         if (latest?.accessToken) setSession(latest);
       });
-    }, Math.max(0, expiresAt - Date.now() - accessRefreshSkewMs));
+    }, Math.max(0, delay));
     return () => {
       canceled = true;
       window.clearTimeout(timeout);
     };
-  }, [session?.accessExpiresAt, session?.accessToken, session?.refreshToken]);
+  }, [session?.accessExpiresAt, session?.accessToken, session?.sessionExpiresAt]);
 
   useEffect(() => {
-    if (!session?.accessToken) return;
+    if (!session?.accessToken || session.identity) return;
     void refreshIdentity();
-  }, [session?.accessToken]);
+  }, [session?.accessToken, session?.identity]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -459,12 +513,12 @@ function AppShell() {
     if (!handoff) return;
     url.search = "";
     window.history.replaceState({}, "", url);
-    api<{ access_token: string; access_expires_at?: string; refresh_token: string; refresh_expires_at?: string }>("/v1/auth/oidc/handoff", undefined, {
+    api<{ access_token: string; access_expires_at?: string; session_expires_at?: string }>("/v1/auth/oidc/handoff", undefined, {
       method: "POST",
       body: JSON.stringify({ handoff_id: handoff })
     }).then((result) => {
       if (result.data) {
-        const next = { accessToken: result.data.access_token, refreshToken: result.data.refresh_token, accessExpiresAt: result.data.access_expires_at, refreshExpiresAt: result.data.refresh_expires_at };
+        const next = { accessToken: result.data.access_token, accessIssuedAt: new Date().toISOString(), accessExpiresAt: result.data.access_expires_at, sessionExpiresAt: result.data.session_expires_at };
         saveSession(next);
         setSession(next);
       } else {
@@ -473,9 +527,10 @@ function AppShell() {
     });
   }, []);
 
-  useEffect(() => {
-    if (!visibleNav.some(([id]) => id === route.page)) navigate("/", true);
-  }, [session?.identity, route.page]);
+	useEffect(() => {
+		if (!session?.identity) return;
+		if (!visibleNav.some(([id]) => id === route.page)) navigate("/", true);
+	}, [session?.identity, route.page]);
 
   if (!session?.accessToken) {
     if (route.signup) return createElement(PublicSignupPage, { route, navigate, onDone: setLoginNotice });
@@ -558,7 +613,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   const showOIDCLogin = oidcLoginEnabled();
   useEffect(() => setError(props.notice), [props.notice]);
   function storeLogin(data: any) {
-    const session = { accessToken: data.access_token, refreshToken: data.refresh_token, accessExpiresAt: data.access_expires_at, refreshExpiresAt: data.refresh_expires_at };
+    const session = { accessToken: data.access_token, accessIssuedAt: new Date().toISOString(), accessExpiresAt: data.access_expires_at, sessionExpiresAt: data.session_expires_at };
     saveSession(session);
     props.onLogin(session);
   }

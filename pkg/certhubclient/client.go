@@ -20,7 +20,6 @@ import (
 const (
 	ApplicationTokenPrefix = "cth_app_v1_"
 	UserAccessTokenPrefix  = "cth_uat_v1_"
-	UserRefreshTokenPrefix = "cth_urt_v1_"
 )
 
 var tokenSecretPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
@@ -31,7 +30,6 @@ const (
 	TokenClassUnknown     TokenClass = "unknown"
 	TokenClassApplication TokenClass = "application"
 	TokenClassUserAccess  TokenClass = "user_access"
-	TokenClassUserRefresh TokenClass = "user_refresh"
 )
 
 type CertificateCriteria struct {
@@ -134,8 +132,6 @@ func ClassifyToken(token string) TokenClass {
 		return TokenClassApplication
 	case strings.HasPrefix(token, UserAccessTokenPrefix):
 		return TokenClassUserAccess
-	case strings.HasPrefix(token, UserRefreshTokenPrefix):
-		return TokenClassUserRefresh
 	default:
 		return TokenClassUnknown
 	}
@@ -152,8 +148,6 @@ func ValidateApplicationToken(token string) error {
 		return nil
 	case TokenClassUserAccess:
 		return certerrors.NewLocal(certerrors.CodeApplicationTokenRequired, "User access tokens are not accepted by sync clients.")
-	case TokenClassUserRefresh:
-		return certerrors.NewLocal(certerrors.CodeRefreshTokenNotAllowed, "Refresh tokens are not accepted by sync clients.")
 	default:
 		if token == "" {
 			return certerrors.NewLocal(certerrors.CodeApplicationTokenRequired, "Application token is required.")
