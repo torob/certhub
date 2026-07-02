@@ -187,6 +187,7 @@ auth:
     allowed_return_urls: []
   user_access_token_ttl_seconds: 300
   user_refresh_token_ttl_seconds: 28800
+  password_reset_ttl_seconds: 3600
 application_tokens:
   default_ttl_seconds: 7776000
   max_ttl_seconds: 31536000
@@ -1120,10 +1121,10 @@ Description and notes:
 
 - Used by web password login.
 - Requires `auth.password.enabled=true`.
-- Creates a User login session.
-- Returns a short-lived User access token and longer-lived refresh token.
+- Creates a User login session only after required TOTP is satisfied.
+- Returns a short-lived User access token and longer-lived refresh token, or `password_2fa_setup_required` with a one-time setup token and TOTP provisioning payload when instance policy requires 2FA and the User has no configured password 2FA.
 - If password 2FA is enabled for the User or required by `auth.password.2fa_required`, the request must include a valid TOTP code.
-- Missing TOTP may return `password_2fa_required` only after the primary password is valid and the User is otherwise eligible to authenticate.
+- Missing TOTP may return `password_2fa_required` only after the primary password is valid and the User is otherwise eligible to authenticate. Missing configured TOTP when policy requires it returns `password_2fa_setup_required` without creating a session.
 - Unknown email, disabled User, missing password hash, and invalid password must all return the same generic `401 invalid_credentials` response.
 - OIDC users are not required to have Certhub password 2FA.
 - Must update `users.last_login_at` on success.
@@ -1150,10 +1151,10 @@ Request body:
 
 Expected responses:
 
-- `200 OK`: login succeeded; response includes User metadata, opaque access token, access token expiry, opaque refresh token, and refresh token expiry.
+- `200 OK`: login succeeded with User metadata and tokens, or forced password 2FA setup is required with `password_2fa_setup_token` and `password_2fa`.
 - `400 Bad Request`: invalid body.
 - `401 Unauthorized`: credentials are invalid or TOTP code is invalid (`invalid_credentials` or `invalid_2fa_code`). Disabled Users and Users without password login must be folded into `invalid_credentials`.
-- `403 Forbidden`: password auth is disabled, 2FA is required but not configured, or TOTP code is missing after valid primary credentials (`password_auth_disabled` or `password_2fa_required`).
+- `403 Forbidden`: password auth is disabled or TOTP code is missing after valid primary credentials (`password_auth_disabled` or `password_2fa_required`).
 - `429 Too Many Requests`: login is rate limited.
 
 #### POST /v1/auth/password-2fa/setup
@@ -2146,11 +2147,10 @@ Summary: Update mutable User fields.
 Description and notes:
 
 - Admin-only in v1.
-- Mutable fields include display name, global role, status, password replacement/removal, and password 2FA administrative reset. OIDC link fields are internal provider-derived state and are not mutable through this endpoint.
+- Mutable fields include display name, global role, and status. OIDC link fields are internal provider-derived state and are not mutable through this endpoint.
 - Changing status to disabled prevents future authentication.
-- Password update accepts plaintext only in the API request and stores only a new `password_hash`.
-- If a password is added or replaced while `auth.password.2fa_required=true`, the update must also provision password 2FA or reject the request.
-- Password 2FA administrative reset may disable password 2FA and clear TOTP secrets only when password login is also disabled for that User or `auth.password.2fa_required=false`; it must not reveal existing TOTP secrets.
+- Admin password changes use `POST /v1/users/{user_id}/password-reset-link`; direct plaintext password mutation is not accepted here.
+- Admin password 2FA reset uses `DELETE /v1/users/{user_id}/password-2fa`; direct TOTP provisioning or reset flags are not accepted here.
 - OIDC links must keep `(oidc_issuer, oidc_subject)` unique when written internally by the OIDC login flow.
 
 ```http
@@ -2171,6 +2171,60 @@ Expected responses:
 - `403 Forbidden`: User is not an admin.
 - `404 Not Found`: User does not exist.
 - `409 Conflict`: update violates uniqueness or state constraints.
+
+#### POST /v1/users/{user_id}/password-reset-link
+
+Summary: Create a one-time password reset link for a User.
+
+Description and notes:
+
+- Admin-only in v1.
+- Stores only a hash of the reset token.
+- A new link supersedes any active password reset link for the same User.
+- The link expires after `auth.password_reset_ttl_seconds`, default `3600`.
+- Must write `password_reset_link_created` without storing the raw link or token.
+
+Expected responses:
+
+- `200 OK`: response includes `password_reset.email`, `password_reset.expires_at`, and one-time `password_reset.reset_url`.
+- `401 Unauthorized`, `403 Forbidden`, `404 Not Found` as usual.
+
+#### DELETE /v1/users/{user_id}/password-2fa
+
+Summary: Disable password 2FA for a User and revoke active sessions.
+
+Description and notes:
+
+- Admin-only in v1.
+- Clears active and pending TOTP state, sets `password_2fa_enabled=false`, revokes active sessions with reason `password_2fa_reset`, and returns updated User metadata.
+- Idempotent when password 2FA is already disabled.
+- Must write `password_2fa_reset` without storing TOTP secrets or codes.
+
+Expected responses:
+
+- `200 OK`: updated User metadata.
+- `401 Unauthorized`, `403 Forbidden`, `404 Not Found` as usual.
+
+#### GET /v1/auth/password-resets/{reset_token}
+
+Summary: Preview a password reset link without consuming it.
+
+- Invalid, expired, consumed, or superseded links return `invalid_password_reset`.
+
+#### POST /v1/auth/password-resets/{reset_token}
+
+Summary: Complete a password reset.
+
+- Validates the password policy, updates only `password_hash`, consumes the reset link, revokes active sessions with reason `password_reset`, and does not clear password 2FA.
+- Invalid, expired, consumed, or superseded links return `invalid_password_reset`.
+
+#### POST /v1/auth/password-2fa/login-setup/confirm
+
+Summary: Complete forced password-login 2FA setup.
+
+- Accepts `setup_token` and `totp_code`.
+- Wrong TOTP returns `invalid_2fa_code` without consuming the setup token.
+- Success consumes the setup token, enables password 2FA, creates a normal login session, and returns the standard token response.
 
 #### GET /v1/applications
 

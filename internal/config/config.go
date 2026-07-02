@@ -119,6 +119,7 @@ type AuthConfig struct {
 	UserAccessTokenTTLSeconds  int
 	UserRefreshTokenTTLSeconds int
 	UserInviteTTLSeconds       int
+	PasswordResetTTLSeconds    int
 }
 
 type PasswordConfig struct {
@@ -241,6 +242,7 @@ type rawAuth struct {
 	UserAccessTokenTTLSeconds  *int        `yaml:"user_access_token_ttl_seconds"`
 	UserRefreshTokenTTLSeconds *int        `yaml:"user_refresh_token_ttl_seconds"`
 	UserInviteTTLSeconds       *int        `yaml:"user_invite_ttl_seconds"`
+	PasswordResetTTLSeconds    *int        `yaml:"password_reset_ttl_seconds"`
 }
 
 type rawPassword struct {
@@ -335,6 +337,7 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 			UserAccessTokenTTLSeconds:  300,
 			UserRefreshTokenTTLSeconds: 28800,
 			UserInviteTTLSeconds:       86400,
+			PasswordResetTTLSeconds:    3600,
 		},
 		ApplicationToken: ApplicationTokenConfig{
 			DefaultTTLSeconds: 7776000,
@@ -504,6 +507,9 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 		return nil, err
 	}
 	if err := positiveInt("auth.user_invite_ttl_seconds", raw.Auth.UserInviteTTLSeconds, &cfg.Auth.UserInviteTTLSeconds); err != nil {
+		return nil, err
+	}
+	if err := positiveInt("auth.password_reset_ttl_seconds", raw.Auth.PasswordResetTTLSeconds, &cfg.Auth.PasswordResetTTLSeconds); err != nil {
 		return nil, err
 	}
 	if cfg.Auth.UserRefreshTokenTTLSeconds <= cfg.Auth.UserAccessTokenTTLSeconds {

@@ -114,6 +114,7 @@ type RouteState = {
   id?: string;
   profile?: boolean;
   signup?: boolean;
+  resetPassword?: boolean;
   path: string;
   query: URLSearchParams;
 };
@@ -146,6 +147,7 @@ function parseRoute(): RouteState {
   const query = url.searchParams;
   const parts = path.split("/").filter(Boolean);
   if (path === "/signup") return { page: "home", signup: true, path, query };
+  if (path === "/reset-password") return { page: "home", resetPassword: true, path, query };
   if (path === "/profile") return { page: "home", profile: true, path, query };
   if (parts.length === 2 && parts[0] === "certificates" && parts[1] !== "new") return { page: "certificates", detail: "certificate", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "applications" && parts[1] !== "new") return { page: "applications", detail: "application", id: parts[1], path, query };
@@ -477,6 +479,7 @@ function AppShell() {
 
   if (!session?.accessToken) {
     if (route.signup) return createElement(PublicSignupPage, { route, navigate, onDone: setLoginNotice });
+    if (route.resetPassword) return createElement(PublicResetPasswordPage, { route, navigate, onDone: setLoginNotice });
     return createElement(Login, { onLogin: setSession, notice: loginNotice });
   }
 
@@ -551,29 +554,55 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [error, setError] = useState(props.notice);
+  const [forcedSetup, setForcedSetup] = useState<any>(undefined);
   const showOIDCLogin = oidcLoginEnabled();
   useEffect(() => setError(props.notice), [props.notice]);
+  function storeLogin(data: any) {
+    const session = { accessToken: data.access_token, refreshToken: data.refresh_token, accessExpiresAt: data.access_expires_at, refreshExpiresAt: data.refresh_expires_at };
+    saveSession(session);
+    props.onLogin(session);
+  }
   async function submit() {
-    const result = await api<{ access_token: string; access_expires_at?: string; refresh_token: string; refresh_expires_at?: string }>("/v1/auth/login", undefined, {
+    const result = await api<any>("/v1/auth/login", undefined, {
       method: "POST",
       body: JSON.stringify({ email, password, totp_code: totp || undefined })
     });
     if (result.data) {
-      const session = { accessToken: result.data.access_token, refreshToken: result.data.refresh_token, accessExpiresAt: result.data.access_expires_at, refreshExpiresAt: result.data.refresh_expires_at };
-      saveSession(session);
-      props.onLogin(session);
+      if (result.data.status === "password_2fa_setup_required") {
+        setForcedSetup(result.data);
+        setTotp("");
+        setError("");
+        return;
+      }
+      storeLogin(result.data);
     } else setError(errorText(result));
+  }
+  async function confirmSetup() {
+    const result = await api<any>("/v1/auth/password-2fa/login-setup/confirm", undefined, {
+      method: "POST",
+      body: JSON.stringify({ setup_token: forcedSetup?.password_2fa_setup_token, totp_code: totp })
+    });
+    if (result.data) storeLogin(result.data);
+    else setError(errorText(result));
   }
   return createElement(
     "main",
     { className: "login" },
     createElement("section", { className: "login-panel" },
       createElement("div", { className: "brand large" }, createElement(ShieldCheck, { size: 30 }), createElement("strong", null, "Certhub")),
-      input("Email", email, setEmail, "email"),
-      input("Password", password, setPassword, "password"),
-      input("TOTP code", totp, setTotp, "text"),
-      createElement("button", { className: "primary", onClick: submit }, createElement(Lock, { size: 16 }), "Sign in"),
-      showOIDCLogin ? createElement("button", { className: "secondary", onClick: () => (window.location.href = "/v1/auth/oidc/login") }, "OIDC sign in") : null,
+      forcedSetup ? createElement("div", { className: "create-form signup-form" },
+        forcedSetup.password_2fa?.provisioning_uri ? createElement(QRCodeImage, { value: forcedSetup.password_2fa.provisioning_uri }) : null,
+        kv("Secret", forcedSetup.password_2fa?.secret),
+        input("TOTP code", totp, setTotp, "text"),
+        createElement("button", { className: "primary", onClick: confirmSetup, disabled: !totp }, createElement(Lock, { size: 16 }), "Confirm 2FA"),
+        createElement("button", { onClick: () => { setForcedSetup(undefined); setTotp(""); } }, "Back")
+      ) : [
+        input("Email", email, setEmail, "email"),
+        input("Password", password, setPassword, "password"),
+        input("TOTP code", totp, setTotp, "text"),
+        createElement("button", { className: "primary", onClick: submit }, createElement(Lock, { size: 16 }), "Sign in"),
+        showOIDCLogin ? createElement("button", { className: "secondary", onClick: () => (window.location.href = "/v1/auth/oidc/login") }, "OIDC sign in") : null
+      ],
       error ? createElement("p", { className: "error" }, error) : null
     )
   );
@@ -668,6 +697,47 @@ function PublicSignupPage(props: { route: RouteState; navigate: (path: string, r
           ) : null,
           error ? createElement("p", { className: "error" }, error) : null
         )
+    )
+  );
+}
+
+function PublicResetPasswordPage(props: { route: RouteState; navigate: (path: string, replace?: boolean) => void; onDone: (message: string) => void }) {
+  const token = props.route.query.get("token") || "";
+  const preview = useAsync<{ password_reset: any }>(undefined, token ? `/v1/auth/password-resets/${encodeURIComponent(token)}` : "", [token]);
+  const reset = preview.data?.password_reset;
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const passwordError = !password ? "password is required" : password.length < 12 ? "password must be at least 12 characters" : password !== confirmPassword ? "passwords do not match" : "";
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    if (passwordError) return setError(passwordError);
+    const result = await api<any>(`/v1/auth/password-resets/${encodeURIComponent(token)}`, undefined, {
+      method: "POST",
+      body: JSON.stringify({ password })
+    });
+    if (result.error) return setError(errorText(result));
+    props.onDone("Password reset completed. Sign in with your new password.");
+    props.navigate("/", true);
+  };
+  return createElement("main", { className: "login signup-screen" },
+    createElement("section", { className: "login-panel signup-panel" },
+      createElement("div", { className: "brand large" }, createElement(ShieldCheck, { size: 30 }), createElement("strong", null, "Certhub")),
+      !token ? createElement("p", { className: "error" }, "invalid_password_reset: reset token is missing") :
+        preview.loading ? createElement("p", { className: "empty" }, "Loading") :
+          preview.error ? createElement("p", { className: "error" }, errorText(preview)) :
+            createElement("form", { className: "create-form signup-form", onSubmit: submit },
+              kv("Email", reset?.email),
+              kv("Expires at", reset?.expires_at),
+              input("password", password, setPassword, "password"),
+              input("confirm_password", confirmPassword, setConfirmPassword, "password"),
+              passwordError ? createElement("span", { className: "field-error" }, passwordError) : null,
+              createElement("div", { className: "toolbar" },
+                createElement("button", { type: "button", onClick: () => props.navigate("/") }, "Back"),
+                createElement("button", { className: "primary", disabled: Boolean(passwordError) }, "Reset password")
+              ),
+              error ? createElement("p", { className: "error" }, error) : null
+            )
     )
   );
 }
@@ -1130,45 +1200,71 @@ function UserDetailPage(props: PageProps) {
 
 function UserEditPage(props: PageProps) {
   const id = resourceID(props);
-  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id]);
+  const [refresh, setRefresh] = useState(0);
+  const detail = useAsync<{ user: any }>(props.session, id ? `/v1/users/${id}` : "", [id, refresh]);
   const user = detail.data?.user;
-  const [password2FA, setPassword2FA] = useState<any>(undefined);
-  const [body, setBody] = useState({ display_name: "", global_role: "user", status: "active", password: "", provision_password_2fa: false, reset_password_2fa: false });
+  const [resetLink, setResetLink] = useState<any>(undefined);
+  const [body, setBody] = useState({ display_name: "", global_role: "user", status: "active" });
   useEffect(() => {
     if (!user) return;
-    setBody((current) => ({ ...current, display_name: user.display_name || "", global_role: user.global_role || "user", status: user.status || "active", password: "" }));
+    setBody((current) => ({ ...current, display_name: user.display_name || "", global_role: user.global_role || "user", status: user.status || "active" }));
   }, [user?.id]);
   if (!isAdmin(props.session)) return forbiddenPage("Users");
   const submit = async (e: Event) => {
     e.preventDefault();
-    const error = required(body.display_name, "display_name") || validateField("global_role", body.global_role) || validateField("status", body.status) || (body.password && body.password.length < 12 ? "password must be at least 12 characters" : "");
+    const error = required(body.display_name, "display_name") || validateField("global_role", body.global_role) || validateField("status", body.status);
     if (error) return props.setNotice(error);
-    setPassword2FA(undefined);
     const patch: Record<string, unknown> = {
       display_name: body.display_name,
       global_role: body.global_role,
       status: body.status
     };
-    if (body.password) {
-      patch.password = body.password;
-      patch.provision_password_2fa = body.provision_password_2fa;
-    }
-    if (body.reset_password_2fa) patch.reset_password_2fa = true;
     const result = await api<any>(`/v1/users/${id}`, props.session, { method: "PATCH", body: JSON.stringify(patch) });
-    if (result.data?.password_2fa) setPassword2FA(result.data.password_2fa);
     props.setNotice(errorOrOK(result));
-    if (!result.error && !result.data?.password_2fa) props.navigate(`/users/${id}`);
+    if (!result.error) props.navigate(`/users/${id}`);
+  };
+  const getResetLink = async () => {
+    const result = await api<any>(`/v1/users/${id}/password-reset-link`, props.session, { method: "POST" });
+    if (result.data?.password_reset) {
+      setResetLink(result.data.password_reset);
+      props.setNotice("password reset link generated");
+    } else props.setNotice(errorText(result));
+  };
+  const disable2FA = async () => {
+    const result = await api<any>(`/v1/users/${id}/password-2fa`, props.session, { method: "DELETE" });
+    props.setNotice(errorOrOK(result));
+    if (!result.error) setRefresh(refresh + 1);
+  };
+  const copyReset = async () => {
+    if (!resetLink?.reset_url) return;
+    await navigator.clipboard.writeText(resetLink.reset_url);
+    props.setNotice("copied");
   };
   return createPage("Edit User", `/users/${id}`, props.navigate,
-    password2FA?.provisioning_uri ? createElement("div", { className: "secret-once" }, kv("Provisioning URI", password2FA.provisioning_uri), kv("Secret", password2FA.secret), createElement("button", { className: "primary", onClick: () => props.navigate(`/users/${id}`) }, "Done")) : null,
+    resetLink ? createElement("section", { className: "detail secret-once" },
+      createElement("h2", null, "Password Reset Link"),
+      kv("Email", resetLink.email),
+      kv("Expires at", resetLink.expires_at),
+      kv("Reset URL", resetLink.reset_url),
+      createElement("div", { className: "toolbar" },
+        createElement("button", { className: "primary", type: "button", onClick: copyReset }, createElement(Copy, { size: 16 }), "Copy"),
+        createElement("button", { type: "button", onClick: () => setResetLink(undefined) }, "Clear")
+      )
+    ) : null,
     detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) :
       createElement("form", { className: "create-form", onSubmit: submit },
         input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
         selectInput("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]]),
         selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        input("password", body.password, (v) => setBody({ ...body, password: v }), "password"),
-        checkboxInput("provision_password_2fa", body.provision_password_2fa, (v) => setBody({ ...body, provision_password_2fa: v })),
-        checkboxInput("reset_password_2fa", body.reset_password_2fa, (v) => setBody({ ...body, reset_password_2fa: v })),
+        createElement("section", { className: "form-section" },
+          createElement("h3", null, "Password"),
+          createElement("button", { type: "button", onClick: getResetLink }, createElement(KeyRound, { size: 16 }), "Get password reset link")
+        ),
+        createElement("section", { className: "form-section" },
+          createElement("h3", null, "Password 2FA"),
+          kv("Status", user?.password_2fa_enabled ? "enabled" : "disabled"),
+          createElement("button", { type: "button", disabled: !user?.password_2fa_enabled, onClick: disable2FA }, createElement(ShieldCheck, { size: 16 }), "Disable 2FA")
+        ),
         formActions("Save", `/users/${id}`, props.navigate)
       )
   );
@@ -2015,9 +2111,14 @@ function auditActionOptions(): FilterOption[] {
     "user_session_created",
     "user_session_refreshed",
     "user_session_revoked",
+    "password_reset_link_created",
+    "password_reset_completed",
     "password_2fa_setup_started",
+    "password_2fa_login_setup_started",
+    "password_2fa_login_setup_completed",
     "password_2fa_enabled",
     "password_2fa_disabled",
+    "password_2fa_reset",
     "application_created",
     "application_updated",
     "application_token_created",

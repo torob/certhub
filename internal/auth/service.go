@@ -29,16 +29,20 @@ const (
 	UserAccessTokenPrefix  = "cth_uat_v1_"
 	UserRefreshTokenPrefix = "cth_urt_v1_"
 	OIDCHandoffPrefix      = "cth_oidc_handoff_"
+	PasswordResetPrefix    = "cth_pwd_reset_v1_"
+	Password2FASetupPrefix = "cth_pwd_2fa_setup_v1_"
 
-	oidcStatePrefix       = "cth_oidc_state_"
-	tokenSecretBytes      = 32
-	oidcStateSecretBytes  = 32
-	oidcHandoffTTL        = 5 * time.Minute
-	oidcLoginStateTTL     = 10 * time.Minute
-	totpIssuer            = "Certhub"
-	totpDigits            = 6
-	totpPeriodSeconds     = 30
-	totpAllowedSkewWindow = 1
+	oidcStatePrefix         = "cth_oidc_state_"
+	tokenSecretBytes        = 32
+	oidcStateSecretBytes    = 32
+	oidcHandoffTTL          = 5 * time.Minute
+	oidcLoginStateTTL       = 10 * time.Minute
+	password2FASetupTTL     = 10 * time.Minute
+	defaultPasswordResetTTL = time.Hour
+	totpIssuer              = "Certhub"
+	totpDigits              = 6
+	totpPeriodSeconds       = 30
+	totpAllowedSkewWindow   = 1
 )
 
 var (
@@ -54,11 +58,13 @@ var (
 	ErrConflict                   = errors.New("conflict")
 	ErrNotFound                   = errors.New("not found")
 	ErrForbidden                  = errors.New("forbidden")
+	ErrInvalidRequest             = errors.New("invalid request")
 	ErrUserDisabled               = errors.New("user disabled")
 	ErrOIDCDisabled               = errors.New("oidc disabled")
 	ErrOIDCValidationFailed       = errors.New("oidc validation failed")
 	ErrOIDCUserNotProvisioned     = errors.New("oidc user not provisioned")
 	ErrIdentityServiceUnavailable = errors.New("identity service unavailable")
+	ErrInvalidPasswordReset       = errors.New("invalid password reset")
 )
 
 type SessionRepository interface {
@@ -66,11 +72,18 @@ type SessionRepository interface {
 	GetSessionByAccessTokenHash(context.Context, string) (Session, error)
 	MarkSessionUsed(context.Context, string) error
 	RevokeSession(context.Context, string, SessionRevokedReason) (bool, error)
+	RevokeUserSessions(context.Context, string, SessionRevokedReason) (int64, error)
 	RotateRefreshToken(context.Context, RotateRefreshTokenParams) (Session, error)
 	CreateOIDCState(context.Context, CreateOIDCStateParams) (OIDCLoginState, error)
 	ConsumeOIDCState(context.Context, string) (OIDCLoginState, error)
 	CreateOIDCHandoff(context.Context, CreateOIDCHandoffParams) (OIDCLoginHandoff, error)
 	ConsumeOIDCHandoff(context.Context, string) (OIDCLoginHandoff, error)
+	CreatePasswordReset(context.Context, CreatePasswordResetParams) (PasswordResetToken, error)
+	GetActivePasswordResetByHash(context.Context, string) (PasswordResetToken, error)
+	ConsumePasswordReset(context.Context, string) (PasswordResetToken, error)
+	CreatePassword2FASetup(context.Context, CreatePassword2FASetupParams) (Password2FALoginSetup, error)
+	GetActivePassword2FASetupByHash(context.Context, string) (Password2FALoginSetup, error)
+	ConsumePassword2FASetup(context.Context, string) (Password2FALoginSetup, error)
 }
 
 type UserRepository interface {
@@ -123,8 +136,11 @@ type Tokens struct {
 }
 
 type LoginResult struct {
-	User   users.User
-	Tokens Tokens
+	Status                  string
+	User                    users.User
+	Tokens                  Tokens
+	Password2FASetupToken   string
+	Password2FAProvisioning *TOTPProvisioning
 }
 
 type PasswordLoginParams struct {
@@ -151,6 +167,17 @@ type OIDCLoginStart struct {
 
 type OIDCCallbackResult struct {
 	RedirectURL string
+}
+
+type PasswordResetLinkResult struct {
+	Email     string
+	ExpiresAt time.Time
+	ResetURL  string
+}
+
+type PasswordResetPreviewResult struct {
+	Email     string
+	ExpiresAt time.Time
 }
 
 type ServiceOption func(*Service)
@@ -209,6 +236,22 @@ func (s *Service) passwordLogin(ctx context.Context, params PasswordLoginParams)
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", targetID, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "invalid_credentials"})
 		return LoginResult{}, ErrInvalidCredentials
 	}
+	if s.cfg.Password.TwoFARequired && (!user.Password2FAEnabled || user.TOTPSecretEncrypted == nil) {
+		result, err := s.startPassword2FARequiredLoginSetup(ctx, user, params.Audit)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		if needsRehash {
+			hash, err := security.HashPassword(params.Password)
+			if err != nil {
+				return LoginResult{}, err
+			}
+			if _, err := s.userRepo.Update(ctx, user.ID, users.UpdateUserParams{PasswordHash: storage.SetString(hash)}); err != nil {
+				return LoginResult{}, err
+			}
+		}
+		return result, nil
+	}
 	if err := s.verifyPasswordTOTP(user, params.TOTPCode); err != nil {
 		reason := "invalid_2fa_code"
 		if errors.Is(err, ErrPassword2FARequired) {
@@ -239,7 +282,7 @@ func (s *Service) passwordLogin(ctx context.Context, params PasswordLoginParams)
 	if err := s.auditUserEvent(ctx, updated.ID, "user_login_succeeded", "user", &updated.ID, params.Audit, audit.ResultSuccess, map[string]any{"method": string(AuthMethodPassword)}); err != nil {
 		return LoginResult{}, err
 	}
-	return LoginResult{User: updated, Tokens: tokens}, nil
+	return LoginResult{Status: "completed", User: updated, Tokens: tokens}, nil
 }
 
 func (s *Service) ValidateUserAccessToken(ctx context.Context, token string) (AuthenticatedUser, error) {
@@ -455,6 +498,211 @@ func (s *Service) disablePassword2FA(ctx context.Context, current AuthenticatedU
 	return s.auditUserEvent(ctx, current.User.ID, "password_2fa_disabled", "user", &current.User.ID, auditCtx, audit.ResultSuccess, map[string]any{})
 }
 
+func (s *Service) AdminCreatePasswordResetLink(ctx context.Context, current AuthenticatedUser, userID string, resetURL func(string) string, auditCtx AuditContext) (PasswordResetLinkResult, error) {
+	var result PasswordResetLinkResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.adminCreatePasswordResetLink(ctx, current, userID, resetURL, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) adminCreatePasswordResetLink(ctx context.Context, current AuthenticatedUser, userID string, resetURL func(string) string, auditCtx AuditContext) (PasswordResetLinkResult, error) {
+	if err := s.ready(); err != nil {
+		return PasswordResetLinkResult{}, err
+	}
+	if current.User.GlobalRole != users.GlobalRoleAdmin {
+		return PasswordResetLinkResult{}, ErrForbidden
+	}
+	target, err := s.userRepo.Get(ctx, userID)
+	if err != nil {
+		return PasswordResetLinkResult{}, ErrNotFound
+	}
+	token, err := randomPrefixedToken(PasswordResetPrefix)
+	if err != nil {
+		return PasswordResetLinkResult{}, err
+	}
+	expiresAt := time.Now().UTC().Add(s.passwordResetTTL())
+	reset, err := s.authRepo.CreatePasswordReset(ctx, CreatePasswordResetParams{
+		UserID:          target.ID,
+		TokenHash:       s.keys.HashToken(token),
+		CreatedByUserID: current.User.ID,
+		ExpiresAt:       expiresAt,
+	})
+	if err != nil {
+		return PasswordResetLinkResult{}, err
+	}
+	if err := s.auditUserEvent(ctx, current.User.ID, "password_reset_link_created", "user", &target.ID, auditCtx, audit.ResultSuccess, map[string]any{"email": target.Email}); err != nil {
+		return PasswordResetLinkResult{}, err
+	}
+	rawURL := token
+	if resetURL != nil {
+		rawURL = resetURL(token)
+	}
+	return PasswordResetLinkResult{Email: target.Email, ExpiresAt: reset.ExpiresAt, ResetURL: rawURL}, nil
+}
+
+func (s *Service) PreviewPasswordReset(ctx context.Context, token string) (PasswordResetPreviewResult, error) {
+	if err := s.ready(); err != nil {
+		return PasswordResetPreviewResult{}, err
+	}
+	if err := validatePresentedPasswordResetToken(token); err != nil {
+		return PasswordResetPreviewResult{}, ErrInvalidPasswordReset
+	}
+	reset, err := s.authRepo.GetActivePasswordResetByHash(ctx, s.keys.HashToken(token))
+	if err != nil {
+		return PasswordResetPreviewResult{}, ErrInvalidPasswordReset
+	}
+	user, err := s.userRepo.Get(ctx, reset.UserID)
+	if err != nil {
+		return PasswordResetPreviewResult{}, ErrInvalidPasswordReset
+	}
+	return PasswordResetPreviewResult{Email: user.Email, ExpiresAt: reset.ExpiresAt}, nil
+}
+
+func (s *Service) CompletePasswordReset(ctx context.Context, token, password string, auditCtx AuditContext) error {
+	return s.withWriteTx(ctx, func(txsvc *Service) error {
+		return txsvc.completePasswordReset(ctx, token, password, auditCtx)
+	})
+}
+
+func (s *Service) completePasswordReset(ctx context.Context, token, password string, auditCtx AuditContext) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	if err := validatePresentedPasswordResetToken(token); err != nil {
+		return ErrInvalidPasswordReset
+	}
+	tokenHash := s.keys.HashToken(token)
+	reset, err := s.authRepo.GetActivePasswordResetByHash(ctx, tokenHash)
+	if err != nil {
+		return ErrInvalidPasswordReset
+	}
+	user, err := s.userRepo.Get(ctx, reset.UserID)
+	if err != nil {
+		return ErrInvalidPasswordReset
+	}
+	if err := security.ValidatePasswordPolicy(password, user.Email); err != nil {
+		return ErrInvalidRequest
+	}
+	hash, err := security.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	consumed, err := s.authRepo.ConsumePasswordReset(ctx, tokenHash)
+	if err != nil || consumed.ID != reset.ID {
+		return ErrInvalidPasswordReset
+	}
+	updated, err := s.userRepo.Update(ctx, user.ID, users.UpdateUserParams{PasswordHash: storage.SetString(hash)})
+	if err != nil {
+		return err
+	}
+	if _, err := s.authRepo.RevokeUserSessions(ctx, updated.ID, SessionRevokedPasswordReset); err != nil {
+		return err
+	}
+	return s.auditUserEvent(ctx, updated.ID, "password_reset_completed", "user", &updated.ID, auditCtx, audit.ResultSuccess, map[string]any{})
+}
+
+func (s *Service) AdminResetPassword2FA(ctx context.Context, current AuthenticatedUser, userID string, auditCtx AuditContext) (users.User, error) {
+	var result users.User
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.adminResetPassword2FA(ctx, current, userID, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) adminResetPassword2FA(ctx context.Context, current AuthenticatedUser, userID string, auditCtx AuditContext) (users.User, error) {
+	if err := s.ready(); err != nil {
+		return users.User{}, err
+	}
+	if current.User.GlobalRole != users.GlobalRoleAdmin {
+		return users.User{}, ErrForbidden
+	}
+	target, err := s.userRepo.Get(ctx, userID)
+	if err != nil {
+		return users.User{}, ErrNotFound
+	}
+	updated, err := s.userRepo.Update(ctx, target.ID, users.UpdateUserParams{
+		Password2FAEnabled:         storage.SetBool(false),
+		TOTPSecretEncrypted:        storage.ClearString(),
+		PendingTOTPSecretEncrypted: storage.ClearString(),
+	})
+	if err != nil {
+		return users.User{}, err
+	}
+	if _, err := s.authRepo.RevokeUserSessions(ctx, updated.ID, SessionRevokedPassword2FAReset); err != nil {
+		return users.User{}, err
+	}
+	if err := s.auditUserEvent(ctx, current.User.ID, "password_2fa_reset", "user", &updated.ID, auditCtx, audit.ResultSuccess, map[string]any{}); err != nil {
+		return users.User{}, err
+	}
+	return updated, nil
+}
+
+func (s *Service) ConfirmPassword2FALoginSetup(ctx context.Context, setupToken, code string, auditCtx AuditContext) (LoginResult, error) {
+	var result LoginResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.confirmPassword2FALoginSetup(ctx, setupToken, code, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, code string, auditCtx AuditContext) (LoginResult, error) {
+	if err := s.ready(); err != nil {
+		return LoginResult{}, err
+	}
+	if err := validatePresentedPassword2FASetupToken(setupToken); err != nil {
+		return LoginResult{}, ErrInvalidToken
+	}
+	setupHash := s.keys.HashToken(setupToken)
+	setup, err := s.authRepo.GetActivePassword2FASetupByHash(ctx, setupHash)
+	if err != nil {
+		return LoginResult{}, ErrInvalidToken
+	}
+	user, err := s.userRepo.Get(ctx, setup.UserID)
+	if err != nil || user.Status != users.StatusActive {
+		return LoginResult{}, ErrUserDisabled
+	}
+	secret, err := s.keys.DecryptTOTPSecret(setup.PendingTOTPSecretEncrypted, totpAAD(user.ID))
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if !VerifyTOTP(secret, code, time.Now().UTC()) {
+		return LoginResult{}, ErrInvalid2FACode
+	}
+	if _, err := s.authRepo.ConsumePassword2FASetup(ctx, setupHash); err != nil {
+		return LoginResult{}, ErrInvalidToken
+	}
+	tokens, session, err := s.createSession(ctx, user.ID, AuthMethodPassword, auditCtx)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	updated, err := s.userRepo.Update(ctx, user.ID, users.UpdateUserParams{
+		TOTPSecretEncrypted:        storage.SetString(setup.PendingTOTPSecretEncrypted),
+		PendingTOTPSecretEncrypted: storage.ClearString(),
+		Password2FAEnabled:         storage.SetBool(true),
+		LastLoginAt:                storage.SetTime(time.Now().UTC()),
+	})
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.auditUserEvent(ctx, updated.ID, "password_2fa_login_setup_completed", "user", &updated.ID, auditCtx, audit.ResultSuccess, map[string]any{}); err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.auditUserEvent(ctx, updated.ID, "user_session_created", "user_session", &session.ID, auditCtx, audit.ResultSuccess, map[string]any{"method": string(AuthMethodPassword)}); err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.auditUserEvent(ctx, updated.ID, "user_login_succeeded", "user", &updated.ID, auditCtx, audit.ResultSuccess, map[string]any{"method": string(AuthMethodPassword), "phase": "password_2fa_setup"}); err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{Status: "completed", User: updated, Tokens: tokens}, nil
+}
+
 func (s *Service) StartOIDCLogin(ctx context.Context, returnURL string, auditCtx AuditContext) (OIDCLoginStart, error) {
 	if err := s.ready(); err != nil {
 		return OIDCLoginStart{}, err
@@ -633,7 +881,7 @@ func (s *Service) exchangeOIDCHandoff(ctx context.Context, handoffID string, aud
 	if err := s.auditUserEvent(ctx, updated.ID, "user_login_succeeded", "user", &updated.ID, auditCtx, audit.ResultSuccess, map[string]any{"method": string(AuthMethodOIDC), "phase": "handoff"}); err != nil {
 		return LoginResult{}, err
 	}
-	return LoginResult{User: updated, Tokens: tokens}, nil
+	return LoginResult{Status: "completed", User: updated, Tokens: tokens}, nil
 }
 
 func (s *Service) resolveOIDCUser(ctx context.Context, claims oidcClaims) (users.User, bool, error) {
@@ -702,6 +950,37 @@ func (s *Service) createSession(ctx context.Context, userID string, method AuthM
 	return tokens, session, nil
 }
 
+func (s *Service) startPassword2FARequiredLoginSetup(ctx context.Context, user users.User, auditCtx AuditContext) (LoginResult, error) {
+	setupToken, err := randomPrefixedToken(Password2FASetupPrefix)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	provisioning, encrypted, err := s.newTOTPProvisioning(user.ID, user.Email)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	setup, err := s.authRepo.CreatePassword2FASetup(ctx, CreatePassword2FASetupParams{
+		SetupHash:                  s.keys.HashToken(setupToken),
+		UserID:                     user.ID,
+		PendingTOTPSecretEncrypted: encrypted,
+		ExpiresAt:                  time.Now().UTC().Add(password2FASetupTTL),
+		SourceIP:                   optionalString(auditCtx.SourceIP),
+		UserAgent:                  optionalString(auditCtx.UserAgent),
+	})
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.auditUserEvent(ctx, user.ID, "password_2fa_login_setup_started", "user", &user.ID, auditCtx, audit.ResultSuccess, map[string]any{"expires_at": setup.ExpiresAt}); err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{
+		Status:                  "password_2fa_setup_required",
+		User:                    user,
+		Password2FASetupToken:   setupToken,
+		Password2FAProvisioning: &provisioning,
+	}, nil
+}
+
 func (s *Service) verifyPasswordTOTP(user users.User, code string) error {
 	if !user.Password2FAEnabled && !s.cfg.Password.TwoFARequired {
 		return nil
@@ -748,6 +1027,13 @@ func (s *Service) ready() error {
 		return ErrIdentityServiceUnavailable
 	}
 	return nil
+}
+
+func (s *Service) passwordResetTTL() time.Duration {
+	if s.cfg.PasswordResetTTLSeconds <= 0 {
+		return defaultPasswordResetTTL
+	}
+	return time.Duration(s.cfg.PasswordResetTTLSeconds) * time.Second
 }
 
 func (s *Service) normalizeReturnURL(raw string) (*string, error) {
@@ -1183,6 +1469,20 @@ func validatePresentedUserAccessToken(token string) error {
 func validatePresentedRefreshToken(token string) error {
 	if !strings.HasPrefix(token, UserRefreshTokenPrefix) || len(token) != len(UserRefreshTokenPrefix)+43 {
 		return ErrInvalidRefreshToken
+	}
+	return nil
+}
+
+func validatePresentedPasswordResetToken(token string) error {
+	if !strings.HasPrefix(token, PasswordResetPrefix) || len(token) != len(PasswordResetPrefix)+43 {
+		return ErrInvalidPasswordReset
+	}
+	return nil
+}
+
+func validatePresentedPassword2FASetupToken(token string) error {
+	if !strings.HasPrefix(token, Password2FASetupPrefix) || len(token) != len(Password2FASetupPrefix)+43 {
+		return ErrInvalidToken
 	}
 	return nil
 }

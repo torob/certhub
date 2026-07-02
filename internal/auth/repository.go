@@ -35,11 +35,13 @@ const (
 type SessionRevokedReason string
 
 const (
-	SessionRevokedLogout       SessionRevokedReason = "logout"
-	SessionRevokedDisabledUser SessionRevokedReason = "disabled_user"
-	SessionRevokedRefreshReuse SessionRevokedReason = "refresh_reuse"
-	SessionRevokedAdminAction  SessionRevokedReason = "admin_action"
-	SessionRevokedExpired      SessionRevokedReason = "expired"
+	SessionRevokedLogout           SessionRevokedReason = "logout"
+	SessionRevokedDisabledUser     SessionRevokedReason = "disabled_user"
+	SessionRevokedRefreshReuse     SessionRevokedReason = "refresh_reuse"
+	SessionRevokedAdminAction      SessionRevokedReason = "admin_action"
+	SessionRevokedExpired          SessionRevokedReason = "expired"
+	SessionRevokedPasswordReset    SessionRevokedReason = "password_reset"
+	SessionRevokedPassword2FAReset SessionRevokedReason = "password_2fa_reset"
 )
 
 type RefreshTokenStatus string
@@ -58,6 +60,15 @@ const (
 	HandoffStatusActive   HandoffStatus = "active"
 	HandoffStatusConsumed HandoffStatus = "consumed"
 	HandoffStatusExpired  HandoffStatus = "expired"
+)
+
+type OneTimeTokenStatus string
+
+const (
+	OneTimeTokenStatusActive     OneTimeTokenStatus = "active"
+	OneTimeTokenStatusConsumed   OneTimeTokenStatus = "consumed"
+	OneTimeTokenStatusExpired    OneTimeTokenStatus = "expired"
+	OneTimeTokenStatusSuperseded OneTimeTokenStatus = "superseded"
 )
 
 type Session struct {
@@ -117,6 +128,30 @@ type OIDCLoginHandoff struct {
 	UserAgent         *string
 }
 
+type PasswordResetToken struct {
+	ID              string
+	UserID          string
+	TokenHash       string
+	Status          OneTimeTokenStatus
+	CreatedByUserID string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	ConsumedAt      *time.Time
+}
+
+type Password2FALoginSetup struct {
+	ID                         string
+	SetupHash                  string
+	UserID                     string
+	PendingTOTPSecretEncrypted string
+	Status                     OneTimeTokenStatus
+	CreatedAt                  time.Time
+	ExpiresAt                  time.Time
+	ConsumedAt                 *time.Time
+	SourceIP                   *string
+	UserAgent                  *string
+}
+
 type Repository struct {
 	db storage.DBTX
 }
@@ -169,6 +204,24 @@ type CreateOIDCHandoffParams struct {
 	ExpiresAt         time.Time
 	SourceIP          *string
 	UserAgent         *string
+}
+
+type CreatePasswordResetParams struct {
+	ID              string
+	UserID          string
+	TokenHash       string
+	CreatedByUserID string
+	ExpiresAt       time.Time
+}
+
+type CreatePassword2FASetupParams struct {
+	ID                         string
+	SetupHash                  string
+	UserID                     string
+	PendingTOTPSecretEncrypted string
+	ExpiresAt                  time.Time
+	SourceIP                   *string
+	UserAgent                  *string
 }
 
 func (r Repository) CreateSession(ctx context.Context, params CreateSessionParams) (Session, error) {
@@ -273,8 +326,7 @@ func (r Repository) RevokeSession(ctx context.Context, sessionID string, reason 
 update user_sessions
 set status = 'revoked',
     revoked_at = coalesce(revoked_at, now()),
-    revoked_reason = coalesce(revoked_reason, $2),
-    refresh_expires_at = least(refresh_expires_at, now())
+    revoked_reason = coalesce(revoked_reason, $2)
 where id = $1
   and status = 'active'`, sessionID, string(reason))
 	if err != nil {
@@ -293,6 +345,195 @@ where user_session_id = $1
 		return false, fmt.Errorf("revoke refresh token history: %w", err)
 	}
 	return true, nil
+}
+
+func (r Repository) RevokeUserSessions(ctx context.Context, userID string, reason SessionRevokedReason) (int64, error) {
+	if err := storage.ValidateUUID(userID, "user_id"); err != nil {
+		return 0, err
+	}
+	if err := validateRevokedReason(reason); err != nil {
+		return 0, err
+	}
+	rows, err := r.db.Query(ctx, `
+update user_sessions
+set status = 'revoked',
+    revoked_at = coalesce(revoked_at, now()),
+    revoked_reason = coalesce(revoked_reason, $2)
+where user_id = $1
+  and status = 'active'
+returning id`, userID, string(reason))
+	if err != nil {
+		return 0, fmt.Errorf("revoke user sessions: %w", err)
+	}
+	defer rows.Close()
+	var sessionIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("revoke user sessions: %w", err)
+		}
+		sessionIDs = append(sessionIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("revoke user sessions: %w", err)
+	}
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+	for _, id := range sessionIDs {
+		if _, err := r.db.Exec(ctx, `
+update user_session_refresh_tokens
+set status = case when status = 'active' then 'revoked' else status end,
+    last_seen_at = coalesce(last_seen_at, now())
+where user_session_id = $1
+  and status = 'active'`, id); err != nil {
+			return 0, fmt.Errorf("revoke user refresh token history: %w", err)
+		}
+	}
+	return int64(len(sessionIDs)), nil
+}
+
+func (r Repository) CreatePasswordReset(ctx context.Context, params CreatePasswordResetParams) (PasswordResetToken, error) {
+	beginner, ok := r.db.(storage.Beginner)
+	if !ok {
+		return CreatePasswordResetTx(ctx, r.db, params)
+	}
+	var token PasswordResetToken
+	err := storage.WithTx(ctx, beginner, func(ctx context.Context, tx storage.Tx) error {
+		var err error
+		token, err = CreatePasswordResetTx(ctx, tx, params)
+		return err
+	})
+	return token, err
+}
+
+func CreatePasswordResetTx(ctx context.Context, db storage.DBTX, params CreatePasswordResetParams) (PasswordResetToken, error) {
+	if params.ID == "" {
+		id, err := storage.NewUUID()
+		if err != nil {
+			return PasswordResetToken{}, err
+		}
+		params.ID = id
+	}
+	if err := validateCreatePasswordReset(params); err != nil {
+		return PasswordResetToken{}, err
+	}
+	if _, err := db.Exec(ctx, `
+update user_password_reset_tokens
+set status = 'superseded'
+where user_id = $1
+  and status = 'active'`, params.UserID); err != nil {
+		return PasswordResetToken{}, fmt.Errorf("supersede password reset tokens: %w", err)
+	}
+	token, err := scanPasswordReset(db.QueryRow(ctx, `
+insert into user_password_reset_tokens (
+    id, user_id, token_hash, created_by_user_id, expires_at
+) values ($1, $2, $3, $4, $5)
+returning id, user_id, token_hash, status, created_by_user_id, created_at, expires_at, consumed_at`,
+		params.ID, params.UserID, params.TokenHash, params.CreatedByUserID, params.ExpiresAt))
+	if err != nil {
+		return PasswordResetToken{}, fmt.Errorf("create password reset token: %w", err)
+	}
+	return token, nil
+}
+
+func (r Repository) GetActivePasswordResetByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error) {
+	if err := storage.ValidateTokenHash(tokenHash, "token_hash"); err != nil {
+		return PasswordResetToken{}, err
+	}
+	token, err := scanPasswordReset(r.db.QueryRow(ctx, passwordResetSelectSQL()+`
+where token_hash = $1
+  and status = 'active'
+  and expires_at > now()`, tokenHash))
+	if err != nil {
+		return PasswordResetToken{}, fmt.Errorf("get password reset token: %w", err)
+	}
+	return token, nil
+}
+
+func (r Repository) ConsumePasswordReset(ctx context.Context, tokenHash string) (PasswordResetToken, error) {
+	if err := storage.ValidateTokenHash(tokenHash, "token_hash"); err != nil {
+		return PasswordResetToken{}, err
+	}
+	token, err := scanPasswordReset(r.db.QueryRow(ctx, `
+update user_password_reset_tokens
+set status = 'consumed',
+    consumed_at = now()
+where token_hash = $1
+  and status = 'active'
+  and expires_at > now()
+returning id, user_id, token_hash, status, created_by_user_id, created_at, expires_at, consumed_at`, tokenHash))
+	if err != nil {
+		return PasswordResetToken{}, fmt.Errorf("consume password reset token: %w", err)
+	}
+	return token, nil
+}
+
+func (r Repository) CreatePassword2FASetup(ctx context.Context, params CreatePassword2FASetupParams) (Password2FALoginSetup, error) {
+	if params.ID == "" {
+		id, err := storage.NewUUID()
+		if err != nil {
+			return Password2FALoginSetup{}, err
+		}
+		params.ID = id
+	}
+	if err := validateCreatePassword2FASetup(params); err != nil {
+		return Password2FALoginSetup{}, err
+	}
+	if _, err := r.db.Exec(ctx, `
+update password_2fa_login_setups
+set status = 'superseded'
+where user_id = $1
+  and status = 'active'`, params.UserID); err != nil {
+		return Password2FALoginSetup{}, fmt.Errorf("supersede password 2fa login setup tokens: %w", err)
+	}
+	setup, err := scanPassword2FASetup(r.db.QueryRow(ctx, `
+insert into password_2fa_login_setups (
+    id, setup_hash, user_id, pending_totp_secret_encrypted,
+    expires_at, source_ip, user_agent
+) values ($1, $2, $3, $4, $5, $6, $7)
+returning id, setup_hash, user_id, pending_totp_secret_encrypted,
+    status, created_at, expires_at, consumed_at, source_ip, user_agent`,
+		params.ID, params.SetupHash, params.UserID, params.PendingTOTPSecretEncrypted,
+		params.ExpiresAt, params.SourceIP, params.UserAgent))
+	if err != nil {
+		return Password2FALoginSetup{}, fmt.Errorf("create password 2fa login setup: %w", err)
+	}
+	return setup, nil
+}
+
+func (r Repository) GetActivePassword2FASetupByHash(ctx context.Context, setupHash string) (Password2FALoginSetup, error) {
+	if err := storage.ValidateTokenHash(setupHash, "setup_hash"); err != nil {
+		return Password2FALoginSetup{}, err
+	}
+	setup, err := scanPassword2FASetup(r.db.QueryRow(ctx, password2FASetupSelectSQL()+`
+where setup_hash = $1
+  and status = 'active'
+  and expires_at > now()
+for update`, setupHash))
+	if err != nil {
+		return Password2FALoginSetup{}, fmt.Errorf("get password 2fa login setup: %w", err)
+	}
+	return setup, nil
+}
+
+func (r Repository) ConsumePassword2FASetup(ctx context.Context, setupHash string) (Password2FALoginSetup, error) {
+	if err := storage.ValidateTokenHash(setupHash, "setup_hash"); err != nil {
+		return Password2FALoginSetup{}, err
+	}
+	setup, err := scanPassword2FASetup(r.db.QueryRow(ctx, `
+update password_2fa_login_setups
+set status = 'consumed',
+    consumed_at = now()
+where setup_hash = $1
+  and status = 'active'
+  and expires_at > now()
+returning id, setup_hash, user_id, pending_totp_secret_encrypted,
+    status, created_at, expires_at, consumed_at, source_ip, user_agent`, setupHash))
+	if err != nil {
+		return Password2FALoginSetup{}, fmt.Errorf("consume password 2fa login setup: %w", err)
+	}
+	return setup, nil
 }
 
 func (r Repository) RotateRefreshToken(ctx context.Context, params RotateRefreshTokenParams) (Session, error) {
@@ -510,6 +751,18 @@ func refreshTokenSelectSQL() string {
 from user_session_refresh_tokens`
 }
 
+func passwordResetSelectSQL() string {
+	return `select id, user_id, token_hash, status, created_by_user_id,
+    created_at, expires_at, consumed_at
+from user_password_reset_tokens `
+}
+
+func password2FASetupSelectSQL() string {
+	return `select id, setup_hash, user_id, pending_totp_secret_encrypted,
+    status, created_at, expires_at, consumed_at, source_ip, user_agent
+from password_2fa_login_setups `
+}
+
 func scanSession(row scanner) (Session, error) {
 	var session Session
 	var authMethod, status string
@@ -625,6 +878,53 @@ func scanOIDCHandoff(row scanner) (OIDCLoginHandoff, error) {
 	return handoff, nil
 }
 
+func scanPasswordReset(row scanner) (PasswordResetToken, error) {
+	var token PasswordResetToken
+	var status string
+	var consumedAt sql.NullTime
+	if err := row.Scan(
+		&token.ID,
+		&token.UserID,
+		&token.TokenHash,
+		&status,
+		&token.CreatedByUserID,
+		&token.CreatedAt,
+		&token.ExpiresAt,
+		&consumedAt,
+	); err != nil {
+		return PasswordResetToken{}, err
+	}
+	token.Status = OneTimeTokenStatus(status)
+	token.ConsumedAt = timePtr(consumedAt)
+	return token, nil
+}
+
+func scanPassword2FASetup(row scanner) (Password2FALoginSetup, error) {
+	var setup Password2FALoginSetup
+	var status string
+	var consumedAt sql.NullTime
+	var sourceIP, userAgent sql.NullString
+	if err := row.Scan(
+		&setup.ID,
+		&setup.SetupHash,
+		&setup.UserID,
+		&setup.PendingTOTPSecretEncrypted,
+		&status,
+		&setup.CreatedAt,
+		&setup.ExpiresAt,
+		&consumedAt,
+		&sourceIP,
+		&userAgent,
+	); err != nil {
+		return Password2FALoginSetup{}, err
+	}
+	setup.Status = OneTimeTokenStatus(status)
+	setup.ConsumedAt = timePtr(consumedAt)
+	setup.SourceIP = stringPtr(sourceIP)
+	setup.UserAgent = stringPtr(userAgent)
+	return setup, nil
+}
+
 type scanner interface {
 	Scan(...any) error
 }
@@ -650,8 +950,7 @@ where user_session_id = $1
 update user_sessions
 set status = 'revoked',
     revoked_at = coalesce(revoked_at, now()),
-    revoked_reason = coalesce(revoked_reason, 'refresh_reuse'),
-    refresh_expires_at = least(refresh_expires_at, now())
+    revoked_reason = coalesce(revoked_reason, 'refresh_reuse')
 where id = $1
   and status = 'active'`, sessionID)
 	return err
@@ -762,6 +1061,47 @@ func validateCreateOIDCHandoff(params CreateOIDCHandoffParams) error {
 	return storage.ValidateOptionalHumanString(params.UserAgent, "user_agent", 1024)
 }
 
+func validateCreatePasswordReset(params CreatePasswordResetParams) error {
+	if err := storage.ValidateUUID(params.ID, "password_reset_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.UserID, "user_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateTokenHash(params.TokenHash, "token_hash"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.CreatedByUserID, "created_by_user_id"); err != nil {
+		return err
+	}
+	if params.ExpiresAt.IsZero() || !params.ExpiresAt.After(time.Now().UTC()) {
+		return errors.New("expires_at must be in the future")
+	}
+	return nil
+}
+
+func validateCreatePassword2FASetup(params CreatePassword2FASetupParams) error {
+	if err := storage.ValidateUUID(params.ID, "password_2fa_setup_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateTokenHash(params.SetupHash, "setup_hash"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.UserID, "user_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateEncryptedEnvelope(&params.PendingTOTPSecretEncrypted, "pending_totp_secret_encrypted"); err != nil {
+		return err
+	}
+	if params.ExpiresAt.IsZero() || !params.ExpiresAt.After(time.Now().UTC()) {
+		return errors.New("expires_at must be in the future")
+	}
+	if err := storage.ValidateOptionalHumanString(params.SourceIP, "source_ip", 128); err != nil {
+		return err
+	}
+	return storage.ValidateOptionalHumanString(params.UserAgent, "user_agent", 1024)
+}
+
 func validateAuthMethod(method AuthMethod) error {
 	switch method {
 	case AuthMethodPassword, AuthMethodOIDC:
@@ -773,7 +1113,7 @@ func validateAuthMethod(method AuthMethod) error {
 
 func validateRevokedReason(reason SessionRevokedReason) error {
 	switch reason {
-	case SessionRevokedLogout, SessionRevokedDisabledUser, SessionRevokedRefreshReuse, SessionRevokedAdminAction, SessionRevokedExpired:
+	case SessionRevokedLogout, SessionRevokedDisabledUser, SessionRevokedRefreshReuse, SessionRevokedAdminAction, SessionRevokedExpired, SessionRevokedPasswordReset, SessionRevokedPassword2FAReset:
 		return nil
 	default:
 		return errors.New("revoked_reason is invalid")

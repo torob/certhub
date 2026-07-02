@@ -31,18 +31,27 @@ const expectedOperations = new Set([
   'POST /v1/sync/certificates/tls-archive',
   'GET /v1/certificates',
   'GET /v1/certificates/{certificate_id}',
-  'DELETE /v1/certificates/{certificate_id}',
   'GET /v1/certificates/{certificate_id}/versions',
   'GET /v1/certificates/{certificate_id}/tls-archive',
+  'GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive',
   'POST /v1/certificates/{certificate_id}/renew',
   'POST /v1/certificates/{certificate_id}/rotate-key',
-  'POST /v1/certificates/{certificate_id}/revoke',
+  'POST /v1/certificates/{certificate_id}/reissue',
+  'POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke',
   'GET /v1/certificates/{certificate_id}/events',
+  'GET /v1/auth/user-invites/{invite_token}',
+  'POST /v1/auth/user-invites/{invite_token}/signup',
+  'POST /v1/auth/user-invites/{invite_token}/signup/confirm-2fa',
+  'GET /v1/auth/password-resets/{reset_token}',
+  'POST /v1/auth/password-resets/{reset_token}',
+  'POST /v1/auth/password-2fa/login-setup/confirm',
   'GET /v1/users',
   'POST /v1/users',
   'GET /v1/users/lookup',
   'GET /v1/users/{user_id}',
   'PATCH /v1/users/{user_id}',
+  'POST /v1/users/{user_id}/password-reset-link',
+  'DELETE /v1/users/{user_id}/password-2fa',
   'GET /v1/applications',
   'POST /v1/applications',
   'GET /v1/applications/{application_id}',
@@ -240,7 +249,10 @@ for (const entry of entries) {
     p === '/v1/auth/oidc/login' ||
     p === '/v1/auth/oidc/callback' ||
     p === '/v1/auth/oidc/handoff' ||
-    p === '/v1/auth/refresh'
+    p === '/v1/auth/refresh' ||
+    p === '/v1/auth/password-2fa/login-setup/confirm' ||
+    p.startsWith('/v1/auth/password-resets/') ||
+    p.startsWith('/v1/auth/user-invites/')
   ) {
     expectSecurity(entry, 'Public');
   } else if (p.startsWith('/v1/')) {

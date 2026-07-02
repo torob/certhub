@@ -27,6 +27,15 @@ type totpCodeRequest struct {
 	TOTPCode string `json:"totp_code"`
 }
 
+type password2FALoginSetupConfirmRequest struct {
+	SetupToken string `json:"setup_token"`
+	TOTPCode   string `json:"totp_code"`
+}
+
+type passwordResetRequest struct {
+	Password string `json:"password"`
+}
+
 type disable2FARequest struct {
 	Password string `json:"password"`
 	TOTPCode string `json:"totp_code"`
@@ -87,17 +96,19 @@ func isIdentityEndpoint(p string) bool {
 	return p == "/v1/auth/login" ||
 		p == "/v1/auth/password-2fa/setup" ||
 		p == "/v1/auth/password-2fa/confirm" ||
+		p == "/v1/auth/password-2fa/login-setup/confirm" ||
 		p == "/v1/auth/password-2fa" ||
 		p == "/v1/auth/oidc/login" ||
 		p == "/v1/auth/oidc/callback" ||
 		p == "/v1/auth/oidc/handoff" ||
+		(strings.HasPrefix(p, "/v1/auth/password-resets/") && strings.Count(strings.TrimPrefix(p, "/v1/auth/password-resets/"), "/") == 0) ||
 		(strings.HasPrefix(p, "/v1/auth/user-invites/") && (strings.Count(strings.TrimPrefix(p, "/v1/auth/user-invites/"), "/") == 0 || strings.HasSuffix(p, "/signup") || strings.HasSuffix(p, "/signup/confirm-2fa"))) ||
 		p == "/v1/auth/refresh" ||
 		p == "/v1/auth/logout" ||
 		p == "/v1/auth/me" ||
 		p == "/v1/users" ||
 		p == "/v1/users/lookup" ||
-		(strings.HasPrefix(p, "/v1/users/") && strings.Count(strings.TrimPrefix(p, "/v1/users/"), "/") == 0)
+		(strings.HasPrefix(p, "/v1/users/") && (strings.Count(strings.TrimPrefix(p, "/v1/users/"), "/") == 0 || strings.HasSuffix(p, "/password-reset-link") || strings.HasSuffix(p, "/password-2fa")))
 }
 
 func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
@@ -120,6 +131,8 @@ func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx Re
 		return s.handleSetupPassword2FA(w, r, reqctx)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/password-2fa/confirm":
 		return s.handleConfirmPassword2FA(w, r, reqctx)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/password-2fa/login-setup/confirm":
+		return s.handleConfirmPassword2FALoginSetup(w, r, reqctx)
 	case r.Method == http.MethodDelete && r.URL.Path == "/v1/auth/password-2fa":
 		return s.handleDisablePassword2FA(w, r, reqctx)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/auth/oidc/login":
@@ -128,6 +141,10 @@ func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx Re
 		return s.handleCompleteOIDCCallback(w, r, reqctx)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/oidc/handoff":
 		return s.handleOIDCHandoff(w, r, reqctx)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/auth/password-resets/"):
+		return s.handlePreviewPasswordReset(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/auth/password-resets/"):
+		return s.handleCompletePasswordReset(w, r, reqctx)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/") && strings.Count(strings.TrimPrefix(r.URL.Path, "/v1/auth/user-invites/"), "/") == 0:
 		return s.handlePreviewUserInvite(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/") && strings.HasSuffix(r.URL.Path, "/signup"):
@@ -146,6 +163,10 @@ func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx Re
 		return s.handleCreateUser(w, r, reqctx)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/users/lookup":
 		return s.handleLookupUser(w, r, reqctx)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/users/") && strings.HasSuffix(r.URL.Path, "/password-reset-link"):
+		return s.handleCreatePasswordResetLink(w, r, reqctx)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/users/") && strings.HasSuffix(r.URL.Path, "/password-2fa"):
+		return s.handleAdminResetPassword2FA(w, r, reqctx)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/users/"):
 		return s.handleGetUser(w, r, reqctx)
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/users/"):
@@ -175,7 +196,16 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request, req
 		return writeIdentityError(w, err)
 	}
 	noStoreHeaders(w.Header())
+	if result.Status == "password_2fa_setup_required" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":                   result.Status,
+			"password_2fa_setup_token": result.Password2FASetupToken,
+			"password_2fa":             serializeAuthTOTP(*result.Password2FAProvisioning),
+		})
+		return http.StatusOK, ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"status":             "completed",
 		"user":               serializeUser(result.User),
 		"access_token":       result.Tokens.AccessToken,
 		"access_expires_at":  result.Tokens.AccessExpiresAt,
@@ -213,6 +243,27 @@ func (s *Server) handleConfirmPassword2FA(w http.ResponseWriter, r *http.Request
 	}
 	noStoreHeaders(w.Header())
 	writeJSON(w, http.StatusOK, map[string]any{"password_2fa_enabled": true})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleConfirmPassword2FALoginSetup(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	var body password2FALoginSetupConfirmRequest
+	if err := decodeJSONBody(r, &body); err != nil || body.SetupToken == "" || body.TOTPCode == "" {
+		return writeIdentityError(w, userdomain.ErrInvalidRequest)
+	}
+	result, err := s.auth.ConfirmPassword2FALoginSetup(r.Context(), body.SetupToken, body.TOTPCode, s.authAuditContext(r, reqctx))
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":             "completed",
+		"user":               serializeUser(result.User),
+		"access_token":       result.Tokens.AccessToken,
+		"access_expires_at":  result.Tokens.AccessExpiresAt,
+		"refresh_token":      result.Tokens.RefreshToken,
+		"refresh_expires_at": result.Tokens.RefreshExpiresAt,
+	})
 	return http.StatusOK, ""
 }
 
@@ -272,6 +323,42 @@ func (s *Server) handleOIDCHandoff(w http.ResponseWriter, r *http.Request, reqct
 		"refresh_token":      result.Tokens.RefreshToken,
 		"refresh_expires_at": result.Tokens.RefreshExpiresAt,
 	})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handlePreviewPasswordReset(w http.ResponseWriter, r *http.Request) (int, string) {
+	token, ok := passwordResetTokenFromPath(r.URL.Path)
+	if !ok {
+		return writeIdentityError(w, auth.ErrInvalidPasswordReset)
+	}
+	result, err := s.auth.PreviewPasswordReset(r.Context(), token)
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"password_reset": map[string]any{
+			"email":      result.Email,
+			"expires_at": result.ExpiresAt,
+		},
+	})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleCompletePasswordReset(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	token, ok := passwordResetTokenFromPath(r.URL.Path)
+	if !ok {
+		return writeIdentityError(w, auth.ErrInvalidPasswordReset)
+	}
+	var body passwordResetRequest
+	if err := decodeJSONBody(r, &body); err != nil || body.Password == "" {
+		return writeIdentityError(w, userdomain.ErrInvalidRequest)
+	}
+	if err := s.auth.CompletePasswordReset(r.Context(), token, body.Password, s.authAuditContext(r, reqctx)); err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{"status": "completed"})
 	return http.StatusOK, ""
 }
 
@@ -510,6 +597,50 @@ func (s *Server) handleLookupUser(w http.ResponseWriter, r *http.Request, _ Requ
 	return http.StatusOK, ""
 }
 
+func (s *Server) handleCreatePasswordResetLink(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	current, status, code, ok := s.authenticateUser(w, r)
+	if !ok {
+		return status, code
+	}
+	id, ok := userIDFromSuffixedPath(r.URL.Path, "/password-reset-link")
+	if !ok {
+		return writeIdentityError(w, userdomain.ErrNotFound)
+	}
+	result, err := s.auth.AdminCreatePasswordResetLink(r.Context(), current, id, func(token string) string {
+		return s.passwordResetURL(reqctx, token)
+	}, s.authAuditContext(r, reqctx))
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"password_reset": map[string]any{
+			"email":      result.Email,
+			"expires_at": result.ExpiresAt,
+			"reset_url":  result.ResetURL,
+		},
+	})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleAdminResetPassword2FA(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	current, status, code, ok := s.authenticateUser(w, r)
+	if !ok {
+		return status, code
+	}
+	id, ok := userIDFromSuffixedPath(r.URL.Path, "/password-2fa")
+	if !ok {
+		return writeIdentityError(w, userdomain.ErrNotFound)
+	}
+	user, err := s.auth.AdminResetPassword2FA(r.Context(), current, id, s.authAuditContext(r, reqctx))
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{"user": serializeUser(user)})
+	return http.StatusOK, ""
+}
+
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, _ RequestContext) (int, string) {
 	current, status, code, ok := s.authenticateUser(w, r)
 	if !ok {
@@ -545,12 +676,8 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request, reqctx 
 	if err != nil {
 		return writeIdentityError(w, err)
 	}
-	response := map[string]any{"user": serializeUser(result.User)}
-	if result.Password2FA != nil {
-		response["password_2fa"] = serializeUserTOTP(*result.Password2FA)
-	}
 	noStoreHeaders(w.Header())
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, map[string]any{"user": serializeUser(result.User)})
 	return http.StatusOK, ""
 }
 
@@ -613,11 +740,13 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 		retryAfter = 1
 	case errors.Is(err, userdomain.ErrInvalidInvite):
 		status, code, message = http.StatusNotFound, "invalid_invite", "Invite link is invalid, expired, or already used."
+	case errors.Is(err, auth.ErrInvalidPasswordReset):
+		status, code, message = http.StatusNotFound, "invalid_password_reset", "Password reset link is invalid, expired, or already used."
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, userdomain.ErrNotFound):
 		status, code, message = http.StatusNotFound, "certificate_not_found", "Resource does not exist or is not visible."
 	case errors.Is(err, auth.ErrForbidden), errors.Is(err, userdomain.ErrForbidden):
 		status, code, message = http.StatusForbidden, "application_access_denied", "The authenticated identity is not allowed to access this resource."
-	case errors.Is(err, userdomain.ErrInvalidRequest):
+	case errors.Is(err, auth.ErrInvalidRequest), errors.Is(err, userdomain.ErrInvalidRequest):
 		status, code, message = http.StatusBadRequest, "invalid_request", "Request body or query parameters are invalid."
 	}
 	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: map[string]any{}})
@@ -649,12 +778,9 @@ func decodeUserPatch(r *http.Request) (userdomain.UpdateUserServiceParams, error
 		return userdomain.UpdateUserServiceParams{}, errors.New("empty patch")
 	}
 	allowed := map[string]bool{
-		"display_name":           true,
-		"global_role":            true,
-		"status":                 true,
-		"password":               true,
-		"provision_password_2fa": true,
-		"reset_password_2fa":     true,
+		"display_name": true,
+		"global_role":  true,
+		"status":       true,
 	}
 	var out userdomain.UpdateUserServiceParams
 	for key, value := range raw {
@@ -682,23 +808,6 @@ func decodeUserPatch(r *http.Request) (userdomain.UpdateUserServiceParams, error
 			}
 			status := userdomain.Status(v)
 			out.Status = &status
-		case "password":
-			out.PasswordSet = true
-			if string(value) != "null" {
-				var v string
-				if err := json.Unmarshal(value, &v); err != nil {
-					return out, err
-				}
-				out.Password = &v
-			}
-		case "provision_password_2fa":
-			if err := json.Unmarshal(value, &out.ProvisionPassword2FA); err != nil {
-				return out, err
-			}
-		case "reset_password_2fa":
-			if err := json.Unmarshal(value, &out.ResetPassword2FA); err != nil {
-				return out, err
-			}
 		}
 	}
 	return out, nil
@@ -802,6 +911,26 @@ func userIDFromPath(p string) (string, bool) {
 	return id, true
 }
 
+func userIDFromSuffixedPath(p, suffix string) (string, bool) {
+	if suffix == "" || !strings.HasSuffix(p, suffix) {
+		return "", false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(p, "/v1/users/"), suffix)
+	id = strings.TrimSuffix(id, "/")
+	if id == "" || strings.Contains(id, "/") || id == "lookup" {
+		return "", false
+	}
+	return id, true
+}
+
+func passwordResetTokenFromPath(p string) (string, bool) {
+	token := strings.TrimPrefix(p, "/v1/auth/password-resets/")
+	if token == "" || strings.Contains(token, "/") {
+		return "", false
+	}
+	return token, true
+}
+
 func userInviteTokenFromPath(p, suffix string) (string, bool) {
 	if suffix != "" {
 		if !strings.HasSuffix(p, suffix) {
@@ -829,6 +958,21 @@ func (s *Server) userInviteURL(reqctx RequestContext, token string) string {
 		return "/signup?invite=" + url.QueryEscape(token)
 	}
 	return scheme + "://" + host + "/signup?invite=" + url.QueryEscape(token)
+}
+
+func (s *Server) passwordResetURL(reqctx RequestContext, token string) string {
+	scheme := reqctx.EffectiveScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	host := reqctx.EffectiveHost
+	if host == "" {
+		host = s.cfg.Server.PublicHostname
+	}
+	if host == "" {
+		return "/reset-password?token=" + url.QueryEscape(token)
+	}
+	return scheme + "://" + host + "/reset-password?token=" + url.QueryEscape(token)
 }
 
 func serializeUser(user userdomain.User) apiUser {

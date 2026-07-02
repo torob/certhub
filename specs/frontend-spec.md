@@ -137,6 +137,7 @@ Rules:
 - The frontend must treat User access tokens and refresh tokens as opaque strings and must not parse them as JWTs or depend on embedded claims.
 - User access tokens have prefix `cth_uat_v1_`; refresh tokens have prefix `cth_urt_v1_`. The prefix is only a public token-class marker. The remainder is opaque.
 - Password login supports Certhub-native TOTP 2FA when enabled or required by backend policy.
+- When password login returns `password_2fa_setup_required`, the frontend must render the returned provisioning URI as a QR code, submit the setup token and TOTP code to `/v1/auth/password-2fa/login-setup/confirm`, and must not store session tokens until confirmation succeeds.
 - OIDC login does not require Certhub-native 2FA and must not ask for a TOTP code.
 - The login screen must show the OIDC sign-in control only when the same-origin runtime frontend config indicates OIDC login is enabled.
 - The frontend must support TOTP setup, confirmation, and disable flows through `/v1/auth/password-2fa/*`.
@@ -583,8 +584,12 @@ User administration:
 - `GET /v1/auth/user-invites/{invite_token}`
 - `POST /v1/auth/user-invites/{invite_token}/signup`
 - `POST /v1/auth/user-invites/{invite_token}/signup/confirm-2fa`
+- `GET /v1/auth/password-resets/{reset_token}`
+- `POST /v1/auth/password-resets/{reset_token}`
 - `GET /v1/users/{user_id}`
 - `PATCH /v1/users/{user_id}`
+- `POST /v1/users/{user_id}/password-reset-link`
+- `DELETE /v1/users/{user_id}/password-2fa`
 
 Application administration:
 
@@ -711,7 +716,9 @@ Required frontend scenarios:
 - Forms validate user input client-side before submit and show field-level errors for invalid machine names, domains, wildcard domains, emails, URLs, enum values, duplicate SANs, invalid token expirations, and control characters in human text.
 - Backend validation errors still render correctly when server-side validation rejects an input the frontend allowed.
 - Login supports password and conditionally enabled OIDC modes and handles `invalid_credentials`, `password_auth_disabled`, and `user_not_provisioned`.
-- Password login supports TOTP 2FA and handles `password_2fa_required` and `invalid_2fa_code`; OIDC login does not show TOTP prompts.
+- Password login supports TOTP 2FA and handles `password_2fa_required`, `password_2fa_setup_required`, and `invalid_2fa_code`; OIDC login does not show TOTP prompts.
+- Admin User edit uses separate controls for generating password reset links and disabling password 2FA; it does not send plaintext passwords or TOTP provisioning flags through the User patch endpoint.
+- Public `/reset-password?token=...` previews the reset target and completes a one-time password reset without requiring an existing session.
 - Profile/Security conditionally shows password-2FA setup, disable, or required-by-policy status from `/v1/auth/me` identity capability fields.
 - OIDC login uses Authorization Code with PKCE only and never uses implicit flow or client secrets.
 - Login stores access and refresh tokens only in `sessionStorage`; refresh rotates both values; logout clears them.

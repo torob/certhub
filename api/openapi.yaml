@@ -214,6 +214,47 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /v1/auth/password-2fa/login-setup/confirm:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+    post:
+      tags: [Authentication]
+      operationId: confirmPassword2FALoginSetup
+      summary: Confirm required password-login TOTP setup and create a User session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Password2FALoginSetupConfirmRequest'
+            examples:
+              confirm:
+                value:
+                  setup_token: cth_pwd_2fa_setup_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+                  totp_code: '123456'
+      responses:
+        '200':
+          description: Password 2FA setup completed and login session created.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginCompletedResponse'
+              examples:
+                login:
+                  $ref: '#/components/examples/UserLoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /v1/auth/password-2fa:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
@@ -248,6 +289,80 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /v1/auth/password-resets/{reset_token}:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - name: reset_token
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^cth_pwd_reset_v1_[A-Za-z0-9_-]{43}$'
+    get:
+      tags: [Authentication]
+      operationId: previewPasswordReset
+      summary: Preview a one-time password reset link without consuming it.
+      security: []
+      responses:
+        '200':
+          description: Password reset link metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordResetPreviewResponse'
+              examples:
+                preview:
+                  value:
+                    password_reset:
+                      email: user@example.com
+                      expires_at: '2026-06-24T13:00:00Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Authentication]
+      operationId: completePasswordReset
+      summary: Set a new password through a one-time password reset link.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+            examples:
+              reset:
+                value:
+                  password: new correct horse battery staple
+      responses:
+        '200':
+          description: Password reset completed and existing sessions revoked.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordResetCompleteResponse'
+              examples:
+                completed:
+                  value:
+                    status: completed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /v1/auth/oidc/login:
     parameters:
@@ -789,6 +904,9 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CertificateRevokeRequest'
+            examples:
+              revoke:
+                $ref: '#/components/examples/CertificateRevokeRequest'
       responses:
         '202':
           description: Version revocation recorded and remote ACME revocation queued when applicable.
@@ -803,6 +921,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CertificateVersionResponse'
+              examples:
+                version:
+                  $ref: '#/components/examples/CertificateVersionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1385,6 +1506,78 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /v1/users/{user_id}/password-reset-link:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - $ref: '#/components/parameters/UserID'
+    post:
+      tags: [Users]
+      operationId: createUserPasswordResetLink
+      summary: Create a one-time password reset link for a User.
+      security:
+        - UserBearerAuth: []
+      responses:
+        '200':
+          description: Password reset link generated and shown once.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordResetLinkResponse'
+              examples:
+                resetLink:
+                  value:
+                    password_reset:
+                      email: user@example.com
+                      expires_at: '2026-06-24T13:00:00Z'
+                      reset_url: https://certhub.example.com/reset-password?token=cth_pwd_reset_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/users/{user_id}/password-2fa:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - $ref: '#/components/parameters/UserID'
+    delete:
+      tags: [Users]
+      operationId: resetUserPassword2FA
+      summary: Disable password TOTP for a User and revoke active sessions.
+      security:
+        - UserBearerAuth: []
+      responses:
+        '200':
+          description: Updated User metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+              examples:
+                user:
+                  $ref: '#/components/examples/UserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /v1/applications:
     parameters:
@@ -3464,10 +3657,17 @@ components:
           type: string
           pattern: '^[0-9]{6,8}$'
     LoginResponse:
+      oneOf:
+        - $ref: '#/components/schemas/LoginCompletedResponse'
+        - $ref: '#/components/schemas/Password2FASetupRequiredResponse'
+    LoginCompletedResponse:
       type: object
       additionalProperties: false
       required: [user, access_token, access_expires_at, refresh_token, refresh_expires_at]
       properties:
+        status:
+          type: string
+          enum: [completed]
         user:
           $ref: '#/components/schemas/User'
         access_token:
@@ -3480,6 +3680,19 @@ components:
         refresh_expires_at:
           type: string
           format: date-time
+    Password2FASetupRequiredResponse:
+      type: object
+      additionalProperties: false
+      required: [status, password_2fa_setup_token, password_2fa]
+      properties:
+        status:
+          type: string
+          enum: [password_2fa_setup_required]
+        password_2fa_setup_token:
+          type: string
+          pattern: '^cth_pwd_2fa_setup_v1_[A-Za-z0-9_-]{43}$'
+        password_2fa:
+          $ref: '#/components/schemas/Password2FAProvisioning'
     Password2FAProvisioning:
       type: object
       additionalProperties: false
@@ -3510,6 +3723,17 @@ components:
         totp_code:
           type: string
           pattern: '^[0-9]{6,8}$'
+    Password2FALoginSetupConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [setup_token, totp_code]
+      properties:
+        setup_token:
+          type: string
+          pattern: '^cth_pwd_2fa_setup_v1_[A-Za-z0-9_-]{43}$'
+        totp_code:
+          type: string
+          pattern: '^[0-9]{6,8}$'
     Password2FAStatusResponse:
       type: object
       additionalProperties: false
@@ -3532,6 +3756,61 @@ components:
         totp_code:
           type: string
           pattern: '^[0-9]{6,8}$'
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 12
+          maxLength: 1024
+    PasswordResetCompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [completed]
+    PasswordResetPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [password_reset]
+      properties:
+        password_reset:
+          $ref: '#/components/schemas/PasswordResetPreview'
+    PasswordResetLinkResponse:
+      type: object
+      additionalProperties: false
+      required: [password_reset]
+      properties:
+        password_reset:
+          $ref: '#/components/schemas/PasswordResetLink'
+    PasswordResetPreview:
+      type: object
+      additionalProperties: false
+      required: [email, expires_at]
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        expires_at:
+          type: string
+          format: date-time
+    PasswordResetLink:
+      type: object
+      additionalProperties: false
+      required: [email, expires_at, reset_url]
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        expires_at:
+          type: string
+          format: date-time
+        reset_url:
+          type: string
+          minLength: 1
+          maxLength: 4096
     OIDCHandoffRequest:
       type: object
       additionalProperties: false
@@ -3780,16 +4059,6 @@ components:
           $ref: '#/components/schemas/GlobalRole'
         status:
           $ref: '#/components/schemas/UserStatus'
-        password:
-          type: string
-          minLength: 12
-          maxLength: 1024
-          nullable: true
-          description: Plaintext replacement password; null removes password login.
-        provision_password_2fa:
-          type: boolean
-        reset_password_2fa:
-          type: boolean
     UserLookupResponse:
       type: object
       additionalProperties: false
@@ -4944,6 +5213,10 @@ components:
           reason: reissue
           created_at: '2026-06-24T12:00:00Z'
           updated_at: '2026-06-24T12:00:00Z'
+    CertificateRevokeRequest:
+      value:
+        reason: cessation_of_operation
+        note: Operator requested revocation.
     LifecycleNoteRequest:
       value:
         note: Operator requested immediate processing.

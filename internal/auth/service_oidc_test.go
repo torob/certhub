@@ -1443,6 +1443,10 @@ func (f *oidcFakeRepo) RevokeSession(context.Context, string, SessionRevokedReas
 	return false, errors.New("not implemented")
 }
 
+func (f *oidcFakeRepo) RevokeUserSessions(context.Context, string, SessionRevokedReason) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
 func (f *oidcFakeRepo) RotateRefreshToken(context.Context, RotateRefreshTokenParams) (Session, error) {
 	return Session{}, errors.New("not implemented")
 }
@@ -1493,6 +1497,30 @@ func (f *oidcFakeRepo) ConsumeOIDCHandoff(_ context.Context, handoffHash string)
 	}
 	f.handoffConsumed = true
 	return f.handoff, nil
+}
+
+func (f *oidcFakeRepo) CreatePasswordReset(context.Context, CreatePasswordResetParams) (PasswordResetToken, error) {
+	return PasswordResetToken{}, errors.New("not implemented")
+}
+
+func (f *oidcFakeRepo) GetActivePasswordResetByHash(context.Context, string) (PasswordResetToken, error) {
+	return PasswordResetToken{}, errors.New("not implemented")
+}
+
+func (f *oidcFakeRepo) ConsumePasswordReset(context.Context, string) (PasswordResetToken, error) {
+	return PasswordResetToken{}, errors.New("not implemented")
+}
+
+func (f *oidcFakeRepo) CreatePassword2FASetup(context.Context, CreatePassword2FASetupParams) (Password2FALoginSetup, error) {
+	return Password2FALoginSetup{}, errors.New("not implemented")
+}
+
+func (f *oidcFakeRepo) GetActivePassword2FASetupByHash(context.Context, string) (Password2FALoginSetup, error) {
+	return Password2FALoginSetup{}, errors.New("not implemented")
+}
+
+func (f *oidcFakeRepo) ConsumePassword2FASetup(context.Context, string) (Password2FALoginSetup, error) {
+	return Password2FALoginSetup{}, errors.New("not implemented")
 }
 
 func (f *oidcFakeRepo) Get(_ context.Context, userID string) (users.User, error) {

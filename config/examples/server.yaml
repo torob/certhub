@@ -8,3 +8,8 @@ http:
   trusted_proxy_cidrs: []
 self_certificate:
   sync_enabled: false
+auth:
+  password:
+    enabled: true
+    2fa_required: true
+  password_reset_ttl_seconds: 3600

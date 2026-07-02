@@ -124,6 +124,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/password-2fa/login-setup/confirm": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm required password-login TOTP setup and create a User session. */
+        post: operations["confirmPassword2FALoginSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/password-2fa": {
         parameters: {
             query?: never;
@@ -139,6 +159,29 @@ export interface paths {
         post?: never;
         /** Disable TOTP for the current User. */
         delete: operations["disablePassword2FA"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/password-resets/{reset_token}": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                reset_token: string;
+            };
+            cookie?: never;
+        };
+        /** Preview a one-time password reset link without consuming it. */
+        get: operations["previewPasswordReset"];
+        put?: never;
+        /** Set a new password through a one-time password reset link. */
+        post: operations["completePasswordReset"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -672,6 +715,50 @@ export interface paths {
         head?: never;
         /** Update mutable User fields. */
         patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/v1/users/{user_id}/password-reset-link": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                user_id: components["parameters"]["UserID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a one-time password reset link for a User. */
+        post: operations["createUserPasswordResetLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/users/{user_id}/password-2fa": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                user_id: components["parameters"]["UserID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Disable password TOTP for a User and revoke active sessions. */
+        delete: operations["resetUserPassword2FA"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/v1/applications": {
@@ -1281,7 +1368,10 @@ export interface components {
             password: string;
             totp_code?: string;
         };
-        LoginResponse: {
+        LoginResponse: components["schemas"]["LoginCompletedResponse"] | components["schemas"]["Password2FASetupRequiredResponse"];
+        LoginCompletedResponse: {
+            /** @enum {string} */
+            status?: "completed";
             user: components["schemas"]["User"];
             access_token: components["schemas"]["UserAccessToken"];
             /** Format: date-time */
@@ -1289,6 +1379,12 @@ export interface components {
             refresh_token: components["schemas"]["UserRefreshToken"];
             /** Format: date-time */
             refresh_expires_at: string;
+        };
+        Password2FASetupRequiredResponse: {
+            /** @enum {string} */
+            status: "password_2fa_setup_required";
+            password_2fa_setup_token: string;
+            password_2fa: components["schemas"]["Password2FAProvisioning"];
         };
         Password2FAProvisioning: {
             issuer: string;
@@ -1299,6 +1395,10 @@ export interface components {
         Password2FAConfirmRequest: {
             totp_code: string;
         };
+        Password2FALoginSetupConfirmRequest: {
+            setup_token: string;
+            totp_code: string;
+        };
         Password2FAStatusResponse: {
             /** @enum {boolean} */
             password_2fa_enabled: true;
@@ -1307,6 +1407,30 @@ export interface components {
             password?: string;
             totp_code?: string;
         } | unknown | unknown;
+        PasswordResetRequest: {
+            password: string;
+        };
+        PasswordResetCompleteResponse: {
+            /** @enum {string} */
+            status: "completed";
+        };
+        PasswordResetPreviewResponse: {
+            password_reset: components["schemas"]["PasswordResetPreview"];
+        };
+        PasswordResetLinkResponse: {
+            password_reset: components["schemas"]["PasswordResetLink"];
+        };
+        PasswordResetPreview: {
+            email: components["schemas"]["Email"];
+            /** Format: date-time */
+            expires_at: string;
+        };
+        PasswordResetLink: {
+            email: components["schemas"]["Email"];
+            /** Format: date-time */
+            expires_at: string;
+            reset_url: string;
+        };
         OIDCHandoffRequest: {
             handoff_id: string;
         };
@@ -1423,10 +1547,6 @@ export interface components {
             display_name?: components["schemas"]["HumanName"];
             global_role?: components["schemas"]["GlobalRole"];
             status?: components["schemas"]["UserStatus"];
-            /** @description Plaintext replacement password; null removes password login. */
-            password?: string | null;
-            provision_password_2fa?: boolean;
-            reset_password_2fa?: boolean;
         };
         UserLookupResponse: {
             user: components["schemas"]["UserLookup"];
@@ -2229,6 +2349,38 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    confirmPassword2FALoginSetup: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Password2FALoginSetupConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description Password 2FA setup completed and login session created. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginCompletedResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     disablePassword2FA: {
         parameters: {
             query?: never;
@@ -2258,6 +2410,69 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    previewPasswordReset: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                reset_token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Password reset link metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasswordResetPreviewResponse"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    completePasswordReset: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                reset_token: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Password reset completed and existing sessions revoked. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasswordResetCompleteResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
     startOIDCLogin: {
@@ -3164,6 +3379,68 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    createUserPasswordResetLink: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                user_id: components["parameters"]["UserID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Password reset link generated and shown once. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasswordResetLinkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    resetUserPassword2FA: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                user_id: components["parameters"]["UserID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Updated User metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listApplications: {

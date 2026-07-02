@@ -158,18 +158,13 @@ type BootstrapCreateAdminParams struct {
 }
 
 type UpdateUserServiceParams struct {
-	DisplayName          *string
-	GlobalRole           *GlobalRole
-	Status               *Status
-	PasswordSet          bool
-	Password             *string
-	ProvisionPassword2FA bool
-	ResetPassword2FA     bool
+	DisplayName *string
+	GlobalRole  *GlobalRole
+	Status      *Status
 }
 
 type UpdateUserResult struct {
-	User        User
-	Password2FA *TOTPProvisioning
+	User User
 }
 
 type ListUsersResult struct {
@@ -649,8 +644,7 @@ func (s *Service) updateUser(ctx context.Context, actor Actor, id string, params
 	if !actor.admin() {
 		return UpdateUserResult{}, ErrForbidden
 	}
-	current, err := s.repo.Get(ctx, id)
-	if err != nil {
+	if _, err := s.repo.Get(ctx, id); err != nil {
 		return UpdateUserResult{}, ErrNotFound
 	}
 	update := UpdateUserParams{}
@@ -663,48 +657,6 @@ func (s *Service) updateUser(ctx context.Context, actor Actor, id string, params
 	if params.Status != nil {
 		update.Status = storage.SetString(string(*params.Status))
 	}
-	var provisioning *TOTPProvisioning
-	passwordWillExist := current.PasswordHash != nil
-	if params.PasswordSet {
-		if params.Password == nil {
-			update.PasswordHash = storage.ClearString()
-			passwordWillExist = false
-		} else {
-			if err := security.ValidatePasswordPolicy(*params.Password, current.Email); err != nil {
-				return UpdateUserResult{}, ErrInvalidRequest
-			}
-			if s.cfg.Password.TwoFARequired && !params.ProvisionPassword2FA {
-				return UpdateUserResult{}, ErrPassword2FARequired
-			}
-			hash, err := security.HashPassword(*params.Password)
-			if err != nil {
-				return UpdateUserResult{}, err
-			}
-			update.PasswordHash = storage.SetString(hash)
-			passwordWillExist = true
-		}
-	}
-	if params.ResetPassword2FA {
-		if s.cfg.Password.TwoFARequired && passwordWillExist {
-			return UpdateUserResult{}, ErrPassword2FARequired
-		}
-		update.Password2FAEnabled = storage.SetBool(false)
-		update.TOTPSecretEncrypted = storage.ClearString()
-		update.PendingTOTPSecretEncrypted = storage.ClearString()
-	}
-	if params.ProvisionPassword2FA {
-		if !passwordWillExist {
-			return UpdateUserResult{}, ErrInvalidRequest
-		}
-		p, encrypted, err := s.newTOTPProvisioning(id, current.Email)
-		if err != nil {
-			return UpdateUserResult{}, err
-		}
-		update.Password2FAEnabled = storage.SetBool(true)
-		update.TOTPSecretEncrypted = storage.SetString(encrypted)
-		update.PendingTOTPSecretEncrypted = storage.ClearString()
-		provisioning = &p
-	}
 	user, err := s.repo.Update(ctx, id, update)
 	if err != nil {
 		return UpdateUserResult{}, classifyWriteError(err)
@@ -712,16 +664,7 @@ func (s *Service) updateUser(ctx context.Context, actor Actor, id string, params
 	if err := s.auditUserEvent(ctx, actor.ID, "user_updated", &user.ID, auditCtx, map[string]any{"status": string(user.Status), "global_role": string(user.GlobalRole)}); err != nil {
 		return UpdateUserResult{}, err
 	}
-	if params.ResetPassword2FA || provisioning != nil {
-		action := "password_2fa_disabled"
-		if provisioning != nil {
-			action = "password_2fa_enabled"
-		}
-		if err := s.auditUserEvent(ctx, actor.ID, action, &user.ID, auditCtx, map[string]any{"provisioned_by_admin": provisioning != nil}); err != nil {
-			return UpdateUserResult{}, err
-		}
-	}
-	return UpdateUserResult{User: user, Password2FA: provisioning}, nil
+	return UpdateUserResult{User: user}, nil
 }
 
 func (s *Service) LookupUser(ctx context.Context, actor Actor, email string, applicationID *string) (LookupUserResult, error) {

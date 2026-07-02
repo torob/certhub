@@ -38,6 +38,7 @@ config:
       password:
         enabled: true
         2fa_required: false
+      password_reset_ttl_seconds: 3600
       oidc:
         enabled: false
     workers:
