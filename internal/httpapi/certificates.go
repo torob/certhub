@@ -453,6 +453,7 @@ func (s *Server) authenticateCertificateUser(w http.ResponseWriter, r *http.Requ
 
 func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 	var state certdomain.StateError
+	var renewalNotDue certdomain.RenewalNotDueError
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "Internal server error."
@@ -473,6 +474,9 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusConflict, "issuer_not_configured", "No active default issuer is configured."
 	case errors.Is(err, certdomain.ErrSystemManagedResource):
 		status, code, message = http.StatusConflict, "system_managed_resource", "Resource is managed by Certhub configuration."
+	case errors.As(err, &renewalNotDue):
+		status, code, message = http.StatusConflict, "renewal_not_due", "Certificate is not inside its renewal window."
+		details = renewalNotDueDetails(renewalNotDue)
 	case errors.Is(err, certdomain.ErrConflict):
 		status, code, message = http.StatusConflict, "conflict", "Resource state conflicts with this request."
 	case errors.As(err, &state):
@@ -498,6 +502,18 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusConflict, "certificate_revoked", "Certificate is revoked."
 	}
 	return writeError(w, status, Error{Code: code, Message: message, Retryable: retryAfter > 0 || status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: details})
+}
+
+func renewalNotDueDetails(err certdomain.RenewalNotDueError) map[string]any {
+	details := map[string]any{
+		"certificate_id":     err.Certificate.ID,
+		"version":            err.Version.Version,
+		"renewal_not_before": err.RenewalNotBefore,
+	}
+	if err.Version.NotAfter != nil {
+		details["not_after"] = err.Version.NotAfter
+	}
+	return details
 }
 
 func certificateStateDetails(state certdomain.StateError) map[string]any {

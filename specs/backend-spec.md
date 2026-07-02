@@ -1799,7 +1799,9 @@ Description and notes:
 - User/web-console lifecycle endpoint.
 - Requires `manager` access on the Certificate's `application_id` or global `admin`.
 - Requires current Application domain scopes to cover every normalized SAN on the Certificate.
-- Reuses the current private key and creates a higher-numbered CertificateVersion with reason `renewal`.
+- Creates a higher-numbered CertificateVersion with reason `renewal` and a fresh private key.
+- If the latest active valid CertificateVersion is not inside the selected issuer's renewal window, this endpoint returns `409 renewal_not_due` and does not create a CertificateVersion or job.
+- If no active valid CertificateVersion exists because previous material is expired, this endpoint may create a recovery renewal CertificateVersion.
 - Manual renewal follows the same version-overlap constraints as auto renewal.
 - If a Certificate already has a `status=issuing` CertificateVersion with `reason=renewal`, this endpoint is idempotent and returns the existing in-progress renewal instead of creating another version.
 - If a Certificate has any other `status=issuing` CertificateVersion, such as initial issuance or key rotation, this endpoint returns `409 conflict` and does not create another version.
@@ -3033,7 +3035,7 @@ Material/archive endpoints expose reconciliation state only as normal lookup res
 2. When the latest valid CertificateVersion enters the renewal window, Certhub must enqueue renewal automatically when the issuer is active, current Application domain scopes still cover every SAN, no issuing CertificateVersion exists, and replacement-overlap constraints allow it.
 3. Auto renewal must be idempotent. For one Certificate, there must be at most one in-progress CertificateVersion with `status=issuing` at any time, including initial issuance, renewal, and key rotation.
 4. Renewal creates a higher-numbered CertificateVersion for the same Certificate identity. It does not create a new Certificate row.
-5. Renewal reuses the current private key by default. Key changes only when key rotation is explicitly requested.
+5. Every newly created CertificateVersion gets a fresh private key. Retrying the same in-progress issuing CertificateVersion reuses that version's already persisted private key.
 6. While renewal is in progress and the current CertificateVersion is still inside its validity window, material/archive endpoints must continue returning that current valid version.
 7. If renewal fails while an older CertificateVersion is still valid, material/archive endpoints must still return the older valid version. The renewal failure must be visible through Certificate metadata, CertificateVersion metadata, and audit events, but it must not break material retrieval until no valid version remains.
 8. After renewal succeeds, material/archive endpoints must return the renewed CertificateVersion because it has the highest valid `version`.
@@ -3457,7 +3459,7 @@ Certificate material consistency constraints:
 - `private_key_pem` plaintext, when present, must match the leaf certificate public key.
 - Leaf certificate SANs must match the parent Certificate's `normalized_sans`.
 
-Renewal creates a new row with the same `key_fingerprint_sha256`. Key rotation creates a new row with a different `key_fingerprint_sha256`.
+Renewal and key rotation both create a new row with a fresh `key_fingerprint_sha256`. Retrying the same in-progress issuing row preserves that row's `key_fingerprint_sha256`.
 
 Certificate material endpoints must always return the latest valid CertificateVersion, selected by highest `version` for the Certificate. Expired, failed, revoked, or incomplete versions must not be returned as current material. If the parent Certificate is revoked, endpoints must return `409 certificate_revoked`. If no valid version exists and an issuing version exists, endpoints must return `409 certificate_not_ready`. If no valid version exists because all versions are expired and no issuing version exists, endpoints must return `409 certificate_expired` instead of returning stale PEM material.
 
@@ -3849,6 +3851,7 @@ Rules:
 | `certificate_revoked` | `409` | No | `7` | Stop polling and show revoked status. `details` includes non-secret revocation metadata. |
 | `not_acceptable` | `406` | No | `2` | Request an accepted response media type. |
 | `renewal_overlap_exists` | `409` | No | `1` | Show lifecycle conflict and current valid versions. |
+| `renewal_not_due` | `409` | No | `1` | Manual renewal was requested before the active CertificateVersion entered the issuer renewal window. |
 | `system_managed_resource` | `409` | No | `1` | The resource is owned by backend process configuration. Show read-only/config-managed state instead of retrying the write. |
 | `conflict` | `409` | No | `1` | Show conflict and require operator action. |
 | `issuer_not_configured` | `409` | No | `1` | Admin must configure exactly one active default issuer or select an active issuer explicitly. |
@@ -4115,8 +4118,8 @@ Required backend scenarios:
 - Archive endpoints return `application/gzip` containing `cert.pem`, `chain.pem`, `fullchain.pem`, `privkey.pem`, and `metadata.json`.
 - Archive endpoints set `Content-Disposition: attachment; filename="<safe_certificate_name>.tar.gz"` where `<safe_certificate_name>` is derived from the first normalized SAN, falls back to Certificate ID, and contains no `*` or `.`.
 - Certificate lifecycle operations use only ID-based endpoints; criteria-based renew, rotate-key, and revoke endpoints do not exist.
-- Renewal creates a higher-numbered CertificateVersion with the existing private key.
-- Key rotation creates a higher-numbered CertificateVersion with a new private key.
+- Renewal creates a higher-numbered CertificateVersion with a new private key when the active version is inside the issuer renewal window, or when no active valid material exists because previous material is expired.
+- Key rotation creates a higher-numbered CertificateVersion with a new private key and is not gated by the renewal window.
 - Key rotation sets parent Certificate status `rotating_key` while in progress and records key-rotation failures in Certificate and CertificateVersion failure metadata.
 - Identity changes create a new Certificate row, not just a new CertificateVersion.
 - CertificateVersions have `created_at`, `updated_at`, `started_at`, and `completed_at` timestamps sufficient to detect stuck issuing work.

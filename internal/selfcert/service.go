@@ -282,6 +282,23 @@ func (r Reconciler) ReconcileDesired(ctx context.Context) (DesiredState, error) 
 			return DesiredState{}, err
 		}
 	}
+	if shouldEnsureRenewal(ctx, r, *desired, issuer) {
+		version, err := r.Certs.CreateIssuingVersion(ctx, certificates.CreateIssuingVersionParams{
+			CertificateID: desired.ID,
+			Reason:        certificates.IssuanceReasonRenewal,
+		})
+		if err != nil {
+			return DesiredState{}, err
+		}
+		if _, err := r.Certs.EnsureIssuanceJob(ctx, certificates.EnsureIssuanceJobParams{
+			CertificateID:        desired.ID,
+			CertificateVersionID: &version.ID,
+			Reason:               certificates.JobReasonRenewal,
+			NextRunAt:            time.Now().UTC(),
+		}); err != nil {
+			return DesiredState{}, err
+		}
+	}
 	return DesiredState{
 		Application: app,
 		Certificate: *desired,
@@ -371,6 +388,23 @@ func shouldEnsureInitialIssuance(cert certificates.Certificate) bool {
 	default:
 		return false
 	}
+}
+
+func shouldEnsureRenewal(ctx context.Context, r Reconciler, cert certificates.Certificate, issuer issuers.Issuer) bool {
+	switch cert.Status {
+	case certificates.StatusReady, certificates.StatusExpired:
+	default:
+		return false
+	}
+	version, err := r.Certs.GetLatestValidMaterial(ctx, cert.ID)
+	if err != nil {
+		return true
+	}
+	if version.NotAfter == nil {
+		return false
+	}
+	notBefore := version.NotAfter.Add(-time.Duration(issuer.RenewalWindowSeconds) * time.Second)
+	return !time.Now().UTC().Before(notBefore)
 }
 
 func buildMaterial(cert certificates.Certificate, issuer issuers.Issuer, version certificates.CertificateVersion, privateKey string) (tlsmaterial.TLSMaterial, bool) {

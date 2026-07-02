@@ -3060,6 +3060,7 @@ components:
         - certificate_revoked
         - not_acceptable
         - renewal_overlap_exists
+        - renewal_not_due
         - system_managed_resource
         - conflict
         - issuer_not_configured

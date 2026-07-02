@@ -24,6 +24,7 @@ var (
 	ErrForbidden                     = errors.New("forbidden")
 	ErrNotFound                      = errors.New("not found")
 	ErrConflict                      = errors.New("conflict")
+	ErrRenewalNotDue                 = errors.New("renewal not due")
 	ErrIssuerNotConfigured           = errors.New("issuer not configured")
 	ErrDomainNotAuthorized           = errors.New("domain not authorized")
 	ErrSystemManagedResource         = errors.New("system managed resource")
@@ -152,6 +153,20 @@ type StateError struct {
 	Err         error
 	Certificate Certificate
 	Version     *CertificateVersion
+}
+
+type RenewalNotDueError struct {
+	Certificate      Certificate
+	Version          CertificateVersion
+	RenewalNotBefore time.Time
+}
+
+func (e RenewalNotDueError) Error() string {
+	return ErrRenewalNotDue.Error()
+}
+
+func (e RenewalNotDueError) Unwrap() error {
+	return ErrRenewalNotDue
 }
 
 func (e StateError) Error() string {
@@ -367,6 +382,35 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		if err := txsvc.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
 			return err
 		}
+		if reason == IssuanceReasonRenewal {
+			existing, ok, err := txsvc.latestIssuingVersion(ctx, certificateID)
+			if err != nil {
+				return err
+			}
+			if ok {
+				if existing.Reason != IssuanceReasonRenewal {
+					return ErrConflict
+				}
+				version = existing
+				_, err = txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+					CertificateID:        cert.ID,
+					CertificateVersionID: &version.ID,
+					Reason:               JobReasonRenewal,
+					NextRunAt:            time.Now().UTC(),
+				})
+				if err != nil {
+					return classifyWriteError(err)
+				}
+				return nil
+			}
+			issuer, err := txsvc.issuers.Get(ctx, cert.IssuerID)
+			if err != nil {
+				return classifyReadError(err)
+			}
+			if err := txsvc.requireRenewalWindow(ctx, cert, issuer); err != nil {
+				return err
+			}
+		}
 		version, err = txsvc.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{CertificateID: certificateID, Reason: reason})
 		if err != nil {
 			return classifyWriteError(err)
@@ -504,6 +548,35 @@ func (s *Service) ensure(ctx context.Context, applicationID string, criteria Cri
 	return result, err
 }
 
+func (s *Service) latestIssuingVersion(ctx context.Context, certificateID string) (CertificateVersion, bool, error) {
+	versions, err := s.repo.ListVersions(ctx, ListVersionsParams{CertificateID: certificateID, ListOptions: storage.ListOptions{Limit: 1}})
+	if err != nil {
+		return CertificateVersion{}, false, classifyReadError(err)
+	}
+	if len(versions) == 0 || versions[0].Status != VersionStatusIssuing {
+		return CertificateVersion{}, false, nil
+	}
+	return versions[0], true, nil
+}
+
+func (s *Service) requireRenewalWindow(ctx context.Context, cert Certificate, issuer issuerdomain.Issuer) error {
+	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNoRows) {
+			return nil
+		}
+		return classifyReadError(err)
+	}
+	if version.NotAfter == nil {
+		return nil
+	}
+	notBefore := renewalNotBefore(*version.NotAfter, issuer)
+	if time.Now().UTC().Before(notBefore) {
+		return RenewalNotDueError{Certificate: cert, Version: version, RenewalNotBefore: notBefore}
+	}
+	return nil
+}
+
 func (s *Service) normalizeCriteria(ctx context.Context, in Criteria) (certcriteria.Normalized, issuerdomain.Issuer, error) {
 	normalized, err := certcriteria.Normalize(certcriteria.Criteria{Domains: in.Domains, KeyType: in.KeyType, Issuer: in.Issuer})
 	if err != nil {
@@ -628,6 +701,7 @@ func (s *Service) materialForCertificate(ctx context.Context, cert Certificate, 
 	}
 	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
 	if err != nil {
+		_ = s.enqueueRenewalRecovery(ctx, cert, issuer)
 		return MaterialResult{}, s.materialStateError(ctx, cert)
 	}
 	privateKey, err := s.decryptPrivateKey(version)
@@ -638,6 +712,7 @@ func (s *Service) materialForCertificate(ctx context.Context, cert Certificate, 
 	if !ok {
 		return MaterialResult{}, s.materialStateError(ctx, cert)
 	}
+	_ = s.enqueueRenewalIfDue(ctx, cert, issuer, version)
 	return MaterialResult{Certificate: cert, Version: version, Material: material}, nil
 }
 
@@ -647,12 +722,95 @@ func (s *Service) materialMetadataForCertificate(ctx context.Context, cert Certi
 	}
 	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
 	if err != nil {
+		issuer, issuerErr := s.issuers.Get(ctx, cert.IssuerID)
+		if issuerErr == nil {
+			_ = s.enqueueRenewalRecovery(ctx, cert, issuer)
+		}
 		return MaterialMetadataResult{}, s.materialStateError(ctx, cert)
 	}
 	if version.MaterialETag == nil || *version.MaterialETag == "" {
 		return MaterialMetadataResult{}, s.materialStateError(ctx, cert)
 	}
+	issuer, err := s.issuers.Get(ctx, cert.IssuerID)
+	if err == nil {
+		_ = s.enqueueRenewalIfDue(ctx, cert, issuer, version)
+	}
 	return MaterialMetadataResult{Certificate: cert, Version: version, MaterialETag: *version.MaterialETag}, nil
+}
+
+func (s *Service) enqueueRenewalIfDue(ctx context.Context, cert Certificate, issuer issuerdomain.Issuer, version CertificateVersion) error {
+	if issuer.Status != issuerdomain.StatusActive || version.NotAfter == nil {
+		return nil
+	}
+	if time.Now().UTC().Before(renewalNotBefore(*version.NotAfter, issuer)) {
+		return nil
+	}
+	if err := s.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
+		return nil
+	}
+	issuing, ok, err := s.latestIssuingVersion(ctx, cert.ID)
+	if err != nil || (ok && issuing.Reason != IssuanceReasonRenewal) {
+		return err
+	}
+	if ok {
+		_, err = s.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+			CertificateID:        cert.ID,
+			CertificateVersionID: &issuing.ID,
+			Reason:               JobReasonRenewal,
+			NextRunAt:            time.Now().UTC(),
+		})
+		return err
+	}
+	renewal, err := s.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{CertificateID: cert.ID, Reason: IssuanceReasonRenewal})
+	if err != nil {
+		return err
+	}
+	if renewal.Reason != IssuanceReasonRenewal {
+		return ErrConflict
+	}
+	_, err = s.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+		CertificateID:        cert.ID,
+		CertificateVersionID: &renewal.ID,
+		Reason:               JobReasonRenewal,
+		NextRunAt:            time.Now().UTC(),
+	})
+	return err
+}
+
+func (s *Service) enqueueRenewalRecovery(ctx context.Context, cert Certificate, issuer issuerdomain.Issuer) error {
+	if issuer.Status != issuerdomain.StatusActive || cert.Status == StatusRevoked || cert.Status == StatusFailed || cert.Status == StatusDeleted || cert.DeletedAt != nil {
+		return nil
+	}
+	if err := s.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
+		return nil
+	}
+	issuing, ok, err := s.latestIssuingVersion(ctx, cert.ID)
+	if err != nil || (ok && issuing.Reason != IssuanceReasonRenewal) {
+		return err
+	}
+	if ok {
+		_, err = s.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+			CertificateID:        cert.ID,
+			CertificateVersionID: &issuing.ID,
+			Reason:               JobReasonRenewal,
+			NextRunAt:            time.Now().UTC(),
+		})
+		return err
+	}
+	renewal, err := s.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{CertificateID: cert.ID, Reason: IssuanceReasonRenewal})
+	if err != nil {
+		return err
+	}
+	if renewal.Reason != IssuanceReasonRenewal {
+		return ErrConflict
+	}
+	_, err = s.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+		CertificateID:        cert.ID,
+		CertificateVersionID: &renewal.ID,
+		Reason:               JobReasonRenewal,
+		NextRunAt:            time.Now().UTC(),
+	})
+	return err
 }
 
 func (s *Service) materialStateError(ctx context.Context, cert Certificate) error {
@@ -861,6 +1019,10 @@ func (a Actor) admin() bool {
 
 func systemManagedApplication(app appdomain.Application) bool {
 	return app.SystemKind != nil && *app.SystemKind == appdomain.SystemKindCerthubServer
+}
+
+func renewalNotBefore(notAfter time.Time, issuer issuerdomain.Issuer) time.Time {
+	return notAfter.Add(-time.Duration(issuer.RenewalWindowSeconds) * time.Second)
 }
 
 func classifyReadError(err error) error {

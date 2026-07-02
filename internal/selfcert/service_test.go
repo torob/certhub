@@ -158,6 +158,42 @@ func TestReconcileDesiredStateUsesInternalStoresAndEnqueuesInitialIssuance(t *te
 	}
 }
 
+func TestReconcileDesiredStateEnqueuesRenewalInsideWindow(t *testing.T) {
+	apps := &fakeApplications{}
+	notBefore := time.Now().UTC().Add(-24 * time.Hour)
+	notAfter := time.Now().UTC().Add(12 * time.Hour)
+	certs := &fakeCertificates{
+		certs: []certificates.Certificate{{
+			ID:             testCertID,
+			ApplicationID:  testAppID,
+			IssuerID:       testIssuerID,
+			NormalizedSANs: []string{"certhub.example.com"},
+			KeyType:        certificates.KeyTypeECDSAP256,
+			Status:         certificates.StatusReady,
+		}},
+		material: &certificates.CertificateVersion{
+			ID:            testVersionID,
+			CertificateID: testCertID,
+			Version:       1,
+			Status:        certificates.VersionStatusValid,
+			NotBefore:     &notBefore,
+			NotAfter:      &notAfter,
+		},
+	}
+	reconciler := Reconciler{
+		Runtime: RuntimeConfig{Enabled: true, Hostname: "certhub.example.com", Issuer: "lets_encrypt", KeyType: "ecdsa-p256"},
+		Apps:    apps,
+		Certs:   certs,
+		Issuers: fakeIssuers{issuer: issuers.Issuer{ID: testIssuerID, Name: "lets_encrypt", Status: issuers.StatusActive, RenewalWindowSeconds: 86400}},
+	}
+	if _, err := reconciler.ReconcileDesired(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !certs.versionCreated || certs.versionReason != certificates.IssuanceReasonRenewal || !certs.jobCreated || certs.jobReason != certificates.JobReasonRenewal {
+		t.Fatalf("renewal not enqueued: version=%v reason=%s job=%v job_reason=%s", certs.versionCreated, certs.versionReason, certs.jobCreated, certs.jobReason)
+	}
+}
+
 func TestSyncedAuditMetadataIsSanitized(t *testing.T) {
 	appender := &fakeAudit{}
 	now := time.Now()
@@ -303,8 +339,12 @@ type fakeCertificates struct {
 	deleted        []string
 	created        bool
 	createdParams  certificates.CreateOrReuseCertificateParams
+	material       *certificates.CertificateVersion
+	materialErr    error
 	versionCreated bool
+	versionReason  certificates.IssuanceReason
 	jobCreated     bool
+	jobReason      certificates.JobReason
 }
 
 func (f *fakeCertificates) CreateOrReuse(_ context.Context, params certificates.CreateOrReuseCertificateParams) (certificates.Certificate, error) {
@@ -318,16 +358,24 @@ func (f *fakeCertificates) List(context.Context, certificates.ListCertificatesPa
 }
 
 func (f *fakeCertificates) GetLatestValidMaterial(context.Context, string) (certificates.CertificateVersion, error) {
-	return certificates.CertificateVersion{}, errors.New("not implemented")
+	if f.materialErr != nil {
+		return certificates.CertificateVersion{}, f.materialErr
+	}
+	if f.material == nil {
+		return certificates.CertificateVersion{}, errors.New("not implemented")
+	}
+	return *f.material, nil
 }
 
 func (f *fakeCertificates) CreateIssuingVersion(_ context.Context, params certificates.CreateIssuingVersionParams) (certificates.CertificateVersion, error) {
 	f.versionCreated = true
-	return certificates.CertificateVersion{ID: testVersionID, CertificateID: params.CertificateID, Version: 1, Status: certificates.VersionStatusIssuing}, nil
+	f.versionReason = params.Reason
+	return certificates.CertificateVersion{ID: testVersionID, CertificateID: params.CertificateID, Version: 1, Status: certificates.VersionStatusIssuing, Reason: params.Reason}, nil
 }
 
-func (f *fakeCertificates) EnsureIssuanceJob(context.Context, certificates.EnsureIssuanceJobParams) (certificates.IssuanceJob, error) {
+func (f *fakeCertificates) EnsureIssuanceJob(_ context.Context, params certificates.EnsureIssuanceJobParams) (certificates.IssuanceJob, error) {
 	f.jobCreated = true
+	f.jobReason = params.Reason
 	return certificates.IssuanceJob{}, nil
 }
 

@@ -188,6 +188,26 @@ func TestSerializeCertificateIncludesLatestVersion(t *testing.T) {
 	}
 }
 
+func TestWriteCertificateErrorRenewalNotDue(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	notBefore := time.Now().UTC().Add(24 * time.Hour)
+	rec := httptest.NewRecorder()
+	status, code := writeCertificateError(rec, certdomain.RenewalNotDueError{
+		Certificate:      fixture.cert,
+		Version:          fixture.version,
+		RenewalNotBefore: notBefore,
+	})
+	if status != http.StatusConflict || code != "renewal_not_due" {
+		t.Fatalf("status/code = %d %q body=%s", status, code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, required := range []string{`"code":"renewal_not_due"`, `"certificate_id":"` + fixture.cert.ID + `"`, `"renewal_not_before"`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("body missing %q: %s", required, body)
+		}
+	}
+}
+
 func TestListCertificatesForNonAdminUsesAccessibleApplicationIDs(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	user := fakeUser()

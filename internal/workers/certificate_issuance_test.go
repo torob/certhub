@@ -189,6 +189,55 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 	}
 }
 
+func TestRenewalGeneratesFreshPrivateKeyForNewVersion(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	fixture.job.Reason = certificates.JobReasonRenewal
+	fixture.version.Reason = certificates.IssuanceReasonRenewal
+	oldKeyFingerprint := "0000000000000000000000000000000000000000000000000000000000000000"
+	configureSuccessfulIssuance(t, &fixture)
+
+	if _, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1"); err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if len(fixture.store.storeMaterialCalls) != 1 {
+		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
+	}
+	got := fixture.store.storeMaterialCalls[0].KeyFingerprintSHA256
+	if got == "" || got == oldKeyFingerprint {
+		t.Fatalf("renewal key fingerprint = %q, old = %q", got, oldKeyFingerprint)
+	}
+}
+
+func TestIssuanceRetryReusesPersistedVersionPrivateKey(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	signer, privateKeyPEM, err := generatePrivateKey(certificates.KeyTypeECDSAP256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFingerprint, err := keyFingerprint(signer.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := fixture.service.KeySet.SealDatabaseValue([]byte(privateKeyPEM), certificatePrivateKeyAAD(fixture.version.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.version.PrivateKeyPEMEncrypted = &encrypted
+	fixture.version.KeyFingerprintSHA256 = &keyFingerprint
+	configureSuccessfulIssuance(t, &fixture)
+
+	if _, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1"); err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if len(fixture.store.storeMaterialCalls) != 1 {
+		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
+	}
+	call := fixture.store.storeMaterialCalls[0]
+	if call.PrivateKeyPEMEncrypted != encrypted || call.KeyFingerprintSHA256 != keyFingerprint {
+		t.Fatalf("material key changed: encrypted_equal=%v fingerprint=%q want=%q", call.PrivateKeyPEMEncrypted == encrypted, call.KeyFingerprintSHA256, keyFingerprint)
+	}
+}
+
 func TestDNSCleanupJobFailureDoesNotChangeReadyCertificate(t *testing.T) {
 	fixture := newIssuanceWorkerFixture(t)
 	encrypted, err := fixture.service.KeySet.SealDatabaseValue([]byte("txt-cleanup"), dnsChallengeTXTValueAAD("record-cleanup"))
