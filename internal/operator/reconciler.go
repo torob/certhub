@@ -311,7 +311,11 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 		}
 		r.emit(ctx, cert, "Warning", "IssuanceFailed", apiErr.Envelope.Message)
 		return backendResult("issuance_failed", code, 0), nil
-	case certerrors.CodeCertificateRevoked:
+	case certerrors.CodeCertificateRevoked, certerrors.CodeCertificateNoActiveVersion:
+		resultReason := "certificate_revoked"
+		if code == certerrors.CodeCertificateNoActiveVersion {
+			resultReason = "certificate_no_active_version"
+		}
 		r.setStatus(cert, PhaseFailed, Sanitize(apiErr.Envelope.Message),
 			condition(ConditionCertificateRevoked, ConditionTrue, "CertificateRevoked", apiErr.Envelope.Message, r.Now()),
 			condition(ConditionReady, ConditionFalse, "CertificateRevoked", apiErr.Envelope.Message, r.Now()),
@@ -320,7 +324,7 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 			return result, nil
 		}
 		r.emit(ctx, cert, "Warning", "CertificateRevoked", apiErr.Envelope.Message)
-		return backendResult("certificate_revoked", code, 0), nil
+		return backendResult(resultReason, code, 0), nil
 	case certerrors.CodeDomainNotAuthorized, certerrors.CodeApplicationSourceIPDenied, certerrors.CodeApplicationTokenRequired, certerrors.CodeInvalidToken:
 		message := "Certhub Application is not authorized for this certificate"
 		if code == certerrors.CodeApplicationSourceIPDenied {

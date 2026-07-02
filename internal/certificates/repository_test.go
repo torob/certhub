@@ -107,7 +107,7 @@ func TestCreateIssuingVersionReusesExistingAndUpdatesParentState(t *testing.T) {
 	if version.Status != VersionStatusIssuing || version.Reason != IssuanceReasonRenewal {
 		t.Fatalf("version = %#v", version)
 	}
-	for _, required := range []string{"for update", "v.status = 'issuing'", "union all", "failure_code = null"} {
+	for _, required := range []string{"for update", "v.status = 'issuing'", "union all", "failure_code = null", "revocation_reason = null", "revoked_at = null", "revoked_by_user_id = null"} {
 		if !strings.Contains(db.query, required) {
 			t.Fatalf("create version query missing %q: %s", required, db.query)
 		}
@@ -224,6 +224,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*d = r.values[i].(int)
 		case *int64:
 			*d = r.values[i].(int64)
+		case *bool:
+			*d = r.values[i].(bool)
 		case *time.Time:
 			*d = r.values[i].(time.Time)
 		case *[]string:
@@ -267,6 +269,8 @@ func certificateRowValues(now time.Time, sans []string, status string, failureCo
 		now,
 		nil,
 		int64(0),
+		false,
+		false,
 	}
 }
 
@@ -287,6 +291,9 @@ func certificateVersionRowValues(now time.Time, status, reason string, materialE
 		nil,
 		nil,
 		stringValue(materialETag),
+		nil,
+		nil,
+		nil,
 		nil,
 		nil,
 		nil,

@@ -32,7 +32,7 @@ Each backend request must send an `X-Request-ID` correlation ID and include it i
 - No User login, OIDC login, refresh-token handling, logout, or 2FA commands.
 - No Application creation, token management, User management, grant management, issuer management, or DNS provider management.
 - No server bootstrap, first-admin creation, migration, issuer bootstrap, or DNS provider bootstrap commands. Those direct database management jobs belong to the `certhub-server` binary.
-- No explicit certificate renew, rotate-key, revoke, delete, inspect, or list commands.
+- No explicit certificate lifecycle, version revoke, inspect, or list commands.
 - No local ACME or DNS provider behavior.
 - No ID-based certificate retrieval in v1. The CLI always uses criteria-based retrieval.
 - No syncing of Certhub's own reserved `certhub_server` serving certificate; that local filesystem sync is owned by the backend server.
@@ -167,10 +167,10 @@ Rules:
 - If the backend returns `200 OK`, the CLI writes the returned material to that item's output directory and updates metadata.
 - If the backend returns `204 No Content`, the CLI leaves that item's existing files unchanged and marks the item successful.
 - If the backend returns `404 certificate_not_found`, the CLI calls `POST /v1/sync/certificates` once with the same criteria, then retries `POST /v1/sync/certificates/tls-material`.
-- If the backend returns `409 certificate_not_ready` or `409 certificate_expired`, the CLI retries only when that configured certificate entry has `wait=true`.
+- If the backend returns `409 certificate_not_ready`, the CLI retries only when that configured certificate entry has `wait=true`.
 - If `wait=false` and material is unavailable, that item fails with code `6`.
 - If the backend returns `409 certificate_issuance_failed`, that item fails with code `7`. The CLI should display `error.details.failure_code` when present, such as `dns_provider_not_found` or `dns_validation_failed`.
-- If the backend returns `409 certificate_revoked`, that item fails with code `7`. The CLI should display non-secret revocation metadata when present.
+- If the backend returns `409 certificate_no_active_version`, that item fails with code `7` and should tell the operator that User reissue is required.
 - If the backend returns `409 issuer_not_configured`, that item fails with code `1` and should tell the operator that issuer configuration is required.
 - The CLI must use backend `Retry-After` or `error.retry_after_seconds` before the configured `poll_interval`.
 - If timeout occurs, that item fails with code `8`.
@@ -304,8 +304,8 @@ Mapping:
 - `invalid_token`, `invalid_credentials`, `session_expired`, and `refresh_token_not_allowed`: `3`.
 - `application_token_required`, `user_token_required`, `application_access_denied`, `application_source_ip_denied`, and `domain_not_authorized`: `4`.
 - `certificate_not_found` after the create attempt still cannot find metadata: `5`.
-- `certificate_not_ready` and `certificate_expired`: `6` when not waiting.
-- `certificate_issuance_failed` and `certificate_revoked`: `7`. If present, include nested `failure_code` or revocation metadata in error output.
+- `certificate_not_ready`: `6` when not waiting.
+- `certificate_issuance_failed` and `certificate_no_active_version`: `7`. If present, include nested `failure_code` or no-active-version metadata in error output.
 - `issuer_not_configured`: `1`.
 - `service_unavailable`, `issuer_unavailable`, `dns_provider_unavailable`, `dns_zone_discovery_failed`, `rate_limited`, and polling timeout: `8`.
 - Local file write, permission, atomic rename, or metadata write failure: `9`.
@@ -415,9 +415,8 @@ Required CLI scenarios:
 - `404 certificate_not_found` calls `POST /v1/sync/certificates` once, then resumes material polling.
 - `409 certificate_not_ready` with configured `wait=false` exits `6`.
 - `409 certificate_not_ready` with configured `wait=true` polls until material is ready or timeout occurs.
-- `409 certificate_expired` with configured `wait=true` polls material until renewed material is ready or timeout occurs.
 - `certificate_issuance_failed` exits `7` and displays nested `failure_code` when present.
-- `certificate_revoked` exits `7` and displays non-secret revocation metadata when present.
+- `certificate_no_active_version` exits `7` and displays reissue guidance.
 - Retryable backend dependency errors and rate limits use backend retry hints.
 - Polling timeout exits `8`.
 - In multi-certificate sync, one item failure does not prevent later items from syncing unless configured `fail_fast=true`.

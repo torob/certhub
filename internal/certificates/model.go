@@ -45,6 +45,7 @@ const (
 	IssuanceReasonInitialIssue IssuanceReason = "initial_issue"
 	IssuanceReasonRenewal      IssuanceReason = "renewal"
 	IssuanceReasonKeyRotation  IssuanceReason = "key_rotation"
+	IssuanceReasonReissue      IssuanceReason = "reissue"
 )
 
 type JobReason string
@@ -53,6 +54,7 @@ const (
 	JobReasonInitialIssue    JobReason = "initial_issue"
 	JobReasonRenewal         JobReason = "renewal"
 	JobReasonKeyRotation     JobReason = "key_rotation"
+	JobReasonReissue         JobReason = "reissue"
 	JobReasonRevocationRetry JobReason = "revocation_retry"
 	JobReasonDNSCleanup      JobReason = "dns_cleanup"
 )
@@ -104,23 +106,25 @@ const (
 )
 
 type Certificate struct {
-	ID               string
-	NormalizedSANs   []string
-	KeyType          KeyType
-	IssuerID         string
-	IssuerName       string
-	ApplicationID    string
-	Status           Status
-	FailureCode      *string
-	FailureMessage   *string
-	RevocationReason *RevocationReason
-	RevokedAt        *time.Time
-	RevokedByUserID  *string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	DeletedAt        *time.Time
-	VersionCount     int64
-	LatestVersion    *CertificateVersion
+	ID                    string
+	NormalizedSANs        []string
+	KeyType               KeyType
+	IssuerID              string
+	IssuerName            string
+	ApplicationID         string
+	Status                Status
+	FailureCode           *string
+	FailureMessage        *string
+	RevocationReason      *RevocationReason
+	RevokedAt             *time.Time
+	RevokedByUserID       *string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	DeletedAt             *time.Time
+	VersionCount          int64
+	LatestVersion         *CertificateVersion
+	HasActiveValidVersion bool
+	HasIssuingVersion     bool
 }
 
 type CertificateVersion struct {
@@ -141,6 +145,9 @@ type CertificateVersion struct {
 	MaterialETag                 *string
 	ACMEOrderURL                 *string
 	CertificateURL               *string
+	RevocationReason             *RevocationReason
+	RevokedAt                    *time.Time
+	RevokedByUserID              *string
 	ACMERevocationStatus         *ACMERemoteRevocationStatus
 	ACMERevocationAttempts       int
 	ACMERevokedAt                *time.Time

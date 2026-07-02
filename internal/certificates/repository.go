@@ -46,6 +46,14 @@ type ListVersionsParams struct {
 	CertificateID string
 }
 
+type RenewalCandidate struct {
+	CertificateID    string
+	ApplicationID    string
+	NormalizedSANs   []string
+	ActiveVersion    CertificateVersion
+	RenewalNotBefore time.Time
+}
+
 type CreateIssuingVersionParams struct {
 	ID            string
 	CertificateID string
@@ -96,10 +104,11 @@ type UpdateCertificateIssuanceStatusParams struct {
 	Status        Status
 }
 
-type RevokeCertificateParams struct {
-	ID              string
-	Reason          RevocationReason
-	RevokedByUserID string
+type RevokeCertificateVersionParams struct {
+	CertificateID        string
+	CertificateVersionID string
+	Reason               RevocationReason
+	RevokedByUserID      string
 }
 
 type DeleteCertificateParams struct {
@@ -262,6 +271,65 @@ func (r Repository) Count(ctx context.Context, params ListCertificatesParams) (i
 	return total, nil
 }
 
+func (r Repository) ListRenewalCandidates(ctx context.Context, limit int) ([]RenewalCandidate, error) {
+	if limit <= 0 {
+		return nil, errors.New("limit must be positive")
+	}
+	if limit > storage.MaxListLimit {
+		limit = storage.MaxListLimit
+	}
+	rows, err := r.db.Query(ctx, `
+with latest as (
+    select distinct on (v.certificate_id) `+certificateVersionSelectSQL("v")+`
+    from certificate_versions v
+    where v.status = 'valid'
+      and v.cert_pem is not null
+      and v.chain_pem is not null
+      and v.fullchain_pem is not null
+      and v.private_key_pem is not null
+      and v.material_etag is not null
+      and v.not_before <= now()
+      and v.not_after > now()
+    order by v.certificate_id, v.version desc
+)
+select `+certificateVersionSelectSQL("latest")+`,
+       latest.not_after - (i.renewal_window_seconds * interval '1 second') as renewal_not_before,
+       c.application_id,
+       c.normalized_sans
+from certificates c
+join latest on latest.certificate_id = c.id
+join issuers i on i.id = c.issuer_id
+where c.deleted_at is null
+  and c.status <> 'deleted'
+  and i.status = 'active'
+  and latest.not_after <= now() + (i.renewal_window_seconds * interval '1 second')
+  and not exists (
+      select 1
+      from certificate_versions issuing
+      where issuing.certificate_id = c.id
+        and issuing.status = 'issuing'
+        and issuing.reason = 'renewal'
+  )
+order by latest.not_after asc, latest.certificate_id asc
+limit $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list renewal candidates: %w", err)
+	}
+	defer rows.Close()
+	var candidates []RenewalCandidate
+	for rows.Next() {
+		candidate, err := scanRenewalCandidate(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list renewal candidates: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list renewal candidates: %w", err)
+	}
+	return candidates, nil
+}
+
 func (r Repository) LatestValidVersion(ctx context.Context, certificateID string) (CertificateVersion, error) {
 	if err := storage.ValidateUUID(certificateID, "certificate_id"); err != nil {
 		return CertificateVersion{}, err
@@ -336,12 +404,12 @@ where v.certificate_id = $1
   and v.chain_pem is not null
   and v.fullchain_pem is not null
   and v.private_key_pem is not null
-  and v.material_etag is not null
-  and v.not_before <= now()
-  and v.not_after > now()
-  and c.status not in ('revoked', 'failed', 'deleted')
-order by v.version desc
-limit 1`, certificateID))
+	  and v.material_etag is not null
+	  and v.not_before <= now()
+	  and v.not_after > now()
+	  and c.status not in ('failed', 'deleted')
+	order by v.version desc
+	limit 1`, certificateID))
 	if err != nil {
 		return CertificateVersion{}, fmt.Errorf("get latest valid certificate material: %w", err)
 	}
@@ -398,6 +466,9 @@ with locked_certificate as (
     set status = $4,
         failure_code = null,
         failure_message = null,
+        revocation_reason = null,
+        revoked_at = null,
+        revoked_by_user_id = null,
         updated_at = now()
     where id = $2
       and exists (select 1 from inserted)
@@ -579,39 +650,72 @@ returning `+prefixedIssuanceJobColumnsSQL("j"), params.JobID, params.WorkerID, p
 	return job, nil
 }
 
-func (r Repository) RevokeCertificate(ctx context.Context, params RevokeCertificateParams) (Certificate, error) {
-	if err := validateRevokeCertificate(params); err != nil {
-		return Certificate{}, err
+func (r Repository) RevokeCertificateVersion(ctx context.Context, params RevokeCertificateVersionParams) (CertificateVersion, error) {
+	if err := validateRevokeCertificateVersion(params); err != nil {
+		return CertificateVersion{}, err
 	}
-	cert, err := scanCertificate(r.db.QueryRow(ctx, `
-with cert_update as (
-    update certificates
+	version, err := scanCertificateVersion(r.db.QueryRow(ctx, `
+with target as (
+    select `+certificateVersionSelectSQL("v")+`
+    from certificate_versions v
+    join certificates c on c.id = v.certificate_id
+    where v.id = $2
+      and v.certificate_id = $1
+      and c.status <> 'deleted'
+      and v.status in ('valid', 'revoked')
+      and v.cert_pem is not null
+      and v.chain_pem is not null
+      and v.fullchain_pem is not null
+      and v.private_key_pem is not null
+      and v.material_etag is not null
+    for update of v
+), updated as (
+    update certificate_versions v
     set status = 'revoked',
-        revocation_reason = $2,
-        revoked_at = coalesce(revoked_at, now()),
-        revoked_by_user_id = coalesce(revoked_by_user_id, $3),
-        failure_code = null,
-        failure_message = null,
+        revocation_reason = coalesce(v.revocation_reason, $3),
+        revoked_at = coalesce(v.revoked_at, now()),
+        revoked_by_user_id = coalesce(v.revoked_by_user_id, $4),
+        acme_revocation_status = case
+            when v.acme_revocation_status = 'succeeded' then v.acme_revocation_status
+            else coalesce(v.acme_revocation_status, 'pending')
+        end,
+        completed_at = coalesce(v.completed_at, now()),
         updated_at = now()
-    where id = $1
-      and status <> 'deleted'
-    returning `+certificateReturningSQL()+`
-), version_update as (
-    update certificate_versions
-    set status = 'revoked',
-	acme_revocation_status = coalesce(acme_revocation_status, 'pending'),
-        completed_at = coalesce(completed_at, now()),
+    where v.id = $2
+      and exists (select 1 from target)
+      and v.status = 'valid'
+    returning `+certificateVersionSelectSQL("v")+`
+), parent_update as (
+    update certificates c
+    set status = case
+            when exists (
+                select 1
+                from certificate_versions active
+                where active.certificate_id = c.id
+                  and active.status = 'valid'
+                  and active.cert_pem is not null
+                  and active.chain_pem is not null
+                  and active.fullchain_pem is not null
+                  and active.private_key_pem is not null
+                  and active.material_etag is not null
+                  and active.not_before <= now()
+                  and active.not_after > now()
+            ) then 'ready'
+            else c.status
+        end,
         updated_at = now()
-    where certificate_id = $1
-      and status = 'valid'
-      and not_after > now()
+    where c.id = $1
+      and exists (select 1 from updated)
     returning 1
 )
-select * from cert_update`, params.ID, string(params.Reason), params.RevokedByUserID))
+select * from updated
+union all
+select * from target where not exists (select 1 from updated)
+limit 1`, params.CertificateID, params.CertificateVersionID, string(params.Reason), params.RevokedByUserID))
 	if err != nil {
-		return Certificate{}, fmt.Errorf("revoke certificate: %w", err)
+		return CertificateVersion{}, fmt.Errorf("revoke certificate version: %w", err)
 	}
-	return cert, nil
+	return version, nil
 }
 
 func (r Repository) DeleteCertificate(ctx context.Context, params DeleteCertificateParams) (Certificate, error) {
@@ -1125,13 +1229,17 @@ func certificateSelectSQL(prefix string) string {
 		prefix + `.application_id, ` + prefix + `.status, ` + prefix + `.failure_code, ` + prefix + `.failure_message, ` +
 		prefix + `.revocation_reason, ` + prefix + `.revoked_at, ` + prefix + `.revoked_by_user_id, ` +
 		prefix + `.created_at, ` + prefix + `.updated_at, ` + prefix + `.deleted_at, ` +
-		`(select count(*) from certificate_versions where certificate_id = ` + prefix + `.id)::bigint`
+		`(select count(*) from certificate_versions where certificate_id = ` + prefix + `.id)::bigint, ` +
+		`exists (select 1 from certificate_versions v where v.certificate_id = ` + prefix + `.id and v.status = 'valid' and v.cert_pem is not null and v.chain_pem is not null and v.fullchain_pem is not null and v.private_key_pem is not null and v.material_etag is not null and v.not_before <= now() and v.not_after > now() and ` + prefix + `.status not in ('failed', 'deleted')), ` +
+		`exists (select 1 from certificate_versions v where v.certificate_id = ` + prefix + `.id and v.status = 'issuing')`
 }
 
 func certificateReturningSQL() string {
 	return `id, normalized_sans, key_type, issuer_id, (select i.name from issuers i where i.id = certificates.issuer_id), application_id, status, failure_code, failure_message,
     revocation_reason, revoked_at, revoked_by_user_id, created_at, updated_at, deleted_at,
-    (select count(*) from certificate_versions where certificate_id = certificates.id)::bigint`
+    (select count(*) from certificate_versions where certificate_id = certificates.id)::bigint,
+    exists (select 1 from certificate_versions v where v.certificate_id = certificates.id and v.status = 'valid' and v.cert_pem is not null and v.chain_pem is not null and v.fullchain_pem is not null and v.private_key_pem is not null and v.material_etag is not null and v.not_before <= now() and v.not_after > now() and certificates.status not in ('failed', 'deleted')),
+    exists (select 1 from certificate_versions v where v.certificate_id = certificates.id and v.status = 'issuing')`
 }
 
 func certificateVersionSelectSQL(prefix string) string {
@@ -1140,6 +1248,7 @@ func certificateVersionSelectSQL(prefix string) string {
 		prefix + `.private_key_pem, ` + prefix + `.not_before, ` + prefix + `.not_after, ` +
 		prefix + `.serial_number, ` + prefix + `.fingerprint_sha256, ` + prefix + `.key_fingerprint_sha256, ` +
 		prefix + `.material_etag, ` + prefix + `.acme_order_url, ` + prefix + `.certificate_url, ` +
+		prefix + `.revocation_reason, ` + prefix + `.revoked_at, ` + prefix + `.revoked_by_user_id, ` +
 		prefix + `.acme_revocation_status, ` + prefix + `.acme_revocation_attempts, ` + prefix + `.acme_revoked_at, ` +
 		prefix + `.acme_revocation_failure_code, ` + prefix + `.acme_revocation_failure_message, ` +
 		prefix + `.created_at, ` + prefix + `.updated_at, ` + prefix + `.started_at, ` + prefix + `.completed_at, ` +
@@ -1148,10 +1257,11 @@ func certificateVersionSelectSQL(prefix string) string {
 
 func certificateVersionReturningSQL() string {
 	return `id, certificate_id, version, status, reason, cert_pem, chain_pem, fullchain_pem,
-    private_key_pem, not_before, not_after, serial_number, fingerprint_sha256, key_fingerprint_sha256,
-    material_etag, acme_order_url, certificate_url, acme_revocation_status, acme_revocation_attempts,
-    acme_revoked_at, acme_revocation_failure_code, acme_revocation_failure_message,
-    created_at, updated_at, started_at, completed_at, issued_at, failure_code, failure_message`
+	    private_key_pem, not_before, not_after, serial_number, fingerprint_sha256, key_fingerprint_sha256,
+	    material_etag, acme_order_url, certificate_url, revocation_reason, revoked_at, revoked_by_user_id,
+	    acme_revocation_status, acme_revocation_attempts,
+	    acme_revoked_at, acme_revocation_failure_code, acme_revocation_failure_message,
+	    created_at, updated_at, started_at, completed_at, issued_at, failure_code, failure_message`
 }
 
 func issuanceJobReturningSQL() string {
@@ -1203,6 +1313,8 @@ func scanCertificate(row scanner) (Certificate, error) {
 		&cert.UpdatedAt,
 		&deletedAt,
 		&cert.VersionCount,
+		&cert.HasActiveValidVersion,
+		&cert.HasIssuingVersion,
 	); err != nil {
 		return Certificate{}, err
 	}
@@ -1224,15 +1336,20 @@ func scanCertificate(row scanner) (Certificate, error) {
 }
 
 func scanCertificateVersion(row scanner) (CertificateVersion, error) {
+	return scanCertificateVersionWith(row)
+}
+
+func scanCertificateVersionWith(row scanner, extraDestinations ...any) (CertificateVersion, error) {
 	var version CertificateVersion
 	var status, reason string
 	var certPEM, chainPEM, fullchainPEM, privateKeyPEM sql.NullString
 	var serialNumber, fingerprint, keyFingerprint, etag sql.NullString
 	var acmeOrderURL, certificateURL, acmeRevocationStatus sql.NullString
+	var revocationReason, revokedByUserID sql.NullString
 	var revocationFailureCode, revocationFailureMessage sql.NullString
 	var failureCode, failureMessage sql.NullString
-	var notBefore, notAfter, acmeRevokedAt, startedAt, completedAt, issuedAt sql.NullTime
-	if err := row.Scan(
+	var notBefore, notAfter, revokedAt, acmeRevokedAt, startedAt, completedAt, issuedAt sql.NullTime
+	destinations := []any{
 		&version.ID,
 		&version.CertificateID,
 		&version.Version,
@@ -1250,6 +1367,9 @@ func scanCertificateVersion(row scanner) (CertificateVersion, error) {
 		&etag,
 		&acmeOrderURL,
 		&certificateURL,
+		&revocationReason,
+		&revokedAt,
+		&revokedByUserID,
 		&acmeRevocationStatus,
 		&version.ACMERevocationAttempts,
 		&acmeRevokedAt,
@@ -1262,7 +1382,9 @@ func scanCertificateVersion(row scanner) (CertificateVersion, error) {
 		&issuedAt,
 		&failureCode,
 		&failureMessage,
-	); err != nil {
+	}
+	destinations = append(destinations, extraDestinations...)
+	if err := row.Scan(destinations...); err != nil {
 		return CertificateVersion{}, err
 	}
 	version.Status = VersionStatus(status)
@@ -1279,6 +1401,12 @@ func scanCertificateVersion(row scanner) (CertificateVersion, error) {
 	version.MaterialETag = stringPtr(etag)
 	version.ACMEOrderURL = stringPtr(acmeOrderURL)
 	version.CertificateURL = stringPtr(certificateURL)
+	if revocationReason.Valid {
+		value := RevocationReason(revocationReason.String)
+		version.RevocationReason = &value
+	}
+	version.RevokedAt = timePtr(revokedAt)
+	version.RevokedByUserID = stringPtr(revokedByUserID)
 	if acmeRevocationStatus.Valid {
 		value := ACMERemoteRevocationStatus(acmeRevocationStatus.String)
 		version.ACMERevocationStatus = &value
@@ -1292,6 +1420,17 @@ func scanCertificateVersion(row scanner) (CertificateVersion, error) {
 	version.FailureCode = stringPtr(failureCode)
 	version.FailureMessage = stringPtr(failureMessage)
 	return version, nil
+}
+
+func scanRenewalCandidate(row scanner) (RenewalCandidate, error) {
+	var renewalNotBefore time.Time
+	var applicationID string
+	var normalizedSANs []string
+	version, err := scanCertificateVersionWith(row, &renewalNotBefore, &applicationID, &normalizedSANs)
+	if err != nil {
+		return RenewalCandidate{}, err
+	}
+	return RenewalCandidate{CertificateID: version.CertificateID, ApplicationID: applicationID, NormalizedSANs: normalizedSANs, ActiveVersion: version, RenewalNotBefore: renewalNotBefore}, nil
 }
 
 func scanIssuanceJob(row scanner) (IssuanceJob, error) {
@@ -1399,6 +1538,8 @@ func statusForIssuanceReason(reason IssuanceReason) Status {
 		return StatusRenewing
 	case IssuanceReasonKeyRotation:
 		return StatusRotatingKey
+	case IssuanceReasonReissue:
+		return StatusIssuing
 	default:
 		return StatusIssuing
 	}

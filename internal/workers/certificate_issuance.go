@@ -217,7 +217,7 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 
 func shouldEnqueueDNSCleanup(reason certificates.JobReason) bool {
 	switch reason {
-	case certificates.JobReasonInitialIssue, certificates.JobReasonRenewal, certificates.JobReasonKeyRotation:
+	case certificates.JobReasonInitialIssue, certificates.JobReasonRenewal, certificates.JobReasonKeyRotation, certificates.JobReasonReissue:
 		return true
 	default:
 		return false
@@ -381,6 +381,8 @@ func (s *CertificateIssuanceService) ensureJobVersion(ctx context.Context, worke
 		reason = certificates.IssuanceReasonRenewal
 	case certificates.JobReasonKeyRotation:
 		reason = certificates.IssuanceReasonKeyRotation
+	case certificates.JobReasonReissue:
+		reason = certificates.IssuanceReasonReissue
 	}
 	version, err := s.Certificates.CreateIssuingVersion(ctx, certificates.CreateIssuingVersionParams{
 		CertificateID: job.CertificateID,

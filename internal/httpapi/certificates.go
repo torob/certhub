@@ -26,29 +26,22 @@ type certificateRevokeRequest struct {
 	Note   string `json:"note"`
 }
 
-type certificateDeleteRequest struct {
-	Revoke bool   `json:"revoke"`
-	Reason string `json:"reason"`
-	Note   string `json:"note"`
-}
-
 type apiCertificate struct {
-	ID               string                 `json:"id"`
-	ApplicationID    string                 `json:"application_id"`
-	NormalizedSANs   []string               `json:"normalized_sans"`
-	KeyType          string                 `json:"key_type"`
-	IssuerID         string                 `json:"issuer_id"`
-	IssuerName       *string                `json:"issuer_name,omitempty"`
-	Status           string                 `json:"status"`
-	LatestVersion    *apiCertificateVersion `json:"latest_version,omitempty"`
-	FailureCode      *string                `json:"failure_code,omitempty"`
-	FailureMessage   *string                `json:"failure_message,omitempty"`
-	RevocationReason *string                `json:"revocation_reason,omitempty"`
-	RevokedAt        *time.Time             `json:"revoked_at,omitempty"`
-	RevokedByUserID  *string                `json:"revoked_by_user_id,omitempty"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
-	DeletedAt        *time.Time             `json:"deleted_at,omitempty"`
+	ID                    string                 `json:"id"`
+	ApplicationID         string                 `json:"application_id"`
+	NormalizedSANs        []string               `json:"normalized_sans"`
+	KeyType               string                 `json:"key_type"`
+	IssuerID              string                 `json:"issuer_id"`
+	IssuerName            *string                `json:"issuer_name,omitempty"`
+	Status                string                 `json:"status"`
+	LatestVersion         *apiCertificateVersion `json:"latest_version,omitempty"`
+	FailureCode           *string                `json:"failure_code,omitempty"`
+	FailureMessage        *string                `json:"failure_message,omitempty"`
+	CreatedAt             time.Time              `json:"created_at"`
+	UpdatedAt             time.Time              `json:"updated_at"`
+	DeletedAt             *time.Time             `json:"deleted_at,omitempty"`
+	HasActiveValidVersion bool                   `json:"has_active_valid_version"`
+	HasIssuingVersion     bool                   `json:"has_issuing_version"`
 }
 
 type apiCertificateVersion struct {
@@ -63,6 +56,9 @@ type apiCertificateVersion struct {
 	FingerprintSHA256            *string    `json:"fingerprint_sha256,omitempty"`
 	KeyFingerprintSHA256         *string    `json:"key_fingerprint_sha256,omitempty"`
 	MaterialETag                 *string    `json:"material_etag,omitempty"`
+	RevocationReason             *string    `json:"revocation_reason,omitempty"`
+	RevokedAt                    *time.Time `json:"revoked_at,omitempty"`
+	RevokedByUserID              *string    `json:"revoked_by_user_id,omitempty"`
 	ACMERevocationStatus         *string    `json:"acme_revocation_status,omitempty"`
 	ACMERevocationAttempts       int        `json:"acme_revocation_attempts"`
 	ACMERevokedAt                *time.Time `json:"acme_revoked_at,omitempty"`
@@ -224,11 +220,31 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 	if !ok {
 		return status, code
 	}
+	actor := certificateActor(current)
+	if certID, versionID, tail, ok := certificateVersionPath(r.URL.Path); ok {
+		switch {
+		case r.Method == http.MethodGet && tail == "tls-archive":
+			return s.handleIDVersionArchive(w, r, reqctx, actor, certID, versionID)
+		case r.Method == http.MethodPost && tail == "revoke":
+			var body certificateRevokeRequest
+			if err := decodeJSONBody(r, &body); err != nil || body.Reason == "" {
+				return writeCertificateError(w, certdomain.ErrInvalidRequest)
+			}
+			version, err := s.certs.RevokeCertificateVersion(r.Context(), actor, certID, versionID, certdomain.RevocationReason(body.Reason))
+			if err != nil {
+				return writeCertificateError(w, err)
+			}
+			noStoreHeaders(w.Header())
+			writeJSON(w, http.StatusAccepted, map[string]any{"version": serializeCertificateVersion(version)})
+			return http.StatusAccepted, ""
+		default:
+			return writeCertificateError(w, certdomain.ErrNotFound)
+		}
+	}
 	id, tail, ok := certificatePathID(r.URL.Path)
 	if !ok {
 		return writeCertificateError(w, certdomain.ErrNotFound)
 	}
-	actor := certificateActor(current)
 	switch {
 	case r.Method == http.MethodGet && tail == "":
 		cert, err := s.certs.GetCertificate(r.Context(), actor, id)
@@ -256,10 +272,12 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		return http.StatusOK, ""
 	case r.Method == http.MethodGet && tail == "tls-archive":
 		return s.handleIDArchive(w, r, reqctx, actor, id)
-	case r.Method == http.MethodPost && (tail == "renew" || tail == "rotate-key"):
+	case r.Method == http.MethodPost && (tail == "renew" || tail == "rotate-key" || tail == "reissue"):
 		reason := certdomain.IssuanceReasonRenewal
 		if tail == "rotate-key" {
 			reason = certdomain.IssuanceReasonKeyRotation
+		} else if tail == "reissue" {
+			reason = certdomain.IssuanceReasonReissue
 		}
 		version, err := s.certs.StartLifecycle(r.Context(), actor, id, reason)
 		if err != nil {
@@ -269,34 +287,6 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		w.Header().Set("Retry-After", "5")
 		writeJSON(w, http.StatusAccepted, map[string]any{"version": serializeCertificateVersion(version)})
 		return http.StatusAccepted, ""
-	case r.Method == http.MethodPost && tail == "revoke":
-		var body certificateRevokeRequest
-		if err := decodeJSONBody(r, &body); err != nil || body.Reason == "" {
-			return writeCertificateError(w, certdomain.ErrInvalidRequest)
-		}
-		cert, err := s.certs.RevokeCertificate(r.Context(), actor, id, certdomain.RevocationReason(body.Reason))
-		if err != nil {
-			return writeCertificateError(w, err)
-		}
-		noStoreHeaders(w.Header())
-		writeJSON(w, http.StatusAccepted, map[string]any{"certificate": serializeCertificate(cert)})
-		return http.StatusAccepted, ""
-	case r.Method == http.MethodDelete && tail == "":
-		body := certificateDeleteRequest{}
-		if r.Body != nil && r.ContentLength != 0 {
-			if err := decodeJSONBody(r, &body); err != nil {
-				return writeCertificateError(w, certdomain.ErrInvalidRequest)
-			}
-		}
-		if body.Revoke && body.Reason == "" {
-			return writeCertificateError(w, certdomain.ErrInvalidRequest)
-		}
-		if err := s.certs.DeleteCertificate(r.Context(), actor, id, body.Revoke, certdomain.RevocationReason(body.Reason)); err != nil {
-			return writeCertificateError(w, err)
-		}
-		noStoreHeaders(w.Header())
-		w.WriteHeader(http.StatusNoContent)
-		return http.StatusNoContent, ""
 	case r.Method == http.MethodGet && tail == "events":
 		return s.handleCertificateEvents(w, r, actor, id)
 	default:
@@ -321,6 +311,37 @@ func (s *Server) handleIDArchive(w http.ResponseWriter, r *http.Request, reqctx 
 	}
 	auditCtx := certificateAuditContext(reqctx)
 	result, err := s.certs.MaterialForID(r.Context(), actor, certificateID, auditCtx)
+	if err != nil {
+		return writeCertificateError(w, err)
+	}
+	if etagMatches(r.Header.Get("If-None-Match"), result.Material.MaterialETag) {
+		materialHeaders(w.Header(), result.Material.MaterialETag)
+		w.WriteHeader(http.StatusNotModified)
+		return http.StatusNotModified, ""
+	}
+	if err := s.certs.AuditPrivateKeyRead(r.Context(), auditdomain.IdentityTypeUser, actor.ID, result.Certificate, result.Version, auditCtx); err != nil {
+		return writeCertificateError(w, err)
+	}
+	return writeMaterialResponse(w, result.Material, true)
+}
+
+func (s *Server) handleIDVersionArchive(w http.ResponseWriter, r *http.Request, reqctx RequestContext, actor certdomain.Actor, certificateID, versionID string) (int, string) {
+	if !acceptsGzip(r.Header.Get("Accept")) {
+		return writeError(w, http.StatusNotAcceptable, Error{Code: "not_acceptable", Message: "Requested response media type is not supported.", Details: map[string]any{}})
+	}
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		meta, err := s.certs.MaterialMetadataForVersionID(r.Context(), actor, certificateID, versionID)
+		if err != nil {
+			return writeCertificateError(w, err)
+		}
+		if etagMatches(inm, meta.MaterialETag) {
+			materialHeaders(w.Header(), meta.MaterialETag)
+			w.WriteHeader(http.StatusNotModified)
+			return http.StatusNotModified, ""
+		}
+	}
+	auditCtx := certificateAuditContext(reqctx)
+	result, err := s.certs.MaterialForVersionID(r.Context(), actor, certificateID, versionID, auditCtx)
 	if err != nil {
 		return writeCertificateError(w, err)
 	}
@@ -491,6 +512,8 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 			code, message = "certificate_issuance_failed", "Certificate issuance failed."
 		case errors.Is(state.Err, certdomain.ErrCertificateRevoked):
 			code, message = "certificate_revoked", "Certificate is revoked."
+		case errors.Is(state.Err, certdomain.ErrCertificateNoActiveVersion):
+			code, message = "certificate_no_active_version", "Certificate has no active valid version."
 		}
 	case errors.Is(err, certdomain.ErrCertificateNotReady):
 		status, code, message, retryAfter = http.StatusConflict, "certificate_not_ready", "Certificate material is not ready.", 5
@@ -500,6 +523,8 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusConflict, "certificate_issuance_failed", "Certificate issuance failed."
 	case errors.Is(err, certdomain.ErrCertificateRevoked):
 		status, code, message = http.StatusConflict, "certificate_revoked", "Certificate is revoked."
+	case errors.Is(err, certdomain.ErrCertificateNoActiveVersion):
+		status, code, message = http.StatusConflict, "certificate_no_active_version", "Certificate has no active valid version."
 	}
 	return writeError(w, status, Error{Code: code, Message: message, Retryable: retryAfter > 0 || status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: details})
 }
@@ -534,6 +559,9 @@ func certificateStateDetails(state certdomain.StateError) map[string]any {
 		details["revoked_at"] = state.Certificate.RevokedAt
 	}
 	if state.Version != nil {
+		details["version_id"] = state.Version.ID
+		details["version"] = state.Version.Version
+		details["version_status"] = string(state.Version.Status)
 		if state.Version.FailureCode != nil {
 			details["failure_code"] = *state.Version.FailureCode
 		}
@@ -542,6 +570,12 @@ func certificateStateDetails(state certdomain.StateError) map[string]any {
 		}
 		if state.Version.NotAfter != nil {
 			details["not_after"] = state.Version.NotAfter
+		}
+		if state.Version.RevocationReason != nil {
+			details["revocation_reason"] = string(*state.Version.RevocationReason)
+		}
+		if state.Version.RevokedAt != nil {
+			details["revoked_at"] = state.Version.RevokedAt
 		}
 	}
 	return details
@@ -562,6 +596,18 @@ func certificatePathID(p string) (string, string, bool) {
 	return "", "", false
 }
 
+func certificateVersionPath(p string) (string, string, string, bool) {
+	rest := strings.TrimPrefix(p, "/v1/certificates/")
+	if rest == p || rest == "" {
+		return "", "", "", false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 4 || parts[0] == "" || parts[1] != "versions" || parts[2] == "" || parts[3] == "" {
+		return "", "", "", false
+	}
+	return parts[0], parts[2], parts[3], true
+}
+
 func certificateActor(current auth.AuthenticatedUser) certdomain.Actor {
 	return certdomain.Actor{ID: current.User.ID, GlobalRole: current.User.GlobalRole}
 }
@@ -572,26 +618,22 @@ func certificateAuditContext(reqctx RequestContext) certdomain.AuditContext {
 
 func serializeCertificate(cert certdomain.Certificate) apiCertificate {
 	out := apiCertificate{
-		ID:              cert.ID,
-		ApplicationID:   cert.ApplicationID,
-		NormalizedSANs:  cert.NormalizedSANs,
-		KeyType:         string(cert.KeyType),
-		IssuerID:        cert.IssuerID,
-		Status:          string(cert.Status),
-		FailureCode:     cert.FailureCode,
-		FailureMessage:  cert.FailureMessage,
-		RevokedAt:       cert.RevokedAt,
-		RevokedByUserID: cert.RevokedByUserID,
-		CreatedAt:       cert.CreatedAt,
-		UpdatedAt:       cert.UpdatedAt,
-		DeletedAt:       cert.DeletedAt,
+		ID:                    cert.ID,
+		ApplicationID:         cert.ApplicationID,
+		NormalizedSANs:        cert.NormalizedSANs,
+		KeyType:               string(cert.KeyType),
+		IssuerID:              cert.IssuerID,
+		Status:                string(cert.Status),
+		FailureCode:           cert.FailureCode,
+		FailureMessage:        cert.FailureMessage,
+		CreatedAt:             cert.CreatedAt,
+		UpdatedAt:             cert.UpdatedAt,
+		DeletedAt:             cert.DeletedAt,
+		HasActiveValidVersion: cert.HasActiveValidVersion,
+		HasIssuingVersion:     cert.HasIssuingVersion,
 	}
 	if cert.IssuerName != "" {
 		out.IssuerName = &cert.IssuerName
-	}
-	if cert.RevocationReason != nil {
-		raw := string(*cert.RevocationReason)
-		out.RevocationReason = &raw
 	}
 	if cert.LatestVersion != nil {
 		latest := serializeCertificateVersion(*cert.LatestVersion)
@@ -613,6 +655,8 @@ func serializeCertificateVersion(version certdomain.CertificateVersion) apiCerti
 		FingerprintSHA256:            version.FingerprintSHA256,
 		KeyFingerprintSHA256:         version.KeyFingerprintSHA256,
 		MaterialETag:                 version.MaterialETag,
+		RevokedAt:                    version.RevokedAt,
+		RevokedByUserID:              version.RevokedByUserID,
 		ACMERevocationAttempts:       version.ACMERevocationAttempts,
 		ACMERevokedAt:                version.ACMERevokedAt,
 		ACMERevocationFailureCode:    version.ACMERevocationFailureCode,
@@ -628,6 +672,10 @@ func serializeCertificateVersion(version certdomain.CertificateVersion) apiCerti
 	if version.ACMERevocationStatus != nil {
 		raw := string(*version.ACMERevocationStatus)
 		out.ACMERevocationStatus = &raw
+	}
+	if version.RevocationReason != nil {
+		raw := string(*version.RevocationReason)
+		out.RevocationReason = &raw
 	}
 	return out
 }

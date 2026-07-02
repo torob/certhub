@@ -221,7 +221,7 @@ func exitCodeForError(err error) int {
 		return ExitNotFound
 	case certerrors.CodeCertificateNotReady, certerrors.CodeCertificateExpired:
 		return ExitNotReady
-	case certerrors.CodeCertificateIssuanceFailed, certerrors.CodeCertificateRevoked:
+	case certerrors.CodeCertificateIssuanceFailed, certerrors.CodeCertificateRevoked, certerrors.CodeCertificateNoActiveVersion:
 		return ExitIssuanceFailed
 	case certerrors.CodeServiceUnavailable, certerrors.CodeIssuerUnavailable, certerrors.CodeDNSProviderUnavailable, certerrors.CodeDNSZoneDiscoveryFailed, certerrors.CodeRateLimited:
 		return ExitTimeout

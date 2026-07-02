@@ -186,6 +186,9 @@ func TestSerializeCertificateIncludesLatestVersion(t *testing.T) {
 	if out.IssuerName == nil || *out.IssuerName != "letsencrypt_production" {
 		t.Fatalf("issuer_name = %#v", out.IssuerName)
 	}
+	if !out.HasActiveValidVersion || out.HasIssuingVersion {
+		t.Fatalf("lifecycle flags = active:%t issuing:%t", out.HasActiveValidVersion, out.HasIssuingVersion)
+	}
 }
 
 func TestWriteCertificateErrorRenewalNotDue(t *testing.T) {
@@ -446,15 +449,16 @@ func newCertificateHTTPFixture(t *testing.T) certificateHTTPFixture {
 		t.Fatal(err)
 	}
 	cert := certdomain.Certificate{
-		ID:             "72345678-1234-4234-9234-123456789abc",
-		ApplicationID:  "22345678-1234-4234-9234-123456789abc",
-		IssuerID:       "32345678-1234-4234-9234-123456789abc",
-		NormalizedSANs: []string{"api.example.com"},
-		KeyType:        certdomain.KeyTypeECDSAP256,
-		Status:         certdomain.StatusReady,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		VersionCount:   1,
+		ID:                    "72345678-1234-4234-9234-123456789abc",
+		ApplicationID:         "22345678-1234-4234-9234-123456789abc",
+		IssuerID:              "32345678-1234-4234-9234-123456789abc",
+		NormalizedSANs:        []string{"api.example.com"},
+		KeyType:               certdomain.KeyTypeECDSAP256,
+		Status:                certdomain.StatusReady,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+		VersionCount:          1,
+		HasActiveValidVersion: true,
 	}
 	notBefore := now.Add(-time.Hour)
 	notAfter := now.Add(time.Hour)
@@ -555,6 +559,10 @@ func (s *certificateHTTPCertStore) CountVersions(context.Context, string) (int64
 	return 1, nil
 }
 
+func (s *certificateHTTPCertStore) GetVersion(context.Context, string) (certdomain.CertificateVersion, error) {
+	return s.version, nil
+}
+
 func (s *certificateHTTPCertStore) GetLatestValidMaterial(context.Context, string) (certdomain.CertificateVersion, error) {
 	return s.version, nil
 }
@@ -569,8 +577,8 @@ func (s *certificateHTTPCertStore) EnsureIssuanceJob(context.Context, certdomain
 	return certdomain.IssuanceJob{ID: "a2345678-1234-4234-9234-123456789abc"}, nil
 }
 
-func (s *certificateHTTPCertStore) RevokeCertificate(context.Context, certdomain.RevokeCertificateParams) (certdomain.Certificate, error) {
-	return certdomain.Certificate{}, errors.New("not implemented")
+func (s *certificateHTTPCertStore) RevokeCertificateVersion(context.Context, certdomain.RevokeCertificateVersionParams) (certdomain.CertificateVersion, error) {
+	return certdomain.CertificateVersion{}, errors.New("not implemented")
 }
 
 func (s *certificateHTTPCertStore) DeleteCertificate(context.Context, certdomain.DeleteCertificateParams) (certdomain.Certificate, error) {

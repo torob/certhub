@@ -32,6 +32,7 @@ var (
 	ErrCertificateExpired            = errors.New("certificate expired")
 	ErrCertificateIssuanceFailed     = errors.New("certificate issuance failed")
 	ErrCertificateRevoked            = errors.New("certificate revoked")
+	ErrCertificateNoActiveVersion    = errors.New("certificate has no active valid version")
 )
 
 type Store interface {
@@ -42,10 +43,11 @@ type Store interface {
 	LatestValidVersion(context.Context, string) (CertificateVersion, error)
 	ListVersions(context.Context, ListVersionsParams) ([]CertificateVersion, error)
 	CountVersions(context.Context, string) (int64, error)
+	GetVersion(context.Context, string) (CertificateVersion, error)
 	GetLatestValidMaterial(context.Context, string) (CertificateVersion, error)
 	CreateIssuingVersion(context.Context, CreateIssuingVersionParams) (CertificateVersion, error)
 	EnsureIssuanceJob(context.Context, EnsureIssuanceJobParams) (IssuanceJob, error)
-	RevokeCertificate(context.Context, RevokeCertificateParams) (Certificate, error)
+	RevokeCertificateVersion(context.Context, RevokeCertificateVersionParams) (CertificateVersion, error)
 	DeleteCertificate(context.Context, DeleteCertificateParams) (Certificate, error)
 }
 
@@ -351,12 +353,57 @@ func (s *Service) MaterialForID(ctx context.Context, actor Actor, certificateID 
 	return s.materialForCertificate(ctx, cert, issuer)
 }
 
+func (s *Service) MaterialForVersionID(ctx context.Context, actor Actor, certificateID, versionID string, _ AuditContext) (MaterialResult, error) {
+	cert, err := s.visibleCertificate(ctx, actor, certificateID, roleCertificateReader, false)
+	if err != nil {
+		return MaterialResult{}, err
+	}
+	version, err := s.repo.GetVersion(ctx, versionID)
+	if err != nil {
+		return MaterialResult{}, classifyReadError(err)
+	}
+	if version.CertificateID != cert.ID {
+		return MaterialResult{}, ErrNotFound
+	}
+	issuer, err := s.issuers.Get(ctx, cert.IssuerID)
+	if err != nil {
+		return MaterialResult{}, classifyReadError(err)
+	}
+	privateKey, err := s.decryptPrivateKey(version)
+	if err != nil {
+		return MaterialResult{}, ErrCertificateServiceUnavailable
+	}
+	material, ok := buildMaterial(cert, issuer, version, privateKey)
+	if !ok || !versionDownloadable(version) {
+		return MaterialResult{}, StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert, Version: &version}
+	}
+	return MaterialResult{Certificate: cert, Version: version, Material: material}, nil
+}
+
 func (s *Service) MaterialMetadataForID(ctx context.Context, actor Actor, certificateID string) (MaterialMetadataResult, error) {
 	cert, err := s.visibleCertificate(ctx, actor, certificateID, roleCertificateReader, false)
 	if err != nil {
 		return MaterialMetadataResult{}, err
 	}
 	return s.materialMetadataForCertificate(ctx, cert)
+}
+
+func (s *Service) MaterialMetadataForVersionID(ctx context.Context, actor Actor, certificateID, versionID string) (MaterialMetadataResult, error) {
+	cert, err := s.visibleCertificate(ctx, actor, certificateID, roleCertificateReader, false)
+	if err != nil {
+		return MaterialMetadataResult{}, err
+	}
+	version, err := s.repo.GetVersion(ctx, versionID)
+	if err != nil {
+		return MaterialMetadataResult{}, classifyReadError(err)
+	}
+	if version.CertificateID != cert.ID {
+		return MaterialMetadataResult{}, ErrNotFound
+	}
+	if !versionDownloadable(version) || version.MaterialETag == nil || *version.MaterialETag == "" {
+		return MaterialMetadataResult{}, StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert, Version: &version}
+	}
+	return MaterialMetadataResult{Certificate: cert, Version: version, MaterialETag: *version.MaterialETag}, nil
 }
 
 func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID string, reason IssuanceReason) (CertificateVersion, error) {
@@ -376,11 +423,31 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		if cert.Status == StatusDeleted {
 			return ErrNotFound
 		}
-		if cert.Status == StatusRevoked && cert.RevocationReason != nil && *cert.RevocationReason == RevocationReasonKeyCompromise && reason != IssuanceReasonKeyRotation {
-			return ErrConflict
-		}
 		if err := txsvc.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
 			return err
+		}
+		hasActiveVersion := true
+		if _, err := txsvc.repo.GetLatestValidMaterial(ctx, cert.ID); err != nil {
+			if !errors.Is(err, storage.ErrNoRows) {
+				return classifyReadError(err)
+			}
+			hasActiveVersion = false
+		}
+		if (reason == IssuanceReasonRenewal || reason == IssuanceReasonKeyRotation) && !hasActiveVersion {
+			return StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert}
+		}
+		if reason == IssuanceReasonReissue && hasActiveVersion {
+			return ErrConflict
+		}
+		if reason == IssuanceReasonReissue && cert.HasIssuingVersion {
+			return ErrConflict
+		}
+		if reason == IssuanceReasonReissue {
+			if _, ok, err := txsvc.latestIssuingVersion(ctx, certificateID); err != nil {
+				return err
+			} else if ok {
+				return ErrConflict
+			}
 		}
 		if reason == IssuanceReasonRenewal {
 			existing, ok, err := txsvc.latestIssuingVersion(ctx, certificateID)
@@ -421,6 +488,8 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		jobReason := JobReasonRenewal
 		if reason == IssuanceReasonKeyRotation {
 			jobReason = JobReasonKeyRotation
+		} else if reason == IssuanceReasonReissue {
+			jobReason = JobReasonReissue
 		}
 		_, err = txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
 			CertificateID:        cert.ID,
@@ -436,8 +505,8 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 	return version, err
 }
 
-func (s *Service) RevokeCertificate(ctx context.Context, actor Actor, certificateID string, reason RevocationReason) (Certificate, error) {
-	var cert Certificate
+func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, certificateID, versionID string, reason RevocationReason) (CertificateVersion, error) {
+	var version CertificateVersion
 	err := s.withWriteTx(ctx, func(txsvc *Service) error {
 		current, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, false)
 		if err != nil {
@@ -450,20 +519,26 @@ func (s *Service) RevokeCertificate(ctx context.Context, actor Actor, certificat
 		if systemManagedApplication(app) {
 			return ErrSystemManagedResource
 		}
-		cert, err = txsvc.repo.RevokeCertificate(ctx, RevokeCertificateParams{ID: certificateID, Reason: reason, RevokedByUserID: actor.ID})
+		version, err = txsvc.repo.RevokeCertificateVersion(ctx, RevokeCertificateVersionParams{
+			CertificateID:        certificateID,
+			CertificateVersionID: versionID,
+			Reason:               reason,
+			RevokedByUserID:      actor.ID,
+		})
 		if err != nil {
 			return classifyWriteError(err)
 		}
 		if _, err := txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
-			CertificateID: cert.ID,
-			Reason:        JobReasonRevocationRetry,
-			NextRunAt:     time.Now().UTC(),
+			CertificateID:        current.ID,
+			CertificateVersionID: &version.ID,
+			Reason:               JobReasonRevocationRetry,
+			NextRunAt:            time.Now().UTC(),
 		}); err != nil {
 			return classifyWriteError(err)
 		}
 		return nil
 	})
-	return cert, err
+	return version, err
 }
 
 func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificateID string, revoke bool, reason RevocationReason) error {
@@ -479,18 +554,8 @@ func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificat
 		if systemManagedApplication(app) {
 			return ErrSystemManagedResource
 		}
-		if revoke {
-			if _, err := txsvc.repo.RevokeCertificate(ctx, RevokeCertificateParams{ID: certificateID, Reason: reason, RevokedByUserID: actor.ID}); err != nil {
-				return classifyWriteError(err)
-			}
-			if _, err := txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
-				CertificateID: cert.ID,
-				Reason:        JobReasonRevocationRetry,
-				NextRunAt:     time.Now().UTC(),
-			}); err != nil {
-				return classifyWriteError(err)
-			}
-		}
+		_ = revoke
+		_ = reason
 		if _, err := txsvc.repo.DeleteCertificate(ctx, DeleteCertificateParams{ID: certificateID}); err != nil {
 			return classifyWriteError(err)
 		}
@@ -563,7 +628,7 @@ func (s *Service) requireRenewalWindow(ctx context.Context, cert Certificate, is
 	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNoRows) {
-			return nil
+			return StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert}
 		}
 		return classifyReadError(err)
 	}
@@ -701,7 +766,6 @@ func (s *Service) materialForCertificate(ctx context.Context, cert Certificate, 
 	}
 	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
 	if err != nil {
-		_ = s.enqueueRenewalRecovery(ctx, cert, issuer)
 		return MaterialResult{}, s.materialStateError(ctx, cert)
 	}
 	privateKey, err := s.decryptPrivateKey(version)
@@ -712,7 +776,6 @@ func (s *Service) materialForCertificate(ctx context.Context, cert Certificate, 
 	if !ok {
 		return MaterialResult{}, s.materialStateError(ctx, cert)
 	}
-	_ = s.enqueueRenewalIfDue(ctx, cert, issuer, version)
 	return MaterialResult{Certificate: cert, Version: version, Material: material}, nil
 }
 
@@ -722,18 +785,10 @@ func (s *Service) materialMetadataForCertificate(ctx context.Context, cert Certi
 	}
 	version, err := s.repo.GetLatestValidMaterial(ctx, cert.ID)
 	if err != nil {
-		issuer, issuerErr := s.issuers.Get(ctx, cert.IssuerID)
-		if issuerErr == nil {
-			_ = s.enqueueRenewalRecovery(ctx, cert, issuer)
-		}
 		return MaterialMetadataResult{}, s.materialStateError(ctx, cert)
 	}
 	if version.MaterialETag == nil || *version.MaterialETag == "" {
 		return MaterialMetadataResult{}, s.materialStateError(ctx, cert)
-	}
-	issuer, err := s.issuers.Get(ctx, cert.IssuerID)
-	if err == nil {
-		_ = s.enqueueRenewalIfDue(ctx, cert, issuer, version)
 	}
 	return MaterialMetadataResult{Certificate: cert, Version: version, MaterialETag: *version.MaterialETag}, nil
 }
@@ -814,9 +869,6 @@ func (s *Service) enqueueRenewalRecovery(ctx context.Context, cert Certificate, 
 }
 
 func (s *Service) materialStateError(ctx context.Context, cert Certificate) error {
-	if cert.Status == StatusRevoked {
-		return StateError{Err: ErrCertificateRevoked, Certificate: cert}
-	}
 	if cert.Status == StatusFailed {
 		return StateError{Err: ErrCertificateIssuanceFailed, Certificate: cert}
 	}
@@ -829,9 +881,9 @@ func (s *Service) materialStateError(ctx context.Context, cert Certificate) erro
 		if latest.Status == VersionStatusFailed {
 			return StateError{Err: ErrCertificateIssuanceFailed, Certificate: cert, Version: &latest}
 		}
-		return StateError{Err: ErrCertificateExpired, Certificate: cert, Version: &latest}
+		return StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert, Version: &latest}
 	}
-	return StateError{Err: ErrCertificateNotReady, Certificate: cert}
+	return StateError{Err: ErrCertificateNoActiveVersion, Certificate: cert}
 }
 
 func (s *Service) decryptPrivateKey(version CertificateVersion) (string, error) {
@@ -979,13 +1031,7 @@ func grantAllows(role appdomain.GrantRole, required roleRequirement) bool {
 }
 
 func buildMaterial(cert Certificate, issuer issuerdomain.Issuer, version CertificateVersion, privateKey string) (tlsmaterial.TLSMaterial, bool) {
-	required := []*string{version.CertPEM, version.ChainPEM, version.FullchainPEM, version.SerialNumber, version.FingerprintSHA256, version.KeyFingerprintSHA256, version.MaterialETag}
-	for _, value := range required {
-		if value == nil || *value == "" {
-			return tlsmaterial.TLSMaterial{}, false
-		}
-	}
-	if version.NotBefore == nil || version.NotAfter == nil || privateKey == "" {
+	if !versionDownloadable(version) || privateKey == "" {
 		return tlsmaterial.TLSMaterial{}, false
 	}
 	return tlsmaterial.TLSMaterial{
@@ -1007,6 +1053,19 @@ func buildMaterial(cert Certificate, issuer issuerdomain.Issuer, version Certifi
 		KeyFingerprintSHA256: *version.KeyFingerprintSHA256,
 		MaterialETag:         *version.MaterialETag,
 	}, true
+}
+
+func versionDownloadable(version CertificateVersion) bool {
+	if version.Status != VersionStatusValid && version.Status != VersionStatusRevoked {
+		return false
+	}
+	required := []*string{version.CertPEM, version.ChainPEM, version.FullchainPEM, version.PrivateKeyPEMEncrypted, version.SerialNumber, version.FingerprintSHA256, version.KeyFingerprintSHA256, version.MaterialETag}
+	for _, value := range required {
+		if value == nil || *value == "" {
+			return false
+		}
+	}
+	return version.NotBefore != nil && version.NotAfter != nil
 }
 
 func certificatePrivateKeyAAD(versionID string) string {

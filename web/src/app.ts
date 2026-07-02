@@ -808,7 +808,11 @@ function CertificateDetailPage(props: PageProps) {
       props.setNotice(r.error ? errorText(r) : "request accepted");
       setRefresh(refresh + 1);
     });
-  const revoked = cert.status === "revoked" || cert.revoked_at;
+  const versionAction = (version: any, path: string, body?: unknown) =>
+    api(`/v1/certificates/${id}/versions/${version.id}${path}`, props.session, { method: "POST", body: body ? JSON.stringify(body) : undefined }).then((r) => {
+      props.setNotice(r.error ? errorText(r) : "request accepted");
+      setRefresh(refresh + 1);
+    });
   const expired = cert.status === "expired";
   const appRole = appAccess.data?.application?.current_user_role;
   const applicationLabel = appLabel(appAccess.data?.application) || "Application not visible";
@@ -816,16 +820,18 @@ function CertificateDetailPage(props: PageProps) {
   const appReserved = appAccess.data?.application?.system_kind === "certhub_server" || appAccess.data?.application?.name === "certhub_server";
   const canDownloadArchive = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "certificate_reader" || appRole === "manager");
   const canLifecycle = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "manager");
+  const hasActiveValidVersion = cert.has_active_valid_version === true;
+  const hasIssuingVersion = cert.has_issuing_version === true;
+  const activeVersionRequired = "Requires an active valid certificate version";
+  const reissueUnavailable = hasActiveValidVersion ? "Reissue is only available when there is no active valid certificate version" : "Reissue is unavailable while a certificate version is issuing";
   return pageFrame(
     "Certificate",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/certificates") }, "Back"),
-      canDownloadArchive && !revoked && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Download") : null,
-      canLifecycle ? createElement("button", { onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
-      canLifecycle ? createElement("button", { onClick: () => action("/rotate-key") }, "Rotate key") : null,
-      canLifecycle ? createElement("button", { onClick: () => action("/revoke", { reason: "cessation_of_operation" }) }, "Revoke") : null,
-      canLifecycle ? createElement("button", { onClick: () => action("", { revoke: false }, "DELETE") }, createElement(Trash2, { size: 16 }), "Local delete") : null,
-      canLifecycle ? createElement("button", { onClick: () => action("", { revoke: true, reason: "cessation_of_operation" }, "DELETE") }, createElement(Trash2, { size: 16 }), "Revoke and delete") : null
+      canDownloadArchive && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Download") : null,
+      canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
+      canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/rotate-key") }, "Rotate key") : null,
+      canLifecycle ? createElement("button", { disabled: hasActiveValidVersion || hasIssuingVersion, title: hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null
     ),
     detail.loading ? createElement("div", { className: "empty" }, "Loading") : detail.error ? createElement("div", { className: "error" }, detail.error.code, ": ", detail.error.message) : createElement("section", { className: "detail" },
       createElement("h2", null, certificateLabel(cert)),
@@ -836,7 +842,6 @@ function CertificateDetailPage(props: PageProps) {
       kv("Issuer", cert.issuer_name || "Default issuer"),
       kv("Latest not after", cert.latest_version?.not_after || ""),
       kv("Fingerprint", cert.latest_version?.fingerprint_sha256 || ""),
-      revoked ? kv("Revoked", `${cert.revocation_reason || ""} ${cert.revoked_at || ""}`) : null,
       kv("Created at", cert.created_at),
       kv("Updated at", cert.updated_at),
       technicalDetails("Technical details", [
@@ -848,7 +853,12 @@ function CertificateDetailPage(props: PageProps) {
       ])
     ),
     createElement("h2", null, "Versions"),
-    table(versions, ["version", "status", "reason", "not_after", "failure_code"]),
+    table(versions, ["version", "status", "reason", "not_after", "revocation_reason", "failure_code",
+      actionsColumn((version) => [
+        canDownloadArchive && versionDownloadable(version) ? rowAction("Download", () => downloadArchive(props.session, cert.id, props.setNotice, version.id), { icon: Download, label: `Download version ${version.version}` }) : null,
+        canLifecycle && version.status === "valid" ? rowAction("Revoke", () => versionAction(version, "/revoke", { reason: "cessation_of_operation" }), { icon: X, danger: true, label: `Revoke version ${version.version}` }) : null
+      ])
+    ]),
     createElement("h2", null, "Events"),
     table(events, auditColumns())
   );
@@ -2343,11 +2353,16 @@ function validateField(field: string, value: string) {
   return "";
 }
 
-async function downloadArchive(session: Session, id: string, setNotice: (s: string) => void) {
+function versionDownloadable(version: any) {
+  return (version.status === "valid" || version.status === "revoked") && Boolean(version.material_etag);
+}
+
+async function downloadArchive(session: Session, id: string, setNotice: (s: string) => void, versionID?: string) {
   const rid = requestID();
-  let response = await fetch(`/v1/certificates/${id}/tls-archive`, { headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/gzip", "X-Request-ID": rid }, cache: "no-store", redirect: "error" });
+  const path = versionID ? `/v1/certificates/${id}/versions/${versionID}/tls-archive` : `/v1/certificates/${id}/tls-archive`;
+  let response = await fetch(path, { headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/gzip", "X-Request-ID": rid }, cache: "no-store", redirect: "error" });
   if (response.status === 401 && await refreshSession(session)) {
-    response = await fetch(`/v1/certificates/${id}/tls-archive`, { headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/gzip", "X-Request-ID": rid }, cache: "no-store", redirect: "error" });
+    response = await fetch(path, { headers: { Authorization: `Bearer ${session.accessToken}`, Accept: "application/gzip", "X-Request-ID": rid }, cache: "no-store", redirect: "error" });
   }
   if (!response.ok) {
     const requestIDHeader = response.headers.get("X-Request-ID") || rid;

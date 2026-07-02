@@ -185,7 +185,7 @@ Required web management workflows:
 - Application token management: list token metadata, create tokens, display raw token value exactly once, support expiring and non-expiring tokens, and revoke tokens.
 - Application User grant management: list grants, create or replace grants, and remove grants.
 - Domain scope management: list scopes, add immutable scopes, and delete scopes.
-- Certificate management: create Application-owned certificates, list and inspect certificates, download ID-based archives when authorized, inspect events, renew, rotate key, revoke, and delete.
+- Certificate management: create Application-owned certificates, list and inspect certificates, download current and version-specific ID-based archives when authorized, inspect events, renew, rotate key, reissue, and revoke specific CertificateVersions.
 - Issuer management: list, create, inspect, update mutable fields, disable/enable through status, configure default issuer, renewal-window, and contact email.
 - DNS provider management: list, create, inspect, update mutable metadata, replace write-only credentials, list zones, manually add/delete zones in manual mode, view discovered zones, and trigger auto-mode zone refresh.
 - Audit management: list and filter global audit events for admins, scoped Application/certificate audit events for Users with relevant Application access, and certificate-specific events.
@@ -261,7 +261,7 @@ Certificate detail page:
 - Archive download button only when the User has `certificate_reader`, `manager`, or global `admin`.
 - Metadata-only Users can inspect certificate metadata but cannot download archives in v1 because current archive endpoints include private-key material.
 
-Certificate archive downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-archive`. The frontend must not use criteria-based material endpoints for User/browser downloads. Every current archive download is a private-key-capable operation and must require an explicit audited user action.
+Current certificate archive downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-archive`. Version-specific archive downloads must call `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` and be offered for downloadable `valid` or `revoked` CertificateVersions. The frontend must not use criteria-based material endpoints for User/browser downloads. Every archive download is a private-key-capable operation and must require an explicit audited user action.
 
 Certificate renewal and version history must call `GET /v1/certificates/{certificate_id}/versions`. The frontend must not try to reconstruct complete version history from the single `latest_version` field.
 
@@ -271,27 +271,24 @@ Certificate lifecycle actions:
 
 - Manual renew calls `POST /v1/certificates/{certificate_id}/renew`.
 - Key rotation calls `POST /v1/certificates/{certificate_id}/rotate-key`.
-- Revocation calls `POST /v1/certificates/{certificate_id}/revoke`.
-- Local delete calls `DELETE /v1/certificates/{certificate_id}`.
+- Renew and key rotation buttons are disabled when `has_active_valid_version=false`.
+- Reissue calls `POST /v1/certificates/{certificate_id}/reissue` when no active valid CertificateVersion exists and no CertificateVersion is issuing.
+- Reissue is disabled when `has_active_valid_version=true` or `has_issuing_version=true`.
+- Revocation calls `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`.
 - Certificate-specific event history calls `GET /v1/certificates/{certificate_id}/events`.
 
 Lifecycle actions are visible only to Users with Application `manager` access or global `admin`.
 
 When the frontend already has a `material_etag` for a certificate detail view, it may send `If-None-Match` to the ID-based archive endpoint. A `304 Not Modified` response means the current detail/download material has not changed. The frontend must not rely on browser or proxy caching for private-key material; backend responses use `Cache-Control: no-store`.
 
-If a download endpoint returns `409 certificate_expired`, the frontend must not offer stale archives. It should show the expired state, latest `not_after`, renewal status when available, and the renew action when the User has `manager` access or global `admin`.
-
-If a download endpoint returns `409 certificate_revoked`, the frontend must not offer stale archives. It should show revoked status, revocation reason, revoked time, and lifecycle actions available to `manager` or global `admin` according to backend reissue rules.
+If a current download endpoint returns `409 certificate_no_active_version`, the frontend must not offer stale current archives. It should show the latest version state and the reissue action when the User has `manager` access or global `admin`.
 
 If manual renew returns `409 renewal_overlap_exists`, the frontend must show that another valid renewal overlap already exists and must not retry automatically. The User can retry after the older valid CertificateVersion expires.
 
-Revocation and deletion UX:
+Revocation UX:
 
-- Revoke actions must explain that material endpoints stop serving the certificate immediately after backend acceptance.
+- Revoke actions must explain that current material endpoints stop serving that CertificateVersion immediately after backend acceptance, while other active valid versions may remain current.
 - Revoke actions must require a reason from the backend enum and support an optional note.
-- Delete without `revoke=true` must be labeled as local availability removal, not CA revocation.
-- Delete with `revoke=true` must make the revocation behavior explicit.
-- After delete, the certificate should disappear from normal lists and criteria lookups, but `GET /v1/certificates/{certificate_id}/events` should remain available where backend permissions allow.
 
 Private-key access must require an explicit click and show that the action is audited. The key must not be rendered automatically on page load.
 
@@ -569,11 +566,12 @@ Certificate inventory, archive downloads, and lifecycle management:
 - `GET /v1/certificates`
 - `GET /v1/certificates/{certificate_id}`
 - `GET /v1/certificates/{certificate_id}/versions`
+- `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive`
+- `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`
 - `GET /v1/certificates/{certificate_id}/tls-archive`
 - `POST /v1/certificates/{certificate_id}/renew`
 - `POST /v1/certificates/{certificate_id}/rotate-key`
-- `POST /v1/certificates/{certificate_id}/revoke`
-- `DELETE /v1/certificates/{certificate_id}`
+- `POST /v1/certificates/{certificate_id}/reissue`
 - `GET /v1/certificates/{certificate_id}/events`
 
 User administration:
@@ -698,7 +696,7 @@ Required frontend scenarios:
 - Non-admin User cannot create Applications.
 - Admin can create Applications and update mutable Application fields.
 - Admin can create Users, update mutable User fields, configure password availability, provision password-login TOTP when required, and inspect OIDC link status without setting, replacing, or clearing the link fields.
-- Renewal and key rotation create a higher-numbered certificate version shown in certificate detail.
+- Renewal, key rotation, and reissue create a higher-numbered certificate version shown in certificate detail.
 - Admin can view and manage all Applications.
 - Admin can create, inspect, update mutable issuer fields, disable issuers through status, and sees the default issuer uniqueness constraint.
 - Admin can create DNS providers, replace credentials without reading old credentials, update mutable provider metadata, and manage provider status.
@@ -733,9 +731,9 @@ Required frontend scenarios:
 - Trusted source IP/CIDR forms validate exact IPv4/IPv6 and CIDR inputs client-side, reject malformed values before submit, and render backend-normalized values after save.
 - No personal access-token management UI is shown.
 - Domain scope validation explains exact versus wildcard edge cases, including that `*.torob.dev` does not authorize `torob.dev` or `a.b.torob.dev`.
-- Revoke and delete flows distinguish local delete from CA revocation.
+- Version revoke flows require explicit reason selection and keep Certificate deletion unavailable.
 - Retryable backend errors use `Retry-After` or `retry_after_seconds` when polling.
-- Revoked certificate material responses with `certificate_revoked` hide download actions and show revoked state instead of stale material.
+- Current material responses with `certificate_no_active_version` hide current download actions and show reissue guidance instead of stale material.
 - DNS provider credential replacement never displays existing secret.
 - DNS provider credential forms clear submitted secret values after success, cancellation, and backend validation failure without copying them into errors or telemetry.
 - DNS provider auto mode shows refreshed zones, last refresh status, and disables manual zone edits.

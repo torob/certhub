@@ -847,21 +847,19 @@ Certhub must create or select a different Certificate identity when:
 Certhub must create a new CertificateVersion for an existing Certificate identity when:
 
 - Certificate is inside the renewal window.
-- Certificate is expired and renewal is possible.
-- Manual renewal is requested.
-- Key rotation is explicitly requested.
-- Certificate is failed and retry is allowed by the failed-state rules below.
+- Manual renewal is requested and an active valid CertificateVersion exists.
+- Key rotation is explicitly requested and an active valid CertificateVersion exists.
+- Reissue is explicitly requested because no active valid CertificateVersion exists and no CertificateVersion is currently issuing.
 
 Reissue rules:
 
 - `failed` parent Certificate: Application `POST /v1/sync/certificates` and User web-console `POST /v1/applications/{application_id}/certificates` must return Certificate metadata with `status=failed` and must not automatically enqueue reissue.
-- `failed` parent Certificate: User lifecycle endpoints may retry with `POST /v1/certificates/{certificate_id}/renew` or `POST /v1/certificates/{certificate_id}/rotate-key`, subject to normal access and overlap constraints.
-- `revoked` parent Certificate: Application `POST /v1/sync/certificates` must not automatically reissue. It must return certificate metadata showing `status=revoked`.
-- `revoked` parent Certificate with `revocation_reason=key_compromise`: only `POST /v1/certificates/{certificate_id}/rotate-key` may reissue, and it must generate a new private key.
-- `revoked` parent Certificate with any other revocation reason: `POST /v1/certificates/{certificate_id}/renew` may reissue with the existing key, or `rotate-key` may reissue with a new key.
-- Deleted Certificates are never reissued. Recreating the same identity after deletion creates a new Certificate row.
+- User lifecycle endpoints may retry an identity with no active valid version and no issuing version through `POST /v1/certificates/{certificate_id}/reissue`.
+- `POST /v1/certificates/{certificate_id}/renew` and `POST /v1/certificates/{certificate_id}/rotate-key` must return `409 certificate_no_active_version` when no active valid CertificateVersion exists.
+- `POST /v1/certificates/{certificate_id}/reissue` must return `409 conflict` when an active valid CertificateVersion exists or any CertificateVersion is currently issuing.
+- Certificates are never deleted through public APIs. Reissue keeps the same Certificate identity and creates a new CertificateVersion.
 
-When explicit User lifecycle reissue starts from `revoked` or `failed`, Certhub must transition the parent Certificate to `pending`, `validating_dns`, `issuing`, or `rotating_key` before creating the new issuing CertificateVersion. When that reissue succeeds, the parent Certificate becomes `ready` and stale failure metadata is cleared. While the parent Certificate remains `revoked` or `failed`, material endpoints must not return material for it.
+When explicit User lifecycle reissue starts, Certhub must transition the parent Certificate to an issuing state before creating the new issuing CertificateVersion. This transition clears parent Certificate failure and revocation metadata so parent status constraints remain valid. CertificateVersion revocation metadata remains preserved. When that reissue succeeds, the parent Certificate becomes `ready`.
 
 Key compromise is modeled as revocation plus key rotation. It is not a separate Certificate status.
 
@@ -999,11 +997,12 @@ Rules:
 | `GET` | `/v1/certificates` | List certificate metadata with optional filters such as domain, Application, status, and expiry. |
 | `GET` | `/v1/certificates/{certificate_id}` | Return certificate metadata by ID for human/web-console workflows. |
 | `GET` | `/v1/certificates/{certificate_id}/versions` | List CertificateVersion metadata for one certificate. |
+| `GET` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` | Return TLS material for a specific downloadable CertificateVersion as a tar.gz archive. |
+| `POST` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke` | Revoke one specific CertificateVersion. |
 | `GET` | `/v1/certificates/{certificate_id}/tls-archive` | Return current TLS material as a tar.gz archive for a certificate selected by ID. |
 | `POST` | `/v1/certificates/{certificate_id}/renew` | Start renewal for a certificate selected by ID. |
 | `POST` | `/v1/certificates/{certificate_id}/rotate-key` | Start key rotation for a certificate selected by ID. |
-| `POST` | `/v1/certificates/{certificate_id}/revoke` | Revoke a certificate selected by ID. |
-| `DELETE` | `/v1/certificates/{certificate_id}` | Remove local certificate availability, optionally with revocation when explicitly requested. |
+| `POST` | `/v1/certificates/{certificate_id}/reissue` | Start reissue when no active valid or issuing CertificateVersion exists. |
 | `GET` | `/v1/certificates/{certificate_id}/events` | List audit events related to one certificate. |
 | `GET` | `/v1/users` | List Users visible to the authenticated User. |
 | `GET` | `/v1/users/lookup` | Resolve one active User by exact email for grant workflows. |
@@ -1451,7 +1450,7 @@ Description and notes:
 
 - Requires an Application token; User access tokens must use `POST /v1/applications/{application_id}/certificates` for web-console creation.
 - Application clients should call this endpoint only after criteria-based material retrieval returns `404 certificate_not_found`.
-- If criteria-based material retrieval returns `409 certificate_not_ready` or `409 certificate_expired`, clients must not call this endpoint again just to wait or renew; they should retry the same material or archive endpoint with backoff.
+- If criteria-based material retrieval returns `409 certificate_not_ready`, clients must not call this endpoint again just to wait; they should retry the same material or archive endpoint with backoff. If retrieval returns `409 certificate_no_active_version`, a User reissue action is required.
 - Normalizes and validates requested domains.
 - Checks that every requested domain is covered by the authenticated Application's domain scopes.
 - Computes certificate identity from authenticated Application ID, normalized SANs, key type, and issuer.
@@ -1556,10 +1555,9 @@ Description and notes:
 - Supports conditional retrieval with `If-None-Match`.
 - Must create a `private_key_read` audit event only when material is returned with `200 OK`.
 - If the certificate identity does not exist, return `404 certificate_not_found`; Application clients should then call `POST /v1/sync/certificates` once with the same criteria.
-- If the certificate identity exists but no valid material is available and an issuing CertificateVersion exists, return `409 certificate_not_ready` with JSON status metadata and `Retry-After` when retryable, including post-expiry renewal. Application clients should periodically retry this same endpoint with the same criteria.
+- If the certificate identity exists but no valid material is available and an issuing CertificateVersion exists, return `409 certificate_not_ready` with JSON status metadata and `Retry-After` when retryable, including post-expiry reissue. Application clients should periodically retry this same endpoint with the same criteria.
 - If the certificate identity exists but no valid material is available because the latest issuance, renewal, reissue, or key rotation failed, return `409 certificate_issuance_failed` with `details.certificate_id`, `details.status=failed`, `details.failure_code`, and `details.failure_message`.
-- If the certificate identity exists but the parent Certificate is `revoked`, return `409 certificate_revoked` with `details.certificate_id`, `details.status=revoked`, `details.revocation_reason`, and `details.revoked_at`.
-- If the certificate identity exists but all previous CertificateVersions are expired and no issuing or failed latest version exists, return `409 certificate_expired` with JSON status metadata and `Retry-After` when retryable. Application clients must periodically retry this same endpoint and must not call `POST /v1/sync/certificates` unless a later lookup returns `404 certificate_not_found`.
+- If the certificate identity exists but no active valid CertificateVersion exists and no issuing or failed latest version exists, return `409 certificate_no_active_version` with JSON status metadata. Application clients must not call `POST /v1/sync/certificates` unless a later lookup returns `404 certificate_not_found`.
 
 ```http
 POST /v1/sync/certificates/tls-material
@@ -1598,7 +1596,7 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: token is not an Application token, source IP is not trusted for the Application, or domains are not authorized for the Application.
 - `404 Not Found`: no matching certificate identity exists; client should call `POST /v1/sync/certificates`.
-- `409 Conflict`: matching certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_expired`, `certificate_revoked`, or `certificate_issuance_failed`.
+- `409 Conflict`: matching certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_no_active_version`, or `certificate_issuance_failed`.
 
 #### POST /v1/sync/certificates/tls-archive
 
@@ -1655,7 +1653,7 @@ Expected responses:
 - `403 Forbidden`: token is not an Application token, source IP is not trusted for the Application, or domains are not authorized for the Application.
 - `404 Not Found`: no matching certificate identity exists; client should call `POST /v1/sync/certificates`.
 - `406 Not Acceptable`: requested response media type is not supported.
-- `409 Conflict`: matching certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_expired`, `certificate_revoked`, or `certificate_issuance_failed`.
+- `409 Conflict`: matching certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_no_active_version`, or `certificate_issuance_failed`.
 
 #### GET /v1/certificates
 
@@ -1788,7 +1786,7 @@ Expected responses:
 - `403 Forbidden`: token is not a User access token or User lacks private-key access.
 - `404 Not Found`: certificate does not exist or is not visible.
 - `406 Not Acceptable`: requested response media type is not supported.
-- `409 Conflict`: certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_expired`, `certificate_revoked`, or `certificate_issuance_failed`.
+- `409 Conflict`: certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_no_active_version`, or `certificate_issuance_failed`.
 
 #### POST /v1/certificates/{certificate_id}/renew
 
@@ -1863,29 +1861,26 @@ Expected responses:
 - `404 Not Found`: certificate does not exist or is not visible.
 - `409 Conflict`: certificate state does not allow key rotation or the Certificate is system-managed.
 
-#### POST /v1/certificates/{certificate_id}/revoke
+#### POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke
 
-Summary: Revoke a certificate selected by ID.
+Summary: Revoke one specific CertificateVersion.
 
 Description and notes:
 
 - User/web-console lifecycle endpoint.
 - Requires `manager` access on the Certificate's `application_id` or global `admin`.
 - Request body must include an explicit `reason` from the revocation reason enum. The backend must not silently default a missing revocation reason.
-- Marks the parent Certificate `revoked` immediately for local serving.
-- Sets `certificates.revocation_reason`, `revoked_at`, and `revoked_by_user_id` immediately.
-- Marks all currently valid, not-expired CertificateVersions for that Certificate `revoked` immediately for local serving.
-- Material endpoints must stop returning material as soon as local revocation is accepted.
-- Attempts ACME revocation for every locally revoked, not-expired CertificateVersion.
-- If ACME revocation fails after local revocation is accepted, local status remains `revoked`; Certhub records failure metadata and audit events and allows an admin to retry revocation.
-- Repeating this endpoint for an already locally revoked Certificate retries ACME revocation for versions whose `acme_revocation_status=failed` or `pending`.
-- Repeating this endpoint is idempotent success when the Certificate is locally revoked and every required ACME revocation has already succeeded or is marked `not_required`.
-- Revocation does not delete Certificate metadata, CertificateVersion metadata, or audit events.
-- Future reissue for the same identity follows the revoked-state reissue rules from `Certificate Identity and Reuse`. If reason is `key_compromise`, future reissue must use key rotation and must not reuse the compromised private key.
+- Marks only the selected CertificateVersion `revoked` immediately for current material selection.
+- Sets `certificate_versions.revocation_reason`, `revoked_at`, and `revoked_by_user_id` immediately.
+- Attempts ACME revocation for the selected version when applicable.
+- If ACME revocation fails after local revocation is accepted, local version status remains `revoked`; Certhub records failure metadata and audit events and allows retry.
+- Repeating this endpoint for an already locally revoked version retries ACME revocation when `acme_revocation_status=failed` or `pending`.
+- Repeating this endpoint is idempotent success when required ACME revocation has already succeeded or is marked `not_required`.
+- Revocation does not delete Certificate metadata, CertificateVersion metadata, material, or audit events.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. Operators change or disable the desired serving certificate through process configuration.
 
 ```http
-POST /v1/certificates/{certificate_id}/revoke
+POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke
 Authorization: Bearer <user-access-token>
 Content-Type: application/json
 ```
@@ -1905,62 +1900,43 @@ Valid `reason` values: `key_compromise`, `superseded`, `cessation_of_operation`,
 
 Expected responses:
 
-- `202 Accepted`: revocation started or queued.
-- `202 Accepted`: certificate was already locally revoked but failed or pending ACME revocation will be retried.
-- `200 OK`: certificate was already locally revoked and required ACME revocation is already complete or not required.
+- `202 Accepted`: version revocation recorded and remote ACME revocation queued or retried.
 - `400 Bad Request`: request body is malformed or contains an invalid revocation reason or note.
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User lacks lifecycle access.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow revocation or the Certificate is system-managed.
+- `409 Conflict`: certificate/version state does not allow revocation or the Certificate is system-managed.
 
-#### DELETE /v1/certificates/{certificate_id}
+#### POST /v1/certificates/{certificate_id}/reissue
 
-Summary: Remove local certificate availability, optionally with revocation when explicitly requested.
+Summary: Start reissue when no active valid or issuing CertificateVersion exists.
 
 Description and notes:
 
 - User/web-console lifecycle endpoint.
 - Requires `manager` access on the Certificate's `application_id` or global `admin`.
-- Does not revoke the CA certificate unless the request explicitly asks for revocation.
-- Marks the Certificate as `deleted`, sets `deleted_at`, and removes it from normal criteria lookup and list/detail visibility.
-- Material endpoints must stop returning material as soon as local delete is accepted.
-- Deleted Certificates remain in the database for audit and historical traceability.
-- Deleting a Certificate does not delete or rewrite audit events.
-- Deleting a Certificate does not delete Application domain scopes, Application tokens, User grants, issuers, or DNS providers.
-- Recreating the same certificate identity after deletion creates a new Certificate row.
-- If `revoke=true`, Certhub applies the revocation semantics above before or as part of the delete workflow. In that case the request body must include an explicit `reason`.
-- If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. The backend reconcile loop owns deletion/replacement for config changes.
+- Requires current Application domain scopes to cover every normalized SAN on the Certificate.
+- Creates a higher-numbered CertificateVersion with reason `reissue`.
+- Clears parent Certificate revocation metadata when reissuing from a revoked parent; historical CertificateVersion revocation metadata remains intact.
+- Returns `409 conflict` when an active valid CertificateVersion exists or any CertificateVersion is already issuing; use renew or rotate-key for active certificates.
+- If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`.
 
 ```http
-DELETE /v1/certificates/{certificate_id}
+POST /v1/certificates/{certificate_id}/reissue
 Authorization: Bearer <user-access-token>
 Content-Type: application/json
 ```
 
-Query params: None.
-
-Request body:
-
-```json
-{
-  "revoke": false,
-  "reason": "cessation_of_operation",
-  "note": "Application migrated away"
-}
-```
-
-`reason` is required when `revoke=true` and ignored when `revoke=false`.
+Request body: Optional operator note or lifecycle metadata.
 
 Expected responses:
 
-- `202 Accepted`: delete/revocation workflow started.
-- `204 No Content`: local availability removed.
-- `400 Bad Request`: request body is malformed or contains invalid delete/revocation metadata.
+- `202 Accepted`: reissue started.
+- `400 Bad Request`: request body is malformed or contains invalid lifecycle metadata.
 - `401 Unauthorized`: token is missing or invalid.
-- `403 Forbidden`: User lacks lifecycle access.
+- `403 Forbidden`: User lacks lifecycle access or current Application domain scopes no longer cover the Certificate SANs.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow deletion or the Certificate is system-managed.
+- `409 Conflict`: certificate state does not allow reissue or the Certificate is system-managed.
 
 #### GET /v1/certificates/{certificate_id}/events
 
@@ -3009,8 +2985,8 @@ Certhub must reconcile every non-deleted Certificate as follows:
 3. For a newly created Certificate, the first issuing CertificateVersion uses `version=1` and `reason=initial_issue`.
 4. If an issuing CertificateVersion already exists, reconciliation must not create another issuing version for the same Certificate.
 5. If issuance fails, Certhub records failure metadata on the Certificate, failed CertificateVersion, and issuance job. Retry behavior must be explicit policy; automatic retry must still preserve the one-issuing-version and one-active-job constraints.
-6. If the Certificate is expired and renewal is allowed, reconciliation must enqueue renewal when no issuing CertificateVersion already exists.
-7. If the Certificate is failed and eligible for reissue, reconciliation first moves the parent Certificate to an issuing state, then creates a higher-numbered CertificateVersion for the same Certificate identity. Revoked Certificates require explicit User lifecycle action as defined in `Certificate Identity and Reuse`.
+6. If an active valid CertificateVersion enters the renewal window, the background renewal worker must enqueue renewal when no issuing CertificateVersion already exists.
+7. If no active valid CertificateVersion exists, reconciliation must not enqueue renewal or key rotation; explicit User reissue is required.
 8. Reconciliation must never violate the valid-version overlap limits from `Auto Renewal Process` and `certificate_versions`.
 
 Failed issuing jobs:
@@ -3024,10 +3000,9 @@ Failed issuing jobs:
 Material/archive endpoints expose reconciliation state only as normal lookup responses. Response priority is:
 
 1. `200 OK` or `204 No Content` when valid material is available.
-2. `409 certificate_revoked` when the parent Certificate is `revoked`.
-3. `409 certificate_not_ready` when no valid material is available and a CertificateVersion with `status=issuing` exists, including post-expiry renewal.
-4. `409 certificate_issuance_failed` when no valid material is available and the latest issuance, renewal, reissue, or key rotation failed.
-5. `409 certificate_expired` when no valid material is available, all previous versions are expired, no CertificateVersion with `status=issuing` exists, and the latest work is not a failed issuing attempt.
+2. `409 certificate_not_ready` when no valid material is available and a CertificateVersion with `status=issuing` exists, including post-expiry reissue.
+3. `409 certificate_issuance_failed` when no valid material is available and the latest issuance, renewal, reissue, or key rotation failed.
+4. `409 certificate_no_active_version` when no active valid material is available, no CertificateVersion with `status=issuing` exists, and the latest work is not a failed issuing attempt.
 
 ## Auto Renewal Process
 
@@ -3046,10 +3021,9 @@ Material/archive endpoints expose reconciliation state only as normal lookup res
 13. Manual renewal and key rotation use the same overlap constraints. If manual renewal would create more than two valid, not-expired CertificateVersions, Certhub must reject it with `409 renewal_overlap_exists`. If key rotation would create more than two valid, not-expired CertificateVersions, Certhub must reject it with `409 Conflict`.
 14. Old valid CertificateVersions may remain stored until their natural `not_after`, but API material endpoints must always return the latest valid CertificateVersion.
 15. Expired CertificateVersions must never be returned from `tls-material` or `tls-archive`.
-16. If a certificate identity exists but no valid CertificateVersion exists because all versions are expired and no issuing CertificateVersion exists, material/archive endpoints return `409 certificate_expired`.
-17. `409 certificate_expired` is retryable. The response should include `certificate_id`, `status=expired`, `not_after`, and `Retry-After` or `retry_after_seconds` when retryable.
-18. If no renewal is already active when Certhub detects expiry, Certhub must enqueue renewal automatically when the issuer is active, current Application domain scopes still cover every SAN, and replacement-overlap constraints allow it.
-19. Application clients must handle `409 certificate_expired` by retrying the same material/archive endpoint with the same criteria. They must not call `POST /v1/sync/certificates` unless material/archive lookup returns `404 certificate_not_found`.
+16. If a certificate identity exists but no active valid CertificateVersion exists and no issuing CertificateVersion exists, material/archive endpoints return `409 certificate_no_active_version`.
+17. `409 certificate_no_active_version` is not retryable. A User with lifecycle access must start `POST /v1/certificates/{certificate_id}/reissue`.
+18. Application clients must handle `409 certificate_no_active_version` as a terminal cycle failure. They must not call `POST /v1/sync/certificates` unless material/archive lookup returns `404 certificate_not_found`.
 
 ## Observability
 
@@ -3384,9 +3358,6 @@ Stable logical certificate identities.
 | `status` | enum | Required | One of `pending`, `validating_dns`, `issuing`, `ready`, `renewing`, `rotating_key`, `expired`, `revoked`, `failed`, `deleted`. |
 | `failure_code` | string | Nullable | Backend-generated stable error code for the latest failed issuance, renewal, reissue, or key rotation. |
 | `failure_message` | string | Nullable, max length 2048, no control characters | Sanitized human-readable failure details for the latest failed issuance, renewal, reissue, or key rotation. Must not contain secrets or unsanitized provider responses. |
-| `revocation_reason` | enum | Nullable, one of `key_compromise`, `superseded`, `cessation_of_operation`, `unspecified` | Last local revocation reason. Required when `status=revoked`. |
-| `revoked_at` | timestamptz | Nullable | Local revocation time. Required when `status=revoked`. |
-| `revoked_by_user_id` | UUID | Nullable, foreign key to `users.id` | User that requested revocation when available. |
 | `created_at` | timestamptz | Required | Creation time. |
 | `updated_at` | timestamptz | Required | Last metadata update. |
 | `deleted_at` | timestamptz | Nullable | Set when local Certificate availability is removed. Deleted Certificates are retained for audit/history but ignored by criteria lookup. |
@@ -3409,7 +3380,7 @@ Issued certificate material for a logical Certificate.
 | `certificate_id` | UUID | Required, foreign key to `certificates.id`, indexed | Parent Certificate. |
 | `version` | integer | Required, positive, monotonically increasing per `certificate_id` | Sortable version number. Latest valid material is the highest valid version. |
 | `status` | enum | Required, one of `issuing`, `valid`, `failed`, `revoked` | Version lifecycle state. Expiry is derived from `not_after`, not stored as a status. |
-| `reason` | enum | Required, one of `initial_issue`, `renewal`, `key_rotation` | Why this version was issued. Manual renew uses `renewal`; manual key rotation uses `key_rotation`. |
+| `reason` | enum | Required, one of `initial_issue`, `renewal`, `key_rotation`, `reissue` | Why this version was issued. Manual renew uses `renewal`; manual key rotation uses `key_rotation`; no-active-version recovery uses `reissue`. |
 | `cert_pem` | text | Nullable until `status=valid`; required for `valid` and `revoked` | Public leaf certificate PEM. |
 | `chain_pem` | text | Nullable until `status=valid`; required for `valid` and `revoked` | Public issuer chain PEM. |
 | `fullchain_pem` | text | Nullable until `status=valid`; required for `valid` and `revoked` | Public leaf certificate plus issuer chain PEM. |
@@ -3422,6 +3393,9 @@ Issued certificate material for a logical Certificate.
 | `material_etag` | string | Nullable until `status=valid`; required for `valid` and `revoked`, indexed | Strong opaque HTTP ETag for the exact returned TLS material, including surrounding quotes. Generated only by Certhub. |
 | `acme_order_url` | string | Nullable | ACME order URL for troubleshooting. |
 | `certificate_url` | string | Nullable | ACME certificate URL when available. |
+| `revocation_reason` | enum | Nullable, one of `key_compromise`, `superseded`, `cessation_of_operation`, `unspecified` | Local revocation reason for this version. Required when a version is revoked by user action. |
+| `revoked_at` | timestamptz | Nullable | Local version revocation time. |
+| `revoked_by_user_id` | UUID | Nullable, foreign key to `users.id` | User that requested version revocation when available. |
 | `acme_revocation_status` | enum | Nullable, one of `pending`, `succeeded`, `failed`, `not_required` | Remote ACME revocation state for locally revoked versions. Null means revocation has not been requested. |
 | `acme_revocation_attempts` | integer | Required, default `0`, non-negative | Number of ACME revocation attempts for this version. |
 | `acme_revoked_at` | timestamptz | Nullable | Time ACME revocation succeeded. |
@@ -3450,7 +3424,7 @@ Constraints:
 - `material_etag` must match the format and HMAC rules in `Conditional Material Retrieval`.
 - `material_etag` must change whenever any returned material field changes.
 - When a version is locally revoked and ACME revocation is required, `acme_revocation_status` must be `pending`, `succeeded`, or `failed`.
-- Repeating `POST /v1/certificates/{certificate_id}/revoke` must retry ACME revocation for locally revoked versions whose `acme_revocation_status=failed` or `pending` and must be idempotent when ACME revocation already succeeded.
+- Repeating `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke` must retry ACME revocation for that locally revoked version when `acme_revocation_status=failed` or `pending` and must be idempotent when ACME revocation already succeeded.
 
 Certificate material consistency constraints:
 
@@ -3461,7 +3435,7 @@ Certificate material consistency constraints:
 
 Renewal and key rotation both create a new row with a fresh `key_fingerprint_sha256`. Retrying the same in-progress issuing row preserves that row's `key_fingerprint_sha256`.
 
-Certificate material endpoints must always return the latest valid CertificateVersion, selected by highest `version` for the Certificate. Expired, failed, revoked, or incomplete versions must not be returned as current material. If the parent Certificate is revoked, endpoints must return `409 certificate_revoked`. If no valid version exists and an issuing version exists, endpoints must return `409 certificate_not_ready`. If no valid version exists because all versions are expired and no issuing version exists, endpoints must return `409 certificate_expired` instead of returning stale PEM material.
+Current material endpoints must always return the latest active valid CertificateVersion, selected by highest `version` for the Certificate. Expired, failed, revoked, or incomplete versions must not be returned as current material. Version archive endpoints may return any downloadable `valid` or `revoked` CertificateVersion that still has certificate, chain, fullchain, private key, validity, fingerprint, and ETag material. If no active valid version exists and an issuing version exists, current material endpoints must return `409 certificate_not_ready`; otherwise they must return `409 certificate_no_active_version` instead of returning stale PEM material.
 
 ### `issuance_jobs`
 
@@ -3846,9 +3820,10 @@ Rules:
 | `user_not_provisioned` | `403` | No | `3` | Show that an admin must provision the User. |
 | `certificate_not_found` | `404` | No | `5` | Application clients may call `POST /v1/sync/certificates`; human clients show not found. |
 | `certificate_not_ready` | `409` | Yes | `6` | Retry the same material/archive endpoint after `Retry-After`. |
-| `certificate_expired` | `409` | Yes | `6` | Retry the same material/archive endpoint after `Retry-After`; Certhub should be renewing when issuer, domain-scope, and overlap constraints allow it. |
+| `certificate_expired` | `409` | Yes | `6` | Deprecated compatibility code for older clients; current no-active-version states use `certificate_no_active_version`. |
 | `certificate_issuance_failed` | `409` | No | `7` | Stop polling and show failure metadata. `details.failure_code` may contain a stable underlying cause such as `dns_provider_not_found` or `dns_validation_failed`. |
-| `certificate_revoked` | `409` | No | `7` | Stop polling and show revoked status. `details` includes non-secret revocation metadata. |
+| `certificate_revoked` | `409` | No | `7` | Deprecated compatibility code for older clients; version revocation metadata is exposed on CertificateVersion responses. |
+| `certificate_no_active_version` | `409` | No | `7` | Stop polling current material and require a User `reissue` lifecycle action. |
 | `not_acceptable` | `406` | No | `2` | Request an accepted response media type. |
 | `renewal_overlap_exists` | `409` | No | `1` | Show lifecycle conflict and current valid versions. |
 | `renewal_not_due` | `409` | No | `1` | Manual renewal was requested before the active CertificateVersion entered the issuer renewal window. |
@@ -4057,9 +4032,9 @@ Required backend scenarios:
 - Missing material (`404`) is followed by `POST /v1/sync/certificates`; clients then retry material/archive endpoints until ready or failed.
 - Creating a Certificate row without valid material triggers Certhub reconciliation to create or enqueue exactly one issuing CertificateVersion when the Certificate state is eligible for issuance.
 - Not-ready material (`409`) is handled by retrying material/archive endpoints; there is no separate request resource to poll.
-- Expired material is not returned to clients. If a post-expiry renewal is issuing, clients receive `409 certificate_not_ready`; if the latest post-expiry work failed, clients receive `409 certificate_issuance_failed`; if no issuing or failed latest work exists, clients receive `409 certificate_expired`.
-- Revoked parent Certificates return `409 certificate_revoked` from material/archive endpoints and never return stale PEM material.
-- Certificate entering the selected issuer's `renewal_window_seconds` enqueues exactly one automatic renewal when issuer, domain-scope, and overlap constraints allow it.
+- Expired material is not returned by current material endpoints. If a post-expiry reissue is issuing, clients receive `409 certificate_not_ready`; if the latest post-expiry work failed, clients receive `409 certificate_issuance_failed`; if no active valid version exists and no issuing or failed latest work exists, clients receive `409 certificate_no_active_version`.
+- Revoked CertificateVersions are not returned by current material endpoints, but remain downloadable through the version archive endpoint while their material is retained.
+- The background renewal worker enqueues exactly one automatic renewal when an active valid CertificateVersion enters the selected issuer's `renewal_window_seconds` and issuer, domain-scope, and overlap constraints allow it.
 - Renewal in progress while the old version is still valid returns the old valid CertificateVersion from material endpoints.
 - Successful renewal creates a higher-numbered CertificateVersion and material endpoints return that newest valid version.
 - Failed renewal while an older version is still valid does not break material retrieval; material endpoints continue returning the older valid version.
@@ -4068,18 +4043,15 @@ Required backend scenarios:
 - Manual renewal while a renewal CertificateVersion is already `status=issuing` returns the existing in-progress renewal instead of creating another version.
 - Manual renewal while a non-renewal CertificateVersion is `status=issuing` returns `409 conflict`.
 - Manual renewal that could create more than two valid, not-expired CertificateVersions is rejected with `renewal_overlap_exists`.
-- Manual renewal and key rotation are rejected when current Application domain scopes no longer cover every Certificate SAN.
+- Manual renewal and key rotation are rejected when there is no active valid CertificateVersion or when current Application domain scopes no longer cover every Certificate SAN.
 - Key rotation creates a higher-numbered CertificateVersion on the same Certificate identity, not a new Certificate row, and follows replacement-overlap constraints.
-- Reissue after failed state uses the same Certificate identity when triggered by an explicit User lifecycle endpoint and transitions the parent Certificate out of `failed` before issuing.
-- Reissue after revoked state requires explicit User lifecycle action; `key_compromise` revocations require key rotation.
-- Material endpoints do not return material for parent Certificates that remain `revoked` or `failed`.
-- Revoking a Certificate marks parent Certificate and valid, not-expired CertificateVersions revoked for local serving immediately and material endpoints stop returning material.
+- Reissue after no-active-version state uses the same Certificate identity when triggered by `POST /v1/certificates/{certificate_id}/reissue`.
+- Current material endpoints do not return material from revoked, expired, failed, or incomplete CertificateVersions.
+- Revoking a CertificateVersion marks only that version revoked for current serving immediately; other active valid versions remain current if present.
 - ACME revocation failure after local revocation keeps local state revoked and records `certificate_revocation_failed`.
-- Repeating revoke after ACME revocation failure retries remote revocation and records `certificate_revocation_retried`.
-- Repeating revoke after local and ACME revocation have both succeeded is idempotent and does not create duplicate revocation side effects.
-- Delete without `revoke=true` removes local availability and does not revoke the CA certificate.
-- Delete with `revoke=true` applies revocation semantics before or during local delete.
-- Deleting a Certificate sets `status=deleted` and `deleted_at`; later criteria lookup ignores the deleted row and can create a new Certificate with the same identity.
+- Repeating version revoke after ACME revocation failure retries remote revocation and records `certificate_revocation_retried`.
+- Repeating version revoke after local and ACME revocation have both succeeded is idempotent and does not create duplicate revocation side effects.
+- A CertificateVersion is never deleted through public APIs.
 - Multiple Applications requesting the same SANs get separate Certificate rows and CertificateVersions.
 - Current retrievable CertificateVersions must retain `private_key_pem`; private keys may only be cleared for versions that can no longer be returned.
 - Deleting a domain scope blocks future Application-token criteria retrieval for names no longer covered by remaining scopes, but does not revoke existing Certificates.
@@ -4117,9 +4089,10 @@ Required backend scenarios:
 - CertificateVersion `material_etag` is generated from exact returned material and changes when cert, chain, fullchain, or private key changes.
 - Archive endpoints return `application/gzip` containing `cert.pem`, `chain.pem`, `fullchain.pem`, `privkey.pem`, and `metadata.json`.
 - Archive endpoints set `Content-Disposition: attachment; filename="<safe_certificate_name>.tar.gz"` where `<safe_certificate_name>` is derived from the first normalized SAN, falls back to Certificate ID, and contains no `*` or `.`.
-- Certificate lifecycle operations use only ID-based endpoints; criteria-based renew, rotate-key, and revoke endpoints do not exist.
-- Renewal creates a higher-numbered CertificateVersion with a new private key when the active version is inside the issuer renewal window, or when no active valid material exists because previous material is expired.
-- Key rotation creates a higher-numbered CertificateVersion with a new private key and is not gated by the renewal window.
+- Certificate lifecycle operations use only ID-based endpoints; criteria-based renew, rotate-key, reissue, and version revoke endpoints do not exist.
+- Renewal creates a higher-numbered CertificateVersion with a new private key only when an active valid version exists and is inside the issuer renewal window.
+- Key rotation creates a higher-numbered CertificateVersion with a new private key and is not gated by the renewal window, but still requires an active valid version.
+- Reissue creates a higher-numbered CertificateVersion when no active valid version exists and no version is issuing.
 - Key rotation sets parent Certificate status `rotating_key` while in progress and records key-rotation failures in Certificate and CertificateVersion failure metadata.
 - Identity changes create a new Certificate row, not just a new CertificateVersion.
 - CertificateVersions have `created_at`, `updated_at`, `started_at`, and `completed_at` timestamps sufficient to detect stuck issuing work.

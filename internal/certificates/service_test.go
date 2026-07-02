@@ -52,17 +52,96 @@ func TestStartLifecycleRenewalInsideWindowCreatesVersionAndJob(t *testing.T) {
 	}
 }
 
-func TestStartLifecycleRenewalAllowsExpiredRecovery(t *testing.T) {
+func TestStartLifecycleRenewalWithoutActiveVersionRequiresReissue(t *testing.T) {
 	fixture := newLifecycleServiceFixture()
 	fixture.store.materialErr = storage.ErrNoRows
 	fixture.store.cert.Status = StatusExpired
 
-	version, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonRenewal)
+	_, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonRenewal)
+	var state StateError
+	if !errors.As(err, &state) || !errors.Is(state.Err, ErrCertificateNoActiveVersion) {
+		t.Fatalf("err = %v, want no active version state", err)
+	}
+	version, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonReissue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version.Reason != IssuanceReasonRenewal || fixture.store.createVersionCalls != 1 {
+	if version.Reason != IssuanceReasonReissue || fixture.store.createVersionCalls != 1 {
 		t.Fatalf("version=%#v create=%d", version, fixture.store.createVersionCalls)
+	}
+}
+
+func TestStartLifecycleReissueFromRevokedParentCreatesVersion(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	reason := RevocationReasonCessationOfOperation
+	revokedAt := time.Now().UTC().Add(-time.Hour)
+	revokedBy := "92345678-1234-4234-9234-123456789abc"
+	fixture.store.materialErr = storage.ErrNoRows
+	fixture.store.cert.Status = StatusRevoked
+	fixture.store.cert.RevocationReason = &reason
+	fixture.store.cert.RevokedAt = &revokedAt
+	fixture.store.cert.RevokedByUserID = &revokedBy
+
+	version, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonReissue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.Reason != IssuanceReasonReissue || fixture.store.createVersionCalls != 1 {
+		t.Fatalf("version=%#v create=%d", version, fixture.store.createVersionCalls)
+	}
+	if len(fixture.store.ensureJobCalls) != 1 || fixture.store.ensureJobCalls[0].Reason != JobReasonReissue {
+		t.Fatalf("jobs = %#v", fixture.store.ensureJobCalls)
+	}
+}
+
+func TestStartLifecycleRotateKeyWithoutActiveVersionRequiresReissue(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	fixture.store.materialErr = storage.ErrNoRows
+	fixture.store.cert.Status = StatusExpired
+
+	_, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonKeyRotation)
+	var state StateError
+	if !errors.As(err, &state) || !errors.Is(state.Err, ErrCertificateNoActiveVersion) {
+		t.Fatalf("err = %v, want no active version state", err)
+	}
+	if fixture.store.createVersionCalls != 0 {
+		t.Fatalf("create calls = %d", fixture.store.createVersionCalls)
+	}
+}
+
+func TestStartLifecycleReissueWithActiveVersionConflicts(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	fixture.store.material = validMaterialVersion(time.Now().UTC().Add(24 * time.Hour))
+	fixture.store.versions = []CertificateVersion{fixture.store.material}
+
+	_, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonReissue)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want conflict", err)
+	}
+	if fixture.store.createVersionCalls != 0 {
+		t.Fatalf("create calls = %d", fixture.store.createVersionCalls)
+	}
+}
+
+func TestStartLifecycleReissueWithIssuingVersionConflicts(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	fixture.store.materialErr = storage.ErrNoRows
+	fixture.store.cert.Status = StatusFailed
+	fixture.store.cert.HasIssuingVersion = true
+	fixture.store.versions = []CertificateVersion{{
+		ID:            "62345678-1234-4234-9234-123456789abc",
+		CertificateID: fixture.store.cert.ID,
+		Version:       3,
+		Status:        VersionStatusIssuing,
+		Reason:        IssuanceReasonReissue,
+	}}
+
+	_, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, IssuanceReasonReissue)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want conflict", err)
+	}
+	if fixture.store.createVersionCalls != 0 {
+		t.Fatalf("create calls = %d", fixture.store.createVersionCalls)
 	}
 }
 
@@ -81,7 +160,7 @@ func TestStartLifecycleRotateKeyBypassesRenewalWindow(t *testing.T) {
 	}
 }
 
-func TestMaterialMetadataEnqueuesRenewalInsideWindow(t *testing.T) {
+func TestMaterialMetadataDoesNotEnqueueRenewalInsideWindow(t *testing.T) {
 	fixture := newLifecycleServiceFixture()
 	notAfter := time.Now().UTC().Add(30*24*time.Hour - time.Second)
 	fixture.store.material = validMaterialVersion(notAfter)
@@ -98,10 +177,10 @@ func TestMaterialMetadataEnqueuesRenewalInsideWindow(t *testing.T) {
 	if result.MaterialETag == "" {
 		t.Fatalf("metadata = %#v", result)
 	}
-	if fixture.store.createVersionCalls != 1 || fixture.store.createVersionReason != IssuanceReasonRenewal {
+	if fixture.store.createVersionCalls != 0 {
 		t.Fatalf("create calls = %d reason=%s", fixture.store.createVersionCalls, fixture.store.createVersionReason)
 	}
-	if len(fixture.store.ensureJobCalls) != 1 || fixture.store.ensureJobCalls[0].Reason != JobReasonRenewal {
+	if len(fixture.store.ensureJobCalls) != 0 {
 		t.Fatalf("jobs = %#v", fixture.store.ensureJobCalls)
 	}
 }
@@ -211,6 +290,13 @@ func (s *lifecycleStore) CountVersions(context.Context, string) (int64, error) {
 	return int64(len(s.versions)), nil
 }
 
+func (s *lifecycleStore) GetVersion(context.Context, string) (CertificateVersion, error) {
+	if len(s.versions) > 0 {
+		return s.versions[0], nil
+	}
+	return s.material, s.materialErr
+}
+
 func (s *lifecycleStore) GetLatestValidMaterial(context.Context, string) (CertificateVersion, error) {
 	return s.material, s.materialErr
 }
@@ -232,8 +318,8 @@ func (s *lifecycleStore) EnsureIssuanceJob(_ context.Context, params EnsureIssua
 	return IssuanceJob{ID: "72345678-1234-4234-9234-123456789abc", Reason: params.Reason}, nil
 }
 
-func (s *lifecycleStore) RevokeCertificate(context.Context, RevokeCertificateParams) (Certificate, error) {
-	return Certificate{}, errors.New("not implemented")
+func (s *lifecycleStore) RevokeCertificateVersion(context.Context, RevokeCertificateVersionParams) (CertificateVersion, error) {
+	return CertificateVersion{}, errors.New("not implemented")
 }
 
 func (s *lifecycleStore) DeleteCertificate(context.Context, DeleteCertificateParams) (Certificate, error) {

@@ -178,9 +178,9 @@ The Kubernetes ServiceAccount used by the operator pod is only for Kubernetes AP
 5. If backend returns `204 No Content`, leave the target Secret unchanged and update CR status/conditions as synced.
 6. If backend returns `200 OK`, write or update the target TLS Secret, including `certhub.torob.dev/material-etag`, and update CR status.
 7. If backend returns `404 certificate_not_found`, call `POST /v1/sync/certificates` with the same criteria, store `certificateId` when present for observability, and requeue.
-8. If backend returns `409 certificate_not_ready` or `409 certificate_expired`, do not call `POST /v1/sync/certificates`; record the returned status metadata and requeue.
+8. If backend returns `409 certificate_not_ready`, do not call `POST /v1/sync/certificates`; record the returned status metadata and requeue.
 9. If backend returns `409 certificate_issuance_failed`, set a failed condition with backend failure metadata and stop retrying until the backend Certificate is repaired through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
-10. If backend returns `409 certificate_revoked`, set a failed condition with non-secret revocation metadata and stop retrying until the backend Certificate is reissued through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
+10. If backend returns `409 certificate_no_active_version`, set a failed condition and stop retrying until the backend Certificate is reissued through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
 11. On each later reconcile, retry `POST /v1/sync/certificates/tls-material` with the same CR criteria and latest stored `material_etag`.
 12. Update CR status and conditions.
 
@@ -191,7 +191,7 @@ Manual retry:
 - Retry ID does not repair backend terminal `certificate_issuance_failed` state. That state requires a User lifecycle action in the Certhub web UI or a CR criteria change that maps to a different certificate identity.
 - Retry annotation handling must not call any backend ID-based lifecycle endpoint. The operator still uses only `/v1/sync/...`.
 
-The operator must not create duplicate Certificates for repeated reconciles. It calls `POST /v1/sync/certificates` only after `404 certificate_not_found`, relies on backend idempotency, and stores the Certificate ID in status for observability only. `409 certificate_expired` is handled by requeueing and retrying material retrieval because the backend owns renewal. Backend certificate readiness checking and material retrieval are always criteria-based.
+The operator must not create duplicate Certificates for repeated reconciles. It calls `POST /v1/sync/certificates` only after `404 certificate_not_found`, relies on backend idempotency, and stores the Certificate ID in status for observability only. `409 certificate_no_active_version` is terminal until User reissue or criteria change. Backend certificate readiness checking and material retrieval are always criteria-based.
 
 Each backend request should include an `X-Request-ID` correlation ID tied to the current reconcile ID.
 
@@ -205,7 +205,7 @@ The operator should periodically inspect managed certificates and refresh Secret
 - Certificate fingerprint changes.
 - `not_after` changes.
 - Backend reports the certificate is renewing or ready with newer material.
-- Backend reports `certificate_expired`; the operator should keep the existing Kubernetes Secret unchanged and retry until renewed material is available or backend reports failure.
+- Backend reports `certificate_no_active_version`; the operator should keep the existing Kubernetes Secret unchanged and wait for User reissue or criteria change.
 - CR spec changes and maps to a different certificate identity.
 
 Default resync interval:
@@ -307,7 +307,7 @@ Required operator scenarios:
 - Existing Secret is updated when backend certificate material changes.
 - Existing Secret is left unchanged when backend returns `204 No Content` for a matching stored `material_etag`.
 - Existing Secret is preserved unchanged when authorization fails, backend is unavailable, material is not ready, issuance fails, or a Secret update write fails before commit.
-- Existing Secret is preserved unchanged when backend reports `certificate_revoked`; status records the revoked state and no stale Secret rewrite occurs.
+- Existing Secret is preserved unchanged when backend reports `certificate_no_active_version`; status records the terminal backend state and no stale Secret rewrite occurs.
 - Existing target Secrets that are not owned or explicitly managed by the matching `CerthubCertificate` are not overwritten.
 - Owner-reference UID mismatch, `certhub.torob.dev/owner-uid` mismatch, missing required management labels, or conflicting Secret type causes a failed condition instead of mutating the existing Secret.
 - Deleting a CR with default `secretDeletionPolicy=Retain` leaves the target Secret unchanged and does not require a finalizer.

@@ -703,58 +703,6 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-    delete:
-      tags: [Certificates]
-      operationId: deleteCertificate
-      summary: Remove local certificate availability, optionally revoking first.
-      security:
-        - UserBearerAuth: []
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CertificateDeleteRequest'
-            examples:
-              revokeAndDelete:
-                $ref: '#/components/examples/CertificateDeleteRequest'
-      responses:
-        '202':
-          description: Delete or revocation workflow started.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/XRequestID'
-            Cache-Control:
-              $ref: '#/components/headers/CacheControlNoStore'
-            Pragma:
-              $ref: '#/components/headers/PragmaNoCache'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CertificateResponse'
-              examples:
-                pending:
-                  $ref: '#/components/examples/CertificatePendingResponse'
-        '204':
-          description: Local availability removed.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/XRequestID'
-            Cache-Control:
-              $ref: '#/components/headers/CacheControlNoStore'
-            Pragma:
-              $ref: '#/components/headers/PragmaNoCache'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
   /v1/certificates/{certificate_id}/versions:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
@@ -793,6 +741,78 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - $ref: '#/components/parameters/CertificateID'
+      - $ref: '#/components/parameters/CertificateVersionID'
+    get:
+      tags: [Certificates]
+      operationId: getCertificateVersionTLSArchive
+      summary: Return downloadable TLS material for one CertificateVersion as a tar.gz archive.
+      security:
+        - UserBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+        - $ref: '#/components/parameters/AcceptGzip'
+      responses:
+        '200':
+          $ref: '#/components/responses/TLSArchiveOK'
+        '304':
+          $ref: '#/components/responses/MaterialNotModified'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - $ref: '#/components/parameters/CertificateID'
+      - $ref: '#/components/parameters/CertificateVersionID'
+    post:
+      tags: [Certificates]
+      operationId: revokeCertificateVersion
+      summary: Revoke one specific CertificateVersion.
+      security:
+        - UserBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateRevokeRequest'
+      responses:
+        '202':
+          description: Version revocation recorded and remote ACME revocation queued when applicable.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateVersionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /v1/certificates/{certificate_id}/tls-archive:
     parameters:
@@ -857,10 +877,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CertificateResponse'
+                $ref: '#/components/schemas/CertificateVersionResponse'
               examples:
                 pending:
-                  $ref: '#/components/examples/CertificatePendingResponse'
+                  $ref: '#/components/examples/CertificateVersionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -921,46 +941,28 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/certificates/{certificate_id}/revoke:
+  /v1/certificates/{certificate_id}/reissue:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
       - $ref: '#/components/parameters/CertificateID'
     post:
       tags: [Certificates]
-      operationId: revokeCertificate
-      summary: Revoke a certificate selected by ID.
+      operationId: reissueCertificate
+      summary: Start a new issuance when the certificate has no active valid or issuing CertificateVersion.
       security:
         - UserBearerAuth: []
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CertificateRevokeRequest'
+              $ref: '#/components/schemas/LifecycleNoteRequest'
             examples:
-              keyCompromise:
-                value:
-                  reason: key_compromise
-                  note: Private key was exposed in CI logs
+              note:
+                $ref: '#/components/examples/LifecycleNoteRequest'
       responses:
-        '200':
-          description: Certificate was already locally revoked and remote revocation is complete or not required.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/XRequestID'
-            Cache-Control:
-              $ref: '#/components/headers/CacheControlNoStore'
-            Pragma:
-              $ref: '#/components/headers/PragmaNoCache'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CertificateResponse'
-              examples:
-                certificate:
-                  $ref: '#/components/examples/CertificateResponse'
         '202':
-          description: Revocation started, queued, or retrying remote revocation.
+          description: Reissue started.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestID'
@@ -973,10 +975,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CertificateResponse'
+                $ref: '#/components/schemas/CertificateVersionResponse'
               examples:
                 pending:
-                  $ref: '#/components/examples/CertificatePendingResponse'
+                  $ref: '#/components/examples/CertificateVersionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2513,6 +2515,13 @@ components:
       schema:
         type: string
         format: uuid
+    CertificateVersionID:
+      name: certificate_version_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ApplicationID:
       name: application_id
       in: path
@@ -2967,7 +2976,7 @@ components:
       enum: [issuing, valid, failed, revoked]
     CertificateVersionReason:
       type: string
-      enum: [initial_issue, renewal, key_rotation]
+      enum: [initial_issue, renewal, key_rotation, reissue]
     RevocationReason:
       type: string
       enum: [key_compromise, superseded, cessation_of_operation, unspecified]
@@ -3058,6 +3067,7 @@ components:
         - certificate_expired
         - certificate_issuance_failed
         - certificate_revoked
+        - certificate_no_active_version
         - not_acceptable
         - renewal_overlap_exists
         - renewal_not_due
@@ -3891,7 +3901,7 @@ components:
     Certificate:
       type: object
       additionalProperties: false
-      required: [id, application_id, normalized_sans, key_type, issuer_id, status, created_at, updated_at]
+      required: [id, application_id, normalized_sans, key_type, issuer_id, status, has_active_valid_version, has_issuing_version, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3913,6 +3923,12 @@ components:
           $ref: '#/components/schemas/MachineName'
         status:
           $ref: '#/components/schemas/CertificateStatus'
+        has_active_valid_version:
+          type: boolean
+          description: True when current material endpoints can serve an active valid CertificateVersion for this Certificate.
+        has_issuing_version:
+          type: boolean
+          description: True when any CertificateVersion for this Certificate is currently issuing.
         latest_version:
           $ref: '#/components/schemas/CertificateVersionMetadata'
         failure_code:
@@ -3921,19 +3937,6 @@ components:
         failure_message:
           type: string
           maxLength: 2048
-          nullable: true
-        revocation_reason:
-          type: string
-          allOf:
-            - $ref: '#/components/schemas/RevocationReason'
-          nullable: true
-        revoked_at:
-          type: string
-          format: date-time
-          nullable: true
-        revoked_by_user_id:
-          type: string
-          format: uuid
           nullable: true
         created_at:
           type: string
@@ -3974,6 +3977,13 @@ components:
             $ref: '#/components/schemas/CertificateVersionMetadata'
         pagination:
           $ref: '#/components/schemas/PageMeta'
+    CertificateVersionResponse:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          $ref: '#/components/schemas/CertificateVersionMetadata'
     CertificateVersionMetadata:
       type: object
       additionalProperties: false
@@ -4011,6 +4021,19 @@ components:
           nullable: true
         material_etag:
           $ref: '#/components/schemas/MaterialETag'
+        revocation_reason:
+          type: string
+          allOf:
+            - $ref: '#/components/schemas/RevocationReason'
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_by_user_id:
+          type: string
+          format: uuid
+          nullable: true
         acme_revocation_status:
           $ref: '#/components/schemas/ACMERevocationStatus'
         acme_revocation_attempts:
@@ -4137,20 +4160,6 @@ components:
         note:
           type: string
           maxLength: 2048
-    CertificateDeleteRequest:
-      type: object
-      additionalProperties: false
-      description: When revoke is true, reason is required and must be one of RevocationReason. When revoke is false or omitted, reason is ignored.
-      properties:
-        revoke:
-          type: boolean
-          default: false
-        reason:
-          $ref: '#/components/schemas/RevocationReason'
-        note:
-          type: string
-          maxLength: 2048
-
     Issuer:
       type: object
       additionalProperties: false
@@ -4643,6 +4652,8 @@ components:
           issuer_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d43
           issuer_name: letsencrypt_production
           status: ready
+          has_active_valid_version: true
+          has_issuing_version: false
           latest_version:
             id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d44
             certificate_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
@@ -4659,8 +4670,6 @@ components:
             updated_at: '2026-06-24T12:05:00Z'
           failure_code: null
           failure_message: null
-          revoked_at: null
-          revoked_by_user_id: null
           created_at: '2026-06-24T12:00:00Z'
           updated_at: '2026-06-24T12:05:00Z'
           deleted_at: null
@@ -4676,10 +4685,10 @@ components:
           issuer_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d43
           issuer_name: letsencrypt_production
           status: pending
+          has_active_valid_version: false
+          has_issuing_version: true
           failure_code: null
           failure_message: null
-          revoked_at: null
-          revoked_by_user_id: null
           created_at: '2026-06-24T12:00:00Z'
           updated_at: '2026-06-24T12:00:00Z'
           deleted_at: null
@@ -4695,6 +4704,8 @@ components:
             issuer_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d43
             issuer_name: letsencrypt_production
             status: ready
+            has_active_valid_version: true
+            has_issuing_version: false
             created_at: '2026-06-24T12:00:00Z'
             updated_at: '2026-06-24T12:05:00Z'
         pagination:
@@ -4721,11 +4732,16 @@ components:
           limit: 50
           offset: 0
           total: 1
-    CertificateDeleteRequest:
+    CertificateVersionResponse:
       value:
-        revoke: true
-        reason: superseded
-        note: Replaced by a newly issued certificate.
+        version:
+          id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d44
+          certificate_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
+          version: 4
+          status: issuing
+          reason: reissue
+          created_at: '2026-06-24T12:00:00Z'
+          updated_at: '2026-06-24T12:00:00Z'
     LifecycleNoteRequest:
       value:
         note: Operator requested immediate processing.

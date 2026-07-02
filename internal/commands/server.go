@@ -266,6 +266,23 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "worker shutdown failed: %s\n", security.RedactString(err.Error()))
 		}
 	}()
+	renewalWorker, err := workers.StartCertificateRenewalWorker(ctx, workers.CertificateRenewalConfig{
+		Store:        certRepo,
+		Applications: appRepo,
+		PollInterval: 5 * time.Minute,
+		LogWriter:    r.Stderr,
+	})
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "worker startup failed: %s\n", security.RedactString(err.Error()))
+		return 1
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := renewalWorker.Stop(stopCtx); err != nil {
+			fmt.Fprintf(r.Stderr, "worker shutdown failed: %s\n", security.RedactString(err.Error()))
+		}
+	}()
 	issuanceWorkers, err := workers.StartCertificateIssuanceWorkers(ctx, workers.CertificateIssuanceConfig{
 		Service: &workers.CertificateIssuanceService{
 			Certificates:       certRepo,

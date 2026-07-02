@@ -360,8 +360,7 @@ export interface paths {
         get: operations["getCertificate"];
         put?: never;
         post?: never;
-        /** Remove local certificate availability, optionally revoking first. */
-        delete: operations["deleteCertificate"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -383,6 +382,52 @@ export interface paths {
         get: operations["listCertificateVersions"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        /** Return downloadable TLS material for one CertificateVersion as a tar.gz archive. */
+        get: operations["getCertificateVersionTLSArchive"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke one specific CertificateVersion. */
+        post: operations["revokeCertificateVersion"];
         delete?: never;
         options?: never;
         head?: never;
@@ -455,7 +500,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/certificates/{certificate_id}/revoke": {
+    "/v1/certificates/{certificate_id}/reissue": {
         parameters: {
             query?: never;
             header?: {
@@ -469,8 +514,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke a certificate selected by ID. */
-        post: operations["revokeCertificate"];
+        /** Start a new issuance when the certificate has no active valid or issuing CertificateVersion. */
+        post: operations["reissueCertificate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1043,7 +1088,7 @@ export interface components {
         /** @enum {string} */
         CertificateVersionStatus: "issuing" | "valid" | "failed" | "revoked";
         /** @enum {string} */
-        CertificateVersionReason: "initial_issue" | "renewal" | "key_rotation";
+        CertificateVersionReason: "initial_issue" | "renewal" | "key_rotation" | "reissue";
         /**
          * @default unspecified
          * @enum {string}
@@ -1058,7 +1103,7 @@ export interface components {
         /** @enum {string} */
         AuditAction: "bootstrap_admin_created" | "user_created" | "user_updated" | "user_login_succeeded" | "user_login_failed" | "user_session_created" | "user_session_refreshed" | "user_session_revoked" | "password_2fa_setup_started" | "password_2fa_enabled" | "password_2fa_disabled" | "application_created" | "application_updated" | "application_token_created" | "application_token_revoked" | "domain_scope_created" | "domain_scope_deleted" | "application_access_granted" | "application_access_revoked" | "issuer_created" | "issuer_updated" | "issuer_disabled" | "acme_account_created" | "dns_provider_created" | "dns_provider_updated" | "dns_provider_credentials_replaced" | "dns_provider_zone_added" | "dns_provider_zone_removed" | "dns_provider_zone_refresh_started" | "dns_provider_zone_refreshed" | "dns_zone_discovery_failed" | "certificate_created" | "certificate_issuance_started" | "certificate_issuance_succeeded" | "certificate_issuance_failed" | "certificate_renewal_started" | "certificate_renewal_succeeded" | "certificate_renewal_failed" | "certificate_key_rotation_started" | "certificate_key_rotation_succeeded" | "certificate_key_rotation_failed" | "certificate_revoked" | "certificate_revocation_retried" | "certificate_revocation_failed" | "certificate_deleted" | "private_key_read" | "server_self_certificate_synced";
         /** @enum {string} */
-        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "invalid_refresh_token" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "refresh_token_not_allowed" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
+        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "invalid_refresh_token" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "refresh_token_not_allowed" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "certificate_no_active_version" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
         ErrorResponse: {
             error: components["schemas"]["ErrorEnvelope"];
         };
@@ -1436,14 +1481,13 @@ export interface components {
             issuer_id: string;
             issuer_name?: components["schemas"]["MachineName"];
             status: components["schemas"]["CertificateStatus"];
+            /** @description True when current material endpoints can serve an active valid CertificateVersion for this Certificate. */
+            has_active_valid_version: boolean;
+            /** @description True when any CertificateVersion for this Certificate is currently issuing. */
+            has_issuing_version: boolean;
             latest_version?: components["schemas"]["CertificateVersionMetadata"];
             failure_code?: string | null;
             failure_message?: string | null;
-            revocation_reason?: (string & components["schemas"]["RevocationReason"]) | null;
-            /** Format: date-time */
-            revoked_at?: string | null;
-            /** Format: uuid */
-            revoked_by_user_id?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -1462,6 +1506,9 @@ export interface components {
             versions: components["schemas"]["CertificateVersionMetadata"][];
             pagination: components["schemas"]["PageMeta"];
         };
+        CertificateVersionResponse: {
+            version: components["schemas"]["CertificateVersionMetadata"];
+        };
         CertificateVersionMetadata: {
             /** Format: uuid */
             id: string;
@@ -1478,6 +1525,11 @@ export interface components {
             fingerprint_sha256?: string | null;
             key_fingerprint_sha256?: string | null;
             material_etag?: components["schemas"]["MaterialETag"];
+            revocation_reason?: (string & components["schemas"]["RevocationReason"]) | null;
+            /** Format: date-time */
+            revoked_at?: string | null;
+            /** Format: uuid */
+            revoked_by_user_id?: string | null;
             acme_revocation_status?: components["schemas"]["ACMERevocationStatus"];
             acme_revocation_attempts?: number;
             /** Format: date-time */
@@ -1526,13 +1578,6 @@ export interface components {
         };
         CertificateRevokeRequest: {
             reason: components["schemas"]["RevocationReason"];
-            note?: string;
-        };
-        /** @description When revoke is true, reason is required and must be one of RevocationReason. When revoke is false or omitted, reason is ignored. */
-        CertificateDeleteRequest: {
-            /** @default false */
-            revoke: boolean;
-            reason?: components["schemas"]["RevocationReason"];
             note?: string;
         };
         Issuer: {
@@ -1886,6 +1931,7 @@ export interface components {
         Limit: number;
         Offset: number;
         CertificateID: string;
+        CertificateVersionID: string;
         ApplicationID: string;
         UserID: string;
         TokenID: string;
@@ -2472,53 +2518,6 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    deleteCertificate: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
-                "X-Request-ID"?: components["parameters"]["XRequestID"];
-            };
-            path: {
-                certificate_id: components["parameters"]["CertificateID"];
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": components["schemas"]["CertificateDeleteRequest"];
-            };
-        };
-        responses: {
-            /** @description Delete or revocation workflow started. */
-            202: {
-                headers: {
-                    "X-Request-ID": components["headers"]["XRequestID"];
-                    "Cache-Control": components["headers"]["CacheControlNoStore"];
-                    Pragma: components["headers"]["PragmaNoCache"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CertificateResponse"];
-                };
-            };
-            /** @description Local availability removed. */
-            204: {
-                headers: {
-                    "X-Request-ID": components["headers"]["XRequestID"];
-                    "Cache-Control": components["headers"]["CacheControlNoStore"];
-                    Pragma: components["headers"]["PragmaNoCache"];
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
     listCertificateVersions: {
         parameters: {
             query?: {
@@ -2552,6 +2551,72 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getCertificateVersionTLSArchive: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+                /** @description Strong material ETag previously returned by a TLS material or archive endpoint. */
+                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
+                /** @description Set to `application/gzip` when calling a TLS archive endpoint. Requests that explicitly reject `application/gzip` receive `406 Not Acceptable`. */
+                Accept?: components["parameters"]["AcceptGzip"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["TLSArchiveOK"];
+            304: components["responses"]["MaterialNotModified"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            406: components["responses"]["NotAcceptable"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    revokeCertificateVersion: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificateRevokeRequest"];
+            };
+        };
+        responses: {
+            /** @description Version revocation recorded and remote ACME revocation queued when applicable. */
+            202: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificateVersionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     getCertificateTLSArchive: {
@@ -2609,7 +2674,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CertificateResponse"];
+                    "application/json": components["schemas"]["CertificateVersionResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2657,7 +2722,7 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
-    revokeCertificate: {
+    reissueCertificate: {
         parameters: {
             query?: never;
             header?: {
@@ -2669,25 +2734,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
-                "application/json": components["schemas"]["CertificateRevokeRequest"];
+                "application/json": components["schemas"]["LifecycleNoteRequest"];
             };
         };
         responses: {
-            /** @description Certificate was already locally revoked and remote revocation is complete or not required. */
-            200: {
-                headers: {
-                    "X-Request-ID": components["headers"]["XRequestID"];
-                    "Cache-Control": components["headers"]["CacheControlNoStore"];
-                    Pragma: components["headers"]["PragmaNoCache"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CertificateResponse"];
-                };
-            };
-            /** @description Revocation started, queued, or retrying remote revocation. */
+            /** @description Reissue started. */
             202: {
                 headers: {
                     "X-Request-ID": components["headers"]["XRequestID"];
@@ -2697,7 +2750,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CertificateResponse"];
+                    "application/json": components["schemas"]["CertificateVersionResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];

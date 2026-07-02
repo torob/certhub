@@ -179,8 +179,11 @@ func validateAttachIssuingVersionToJob(params AttachIssuingVersionToJobParams) e
 	return storage.ValidateUUID(params.CertificateVersionID, "certificate_version_id")
 }
 
-func validateRevokeCertificate(params RevokeCertificateParams) error {
-	if err := storage.ValidateUUID(params.ID, "certificate_id"); err != nil {
+func validateRevokeCertificateVersion(params RevokeCertificateVersionParams) error {
+	if err := storage.ValidateUUID(params.CertificateID, "certificate_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.CertificateVersionID, "certificate_version_id"); err != nil {
 		return err
 	}
 	if err := storage.ValidateUUID(params.RevokedByUserID, "revoked_by_user_id"); err != nil {
@@ -412,7 +415,7 @@ func validateCertificateStatus(value Status) error {
 
 func validateIssuanceReason(value IssuanceReason) error {
 	switch value {
-	case IssuanceReasonInitialIssue, IssuanceReasonRenewal, IssuanceReasonKeyRotation:
+	case IssuanceReasonInitialIssue, IssuanceReasonRenewal, IssuanceReasonKeyRotation, IssuanceReasonReissue:
 		return nil
 	default:
 		return errors.New("issuance reason is invalid")
@@ -421,7 +424,7 @@ func validateIssuanceReason(value IssuanceReason) error {
 
 func validateJobReason(value JobReason) error {
 	switch value {
-	case JobReasonInitialIssue, JobReasonRenewal, JobReasonKeyRotation, JobReasonRevocationRetry, JobReasonDNSCleanup:
+	case JobReasonInitialIssue, JobReasonRenewal, JobReasonKeyRotation, JobReasonReissue, JobReasonRevocationRetry, JobReasonDNSCleanup:
 		return nil
 	default:
 		return errors.New("job reason is invalid")
