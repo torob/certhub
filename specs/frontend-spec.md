@@ -185,7 +185,7 @@ Required web management workflows:
 - Application token management: list token metadata, create tokens, display raw token value exactly once, support expiring and non-expiring tokens, and revoke tokens.
 - Application User grant management: list grants, create or replace grants, and remove grants.
 - Domain scope management: list scopes, add immutable scopes, and delete scopes.
-- Certificate management: create Application-owned certificates, list and inspect certificates, download ID-based material/archive when authorized, inspect events, renew, rotate key, revoke, and delete.
+- Certificate management: create Application-owned certificates, list and inspect certificates, download ID-based archives when authorized, inspect events, renew, rotate key, revoke, and delete.
 - Issuer management: list, create, inspect, update mutable fields, disable/enable through status, configure default issuer, renewal-window, and contact email.
 - DNS provider management: list, create, inspect, update mutable metadata, replace write-only credentials, list zones, manually add/delete zones in manual mode, view discovered zones, and trigger auto-mode zone refresh.
 - Audit management: list and filter global audit events for admins, scoped Application/certificate audit events for Users with relevant Application access, and certificate-specific events.
@@ -258,10 +258,10 @@ Certificate detail page:
 - Renewal history.
 - Version history.
 - Audit events for this certificate.
-- Material download buttons for `cert.pem`, `chain.pem`, `fullchain.pem`, private key, and tar.gz archive only when the User has `certificate_reader`, `manager`, or global `admin`.
-- Metadata-only Users can inspect certificate metadata but cannot download PEM material or archives in v1 because current material/archive endpoints include private-key material.
+- Archive download button only when the User has `certificate_reader`, `manager`, or global `admin`.
+- Metadata-only Users can inspect certificate metadata but cannot download archives in v1 because current archive endpoints include private-key material.
 
-Certificate material downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-material` or `GET /v1/certificates/{certificate_id}/tls-archive`. The frontend must not use criteria-based material endpoints for User/browser downloads. Every current material/archive download is a private-key-capable operation and must require an explicit audited user action.
+Certificate archive downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-archive`. The frontend must not use criteria-based material endpoints for User/browser downloads. Every current archive download is a private-key-capable operation and must require an explicit audited user action.
 
 Certificate renewal and version history must call `GET /v1/certificates/{certificate_id}/versions`. The frontend must not try to reconstruct complete version history from the single `latest_version` field.
 
@@ -277,11 +277,11 @@ Certificate lifecycle actions:
 
 Lifecycle actions are visible only to Users with Application `manager` access or global `admin`.
 
-When the frontend already has a `material_etag` for a certificate detail view, it may send `If-None-Match` to ID-based material/archive endpoints. A `304 Not Modified` response means the current detail/download material has not changed. The frontend must not rely on browser or proxy caching for private-key material; backend responses use `Cache-Control: no-store`.
+When the frontend already has a `material_etag` for a certificate detail view, it may send `If-None-Match` to the ID-based archive endpoint. A `304 Not Modified` response means the current detail/download material has not changed. The frontend must not rely on browser or proxy caching for private-key material; backend responses use `Cache-Control: no-store`.
 
-If a download endpoint returns `409 certificate_expired`, the frontend must not offer stale PEM material. It should show the expired state, latest `not_after`, renewal status when available, and the renew action when the User has `manager` access or global `admin`.
+If a download endpoint returns `409 certificate_expired`, the frontend must not offer stale archives. It should show the expired state, latest `not_after`, renewal status when available, and the renew action when the User has `manager` access or global `admin`.
 
-If a download endpoint returns `409 certificate_revoked`, the frontend must not offer PEM material. It should show revoked status, revocation reason, revoked time, and lifecycle actions available to `manager` or global `admin` according to backend reissue rules.
+If a download endpoint returns `409 certificate_revoked`, the frontend must not offer stale archives. It should show revoked status, revocation reason, revoked time, and lifecycle actions available to `manager` or global `admin` according to backend reissue rules.
 
 If manual renew returns `409 renewal_overlap_exists`, the frontend must show that another valid renewal overlap already exists and must not retry automatically. The User can retry after the older valid CertificateVersion expires.
 
@@ -563,13 +563,12 @@ Authentication and current identity:
 - `POST /v1/auth/logout`
 - `GET /v1/auth/me`
 
-Certificate inventory, material downloads, and lifecycle management:
+Certificate inventory, archive downloads, and lifecycle management:
 
 - `POST /v1/applications/{application_id}/certificates`
 - `GET /v1/certificates`
 - `GET /v1/certificates/{certificate_id}`
 - `GET /v1/certificates/{certificate_id}/versions`
-- `GET /v1/certificates/{certificate_id}/tls-material`
 - `GET /v1/certificates/{certificate_id}/tls-archive`
 - `POST /v1/certificates/{certificate_id}/renew`
 - `POST /v1/certificates/{certificate_id}/rotate-key`

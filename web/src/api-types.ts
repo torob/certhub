@@ -389,28 +389,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/certificates/{certificate_id}/tls-material": {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
-                "X-Request-ID"?: components["parameters"]["XRequestID"];
-            };
-            path: {
-                certificate_id: components["parameters"]["CertificateID"];
-            };
-            cookie?: never;
-        };
-        /** Return current TLS material as JSON for a certificate selected by ID. */
-        get: operations["getCertificateTLSMaterial"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/certificates/{certificate_id}/tls-archive": {
         parameters: {
             query?: never;
@@ -2574,30 +2552,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-        };
-    };
-    getCertificateTLSMaterial: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
-                "X-Request-ID"?: components["parameters"]["XRequestID"];
-                /** @description Strong material ETag previously returned by a TLS material or archive endpoint. */
-                "If-None-Match"?: components["parameters"]["IfNoneMatch"];
-            };
-            path: {
-                certificate_id: components["parameters"]["CertificateID"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: components["responses"]["TLSMaterialOK"];
-            304: components["responses"]["MaterialNotModified"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
         };
     };
     getCertificateTLSArchive: {

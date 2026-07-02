@@ -254,10 +254,8 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		noStoreHeaders(w.Header())
 		writeJSON(w, http.StatusOK, map[string]any{"versions": versions, "pagination": pageMeta(result.Limit, result.Offset, result.Total)})
 		return http.StatusOK, ""
-	case r.Method == http.MethodGet && tail == "tls-material":
-		return s.handleIDMaterial(w, r, reqctx, actor, id, false)
 	case r.Method == http.MethodGet && tail == "tls-archive":
-		return s.handleIDMaterial(w, r, reqctx, actor, id, true)
+		return s.handleIDArchive(w, r, reqctx, actor, id)
 	case r.Method == http.MethodPost && (tail == "renew" || tail == "rotate-key"):
 		reason := certdomain.IssuanceReasonRenewal
 		if tail == "rotate-key" {
@@ -306,8 +304,8 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 	}
 }
 
-func (s *Server) handleIDMaterial(w http.ResponseWriter, r *http.Request, reqctx RequestContext, actor certdomain.Actor, certificateID string, archive bool) (int, string) {
-	if archive && !acceptsGzip(r.Header.Get("Accept")) {
+func (s *Server) handleIDArchive(w http.ResponseWriter, r *http.Request, reqctx RequestContext, actor certdomain.Actor, certificateID string) (int, string) {
+	if !acceptsGzip(r.Header.Get("Accept")) {
 		return writeError(w, http.StatusNotAcceptable, Error{Code: "not_acceptable", Message: "Requested response media type is not supported.", Details: map[string]any{}})
 	}
 	if inm := r.Header.Get("If-None-Match"); inm != "" {
@@ -334,7 +332,7 @@ func (s *Server) handleIDMaterial(w http.ResponseWriter, r *http.Request, reqctx
 	if err := s.certs.AuditPrivateKeyRead(r.Context(), auditdomain.IdentityTypeUser, actor.ID, result.Certificate, result.Version, auditCtx); err != nil {
 		return writeCertificateError(w, err)
 	}
-	return writeMaterialResponse(w, result.Material, archive)
+	return writeMaterialResponse(w, result.Material, true)
 }
 
 func (s *Server) handleCertificateEvents(w http.ResponseWriter, r *http.Request, actor certdomain.Actor, certificateID string) (int, string) {

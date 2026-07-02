@@ -794,32 +794,6 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /v1/certificates/{certificate_id}/tls-material:
-    parameters:
-      - $ref: '#/components/parameters/XRequestID'
-      - $ref: '#/components/parameters/CertificateID'
-    get:
-      tags: [Certificates]
-      operationId: getCertificateTLSMaterial
-      summary: Return current TLS material as JSON for a certificate selected by ID.
-      security:
-        - UserBearerAuth: []
-      parameters:
-        - $ref: '#/components/parameters/IfNoneMatch'
-      responses:
-        '200':
-          $ref: '#/components/responses/TLSMaterialOK'
-        '304':
-          $ref: '#/components/responses/MaterialNotModified'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
   /v1/certificates/{certificate_id}/tls-archive:
     parameters:
       - $ref: '#/components/parameters/XRequestID'

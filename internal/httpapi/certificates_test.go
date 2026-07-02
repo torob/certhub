@@ -78,8 +78,48 @@ func TestSyncMaterialMatchingETagReturns204WithoutPrivateKeyAudit(t *testing.T) 
 	}
 }
 
-func TestIDMaterialMatchingETagReturns304WithoutPrivateKeyAudit(t *testing.T) {
+func TestIDArchiveMatchingETagReturns304WithoutPrivateKeyAudit(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
+	auditStore := &certificateHTTPAuditStore{}
+	handler, userToken := newCertificateHTTPUserHandler(t, fixture, auditStore)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/tls-archive", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	req.Header.Set("Accept", "application/gzip")
+	req.Header.Set("If-None-Match", fixture.etag)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 || rec.Header().Get("ETag") != fixture.etag || rec.Header().Get("Vary") != "Authorization" {
+		t.Fatalf("headers/body mismatch: etag=%q vary=%q body=%q", rec.Header().Get("ETag"), rec.Header().Get("Vary"), rec.Body.String())
+	}
+	if len(auditStore.events) != 0 {
+		t.Fatalf("unexpected private_key_read audit: %#v", auditStore.events)
+	}
+}
+
+func TestIDTLSMaterialEndpointReturnsNotFound(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	handler, userToken := newCertificateHTTPUserHandler(t, fixture, &certificateHTTPAuditStore{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/tls-material", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"certificate_not_found"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func newCertificateHTTPUserHandler(t *testing.T, fixture certificateHTTPFixture, auditStore *certificateHTTPAuditStore) (http.Handler, string) {
+	t.Helper()
 	user := fakeUser()
 	userToken := auth.UserAccessTokenPrefix + strings.Repeat("B", 43)
 	authSvc := auth.NewService(auth.ServiceConfig{
@@ -96,7 +136,6 @@ func TestIDMaterialMatchingETagReturns304WithoutPrivateKeyAudit(t *testing.T) {
 		KeySet:          fixture.keys,
 		Config:          testConfig(t, "").Auth,
 	})
-	auditStore := &certificateHTTPAuditStore{}
 	certSvc := certdomain.NewService(certdomain.ServiceConfig{
 		Repository:        fixture.certStore,
 		ApplicationReader: &certificateHTTPAppStore{app: fixture.app},
@@ -104,23 +143,7 @@ func TestIDMaterialMatchingETagReturns304WithoutPrivateKeyAudit(t *testing.T) {
 		AuditRepository:   auditStore,
 		KeySet:            fixture.keys,
 	})
-	handler := New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithCertificateService(certSvc)).Handler()
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/tls-material", nil)
-	req.Header.Set("Authorization", "Bearer "+userToken)
-	req.Header.Set("If-None-Match", fixture.etag)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
-	}
-	if rec.Body.Len() != 0 || rec.Header().Get("ETag") != fixture.etag || rec.Header().Get("Vary") != "Authorization" {
-		t.Fatalf("headers/body mismatch: etag=%q vary=%q body=%q", rec.Header().Get("ETag"), rec.Header().Get("Vary"), rec.Body.String())
-	}
-	if len(auditStore.events) != 0 {
-		t.Fatalf("unexpected private_key_read audit: %#v", auditStore.events)
-	}
+	return New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithCertificateService(certSvc)).Handler(), userToken
 }
 
 func TestCertificateCriteriaRejectsApplicationID(t *testing.T) {

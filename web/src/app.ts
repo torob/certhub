@@ -814,14 +814,13 @@ function CertificateDetailPage(props: PageProps) {
   const applicationLabel = appLabel(appAccess.data?.application) || "Application not visible";
   const appLoaded = Boolean(appAccess.data?.application);
   const appReserved = appAccess.data?.application?.system_kind === "certhub_server" || appAccess.data?.application?.name === "certhub_server";
-  const canReadMaterial = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "certificate_reader" || appRole === "manager");
+  const canDownloadArchive = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "certificate_reader" || appRole === "manager");
   const canLifecycle = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "manager");
   return pageFrame(
     "Certificate",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/certificates") }, "Back"),
-      canReadMaterial && !revoked && !expired ? createElement("button", { onClick: () => downloadMaterial(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "TLS material") : null,
-      canReadMaterial && !revoked && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Archive") : null,
+      canDownloadArchive && !revoked && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Download") : null,
       canLifecycle ? createElement("button", { onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
       canLifecycle ? createElement("button", { onClick: () => action("/rotate-key") }, "Rotate key") : null,
       canLifecycle ? createElement("button", { onClick: () => action("/revoke", { reason: "cessation_of_operation" }) }, "Revoke") : null,
@@ -2342,20 +2341,6 @@ function validateField(field: string, value: string) {
   if (label.includes("expires_at") && value && Number.isNaN(Date.parse(value))) return "invalid date-time";
   if (/[\u0000-\u001f\u007f]/.test(value)) return "control characters are not allowed";
   return "";
-}
-
-async function downloadMaterial(session: Session, id: string, setNotice: (s: string) => void) {
-  const result = await api<any>(`/v1/certificates/${id}/tls-material`, session);
-  if (result.error || !result.data) return setNotice(errorText(result));
-  const material = result.data;
-  const files = {
-    "cert.pem": material.cert_pem,
-    "chain.pem": material.chain_pem,
-    "fullchain.pem": material.fullchain_pem,
-    "privkey.pem": material.private_key_pem
-  };
-  Object.entries(files).forEach(([name, content]) => saveBlob(name, String(content), "application/x-pem-file"));
-  setNotice("downloaded material; private-key access was audited");
 }
 
 async function downloadArchive(session: Session, id: string, setNotice: (s: string) => void) {

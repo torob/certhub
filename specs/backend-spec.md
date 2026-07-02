@@ -972,8 +972,8 @@ Rules:
 - Certhub must authenticate, authorize, resolve the requested Certificate identity or ID, and select the latest valid CertificateVersion before evaluating `If-None-Match`; conditional responses must not bypass access checks.
 - If `If-None-Match` equals the latest valid CertificateVersion `material_etag`, criteria-based `POST` endpoints return `204 No Content` with `ETag: <material_etag>` and no body.
 - If `If-None-Match` is absent, malformed, weak, or does not match the latest valid CertificateVersion `material_etag`, Certhub returns material normally with `200 OK`.
-- ID-based `GET /v1/certificates/{certificate_id}/tls-material` and `GET /v1/certificates/{certificate_id}/tls-archive` accept `If-None-Match`.
-- If `If-None-Match` equals the latest valid CertificateVersion `material_etag`, ID-based `GET` endpoints return `304 Not Modified` with `ETag: <material_etag>` and no body.
+- ID-based `GET /v1/certificates/{certificate_id}/tls-archive` accepts `If-None-Match`.
+- If `If-None-Match` equals the latest valid CertificateVersion `material_etag`, the ID-based archive endpoint returns `304 Not Modified` with `ETag: <material_etag>` and no body.
 - `private_key_read` audit events are written only when material is returned with `200 OK`; unchanged `204 No Content` and `304 Not Modified` responses must not write `private_key_read`.
 
 ### API Summary
@@ -999,7 +999,6 @@ Rules:
 | `GET` | `/v1/certificates` | List certificate metadata with optional filters such as domain, Application, status, and expiry. |
 | `GET` | `/v1/certificates/{certificate_id}` | Return certificate metadata by ID for human/web-console workflows. |
 | `GET` | `/v1/certificates/{certificate_id}/versions` | List CertificateVersion metadata for one certificate. |
-| `GET` | `/v1/certificates/{certificate_id}/tls-material` | Return current TLS material as JSON for a certificate selected by ID. |
 | `GET` | `/v1/certificates/{certificate_id}/tls-archive` | Return current TLS material as a tar.gz archive for a certificate selected by ID. |
 | `POST` | `/v1/certificates/{certificate_id}/renew` | Start renewal for a certificate selected by ID. |
 | `POST` | `/v1/certificates/{certificate_id}/rotate-key` | Start key rotation for a certificate selected by ID. |
@@ -1513,7 +1512,7 @@ Description and notes:
 - If the matching Certificate is failed, Certhub returns Certificate metadata with `status=failed` and does not enqueue reissue. The User must use an explicit lifecycle action to retry.
 - If the matching Certificate is revoked and not eligible for reissue, Certhub returns Certificate metadata with `status=revoked` and does not enqueue issuance.
 - For the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. The backend reconcile loop creates and updates that Application's Certificate from process configuration.
-- Readiness should be checked from the web console by refreshing certificate metadata or by using ID-based material/archive endpoints when the User has material access.
+- Readiness should be checked from the web console by refreshing certificate metadata or by using the ID-based archive endpoint when the User has material access.
 
 ```http
 POST /v1/applications/{application_id}/certificates
@@ -1747,48 +1746,6 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: token is not a User access token.
 - `404 Not Found`: certificate does not exist, is deleted, or is not visible to the User.
-
-#### GET /v1/certificates/{certificate_id}/tls-material
-
-Summary: Return current TLS material as JSON for a certificate selected by ID.
-
-Description and notes:
-
-- User/web-console endpoint for humans working with known Certificate IDs.
-- Application tokens are rejected; Application clients must use criteria-based material retrieval.
-- Requires User `certificate_reader`, User `manager`, or global `admin`.
-- Non-admin User access follows the Certificate ID-based material download rules from `Certificate Identity and Reuse`.
-- Always returns the latest valid CertificateVersion for the Certificate.
-- Supports conditional retrieval with `If-None-Match`.
-- Must create a `private_key_read` audit event only when material is returned with `200 OK`.
-- Expired CertificateVersions must not be returned. If no valid version exists, use the same response priority as criteria-based material retrieval: revoked parent returns `certificate_revoked`, issuing work returns `certificate_not_ready`, latest failed work returns `certificate_issuance_failed`, and expiry with no issuing or failed latest version returns `certificate_expired`.
-
-```http
-GET /v1/certificates/{certificate_id}/tls-material
-Authorization: Bearer <user-access-token>
-If-None-Match: "<optional-material-etag>"
-```
-
-Query params: None.
-
-Request body: None.
-
-Expected responses:
-
-- `200 OK`: JSON certificate material, including private key and `material_etag`.
-  - `ETag: <material_etag>`
-  - `Cache-Control: no-store`
-  - `Pragma: no-cache`
-  - `Vary: Authorization`
-- `304 Not Modified`: `If-None-Match` matches the latest valid material; no body and no `private_key_read` audit event.
-  - `ETag: <material_etag>`
-  - `Cache-Control: no-store`
-  - `Pragma: no-cache`
-  - `Vary: Authorization`
-- `401 Unauthorized`: token is missing or invalid.
-- `403 Forbidden`: token is not a User access token or User lacks private-key access.
-- `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate exists but has no valid current material; response includes current status metadata such as `certificate_not_ready`, `certificate_expired`, `certificate_revoked`, or `certificate_issuance_failed`.
 
 #### GET /v1/certificates/{certificate_id}/tls-archive
 
@@ -3037,7 +2994,7 @@ Web-console Certificate creation uses the same issuance and reconciliation path:
 2. Backend loads the URL Application, normalizes domains, checks that every SAN is covered by that Application's domain scopes, and computes the certificate identity from URL Application ID, normalized SANs, key type, and issuer.
 3. Backend creates or reuses the Certificate row for that Application and enqueues issuance when needed.
 4. The web console refreshes `GET /v1/certificates/{certificate_id}` or certificate events to show readiness and failure state.
-5. When material is needed and the User has `certificate_reader`, `manager`, or global `admin`, the web console uses ID-based material/archive endpoints. It must not use criteria-based Application-token material endpoints.
+5. When material is needed and the User has `certificate_reader`, `manager`, or global `admin`, the web console uses the ID-based archive endpoint. It must not use criteria-based Application-token material endpoints.
 
 ## CertificateVersion Reconciliation
 
@@ -4144,15 +4101,15 @@ Required backend scenarios:
 - Transient issuer or ACME account dependency outages return retryable `issuer_unavailable`.
 - Application-token certificate material retrieval uses criteria-based endpoints: `POST /v1/sync/certificates/tls-material` and `POST /v1/sync/certificates/tls-archive`.
 - Criteria-based material endpoints reject User access tokens and reject request bodies containing `application_id`.
-- User login-session certificate material retrieval uses ID-based endpoints: `GET /v1/certificates/{certificate_id}/tls-material` and `GET /v1/certificates/{certificate_id}/tls-archive`.
-- ID-based material endpoints reject Application tokens and require `certificate_reader`, `manager`, or global `admin`.
+- User login-session certificate material retrieval uses the ID-based endpoint: `GET /v1/certificates/{certificate_id}/tls-archive`.
+- The ID-based archive endpoint rejects Application tokens and requires `certificate_reader`, `manager`, or global `admin`.
 - ID-based resource APIs return `404` when a resource does not exist or is not visible; `403` is reserved for visible resources where the authenticated identity lacks the requested action or uses the wrong token class.
 - Conditional material requests evaluate authentication and authorization before `If-None-Match`; unauthorized clients cannot use matching ETags to learn whether material exists or changed.
 - Malformed, weak, or cross-certificate `If-None-Match` values never produce `204` or `304` and do not reveal whether a hidden Certificate exists.
-- Both criteria-based and ID-based material endpoints write `private_key_read` audit events only when returning material with `200 OK`.
+- Criteria-based material endpoints and the ID-based archive endpoint write `private_key_read` audit events only when returning material with `200 OK`.
 - Material endpoints return `ETag: <material_etag>` and `Cache-Control: no-store`, `Pragma: no-cache`, and `Vary: Authorization`.
 - Criteria-based material endpoints return `204 No Content` without `private_key_read` audit when `If-None-Match` matches latest valid `material_etag`.
-- ID-based material endpoints return `304 Not Modified` without `private_key_read` audit when `If-None-Match` matches latest valid `material_etag`.
+- The ID-based archive endpoint returns `304 Not Modified` without `private_key_read` audit when `If-None-Match` matches latest valid `material_etag`.
 - Tar.gz archive endpoints contain only fixed entry names and never include absolute paths, `..` paths, symlinks, hard links, device entries, user-controlled filenames, raw token values, or backend filesystem paths.
 - CertificateVersion `material_etag` is generated from exact returned material and changes when cert, chain, fullchain, or private key changes.
 - Archive endpoints return `application/gzip` containing `cert.pem`, `chain.pem`, `fullchain.pem`, `privkey.pem`, and `metadata.json`.
