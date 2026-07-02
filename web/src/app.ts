@@ -614,8 +614,7 @@ function ProfilePage(props: PageProps) {
     identity?.name ? kv("Name", identity.name) : null,
     kv("Display name", identity?.display_name || ""),
     identity?.global_role ? kv("Global role", identity.global_role) : null,
-    identity?.status ? kv("Status", identity.status) : null,
-    technicalDetails("Technical details", [["Identity ID", identity?.id]])
+    identity?.status ? kv("Status", identity.status) : null
   );
   const tabContent = activeTab === "security" && isUser ?
     createElement(Password2FASection, { session: props.session, setNotice: props.setNotice, refreshIdentity: props.refreshIdentity }) :
@@ -843,14 +842,7 @@ function CertificateDetailPage(props: PageProps) {
       kv("Latest not after", cert.latest_version?.not_after || ""),
       kv("Fingerprint", cert.latest_version?.fingerprint_sha256 || ""),
       kv("Created at", cert.created_at),
-      kv("Updated at", cert.updated_at),
-      technicalDetails("Technical details", [
-        ["Certificate ID", cert.id],
-        ["Application ID", cert.application_id],
-        ["Issuer ID", cert.issuer_id],
-        ["Latest version ID", cert.latest_version?.id],
-        ["Latest material ETag", cert.latest_version?.material_etag]
-      ])
+      kv("Updated at", cert.updated_at)
     ),
     createElement("h2", null, "Versions"),
     table(versions, ["version", "status", "reason", "not_after", "revocation_reason", "failure_code",
@@ -913,8 +905,7 @@ function ApplicationDetailPage(props: PageProps) {
     kv("Tokens", app.token_count),
     kv("Certificates", app.certificate_count),
     kv("Created at", app.created_at),
-    kv("Updated at", app.updated_at),
-    technicalDetails("Technical details", [["Application ID", app.id]])
+    kv("Updated at", app.updated_at)
   );
   const tabContent =
     activeTab === "overview" ? overview :
@@ -1031,8 +1022,7 @@ function UserDetailPage(props: PageProps) {
       kv("Application grants", user.application_grant_count),
       kv("Last login", user.last_login_at || ""),
       kv("Created at", user.created_at),
-      kv("Updated at", user.updated_at),
-      technicalDetails("Technical details", [["User ID", user.id]])
+      kv("Updated at", user.updated_at)
     ),
     createElement("h2", null, "Application grants"),
     table({ data: { grants: user.application_grants || [] } }, ["application_name", "role", "created_at"])
@@ -1115,8 +1105,7 @@ function IssuerDetailPage(props: PageProps) {
       kv("Contact email", issuer.contact_email),
       kv("ACME account", issuer.acme_account_status || ""),
       kv("Created at", issuer.created_at),
-      kv("Updated at", issuer.updated_at),
-      technicalDetails("Technical details", [["Issuer ID", issuer.id]])
+      kv("Updated at", issuer.updated_at)
     )
   );
 }
@@ -1189,8 +1178,7 @@ function DNSDetailPage(props: PageProps) {
       provider.zone_refresh_failure_code ? kv("Refresh failure", `${provider.zone_refresh_failure_code}: ${provider.zone_refresh_failure_message || ""}`) : null,
       kv("Last zone refresh", provider.last_zone_refresh_at || ""),
       kv("Created at", provider.created_at),
-      kv("Updated at", provider.updated_at),
-      technicalDetails("Technical details", [["DNS provider ID", provider.id]])
+      kv("Updated at", provider.updated_at)
     ),
     createElement("div", { className: "toolbar" }, createElement("button", { onClick: () => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones/refresh`, {}, () => setRefresh(refresh + 1)) }, createElement(RefreshCw, { size: 16 }), "Refresh zones")),
     provider.zone_mode === "manual" ? createElement(GenericCreate, { title: "Add zone", fields: ["zone_name"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/zones`, body, () => setRefresh(refresh + 1)) }) : null,
@@ -2063,15 +2051,6 @@ function kv(label: string, value: unknown) {
   return createElement("div", { className: "kv" }, createElement("span", null, label), createElement("strong", null, cell(value)));
 }
 
-function technicalDetails(title: string, entries: [string, unknown][]) {
-  const visible = entries.filter(([, value]) => value != null && cell(value) !== "");
-  if (!visible.length) return null;
-  return createElement("details", { className: "technical-details" },
-    createElement("summary", null, title),
-    createElement("div", null, visible.map(([label, value]) => kv(label, value)))
-  );
-}
-
 function resourceMap(rows: any[]) {
   return new Map(rows.filter((row) => row?.id).map((row) => [row.id, row]));
 }
@@ -2131,8 +2110,7 @@ function auditColumns(labels: AuditLabelMaps = {}): TableColumn[] {
     "action",
     { key: "target", render: (event) => auditTargetLabel(event, labels) },
     "result",
-    "source_ip",
-    { key: "technical", label: "Details", render: auditTechnicalDetails }
+    "source_ip"
   ];
 }
 
@@ -2180,20 +2158,6 @@ function auditTargetLabel(event: any, labels: AuditLabelMaps) {
     default:
       return event.target_type ? labelForColumn(event.target_type) : "Resource";
   }
-}
-
-function auditTechnicalDetails(event: any) {
-  return technicalDetails("Technical", [
-    ["Event ID", event.id],
-    ["Identity ID", event.identity_id],
-    ["Target ID", event.target_id],
-    ["Application ID", event.scope_application_id],
-    ["Certificate ID", event.scope_certificate_id],
-    ["User ID", event.scope_user_id],
-    ["DNS provider ID", event.scope_dns_provider_id],
-    ["Correlation ID", event.correlation_id || event.request_id],
-    ["Metadata", JSON.stringify(auditMetadata(event))]
-  ]);
 }
 
 function domainCoveredByScope(domain: string, scope: string) {

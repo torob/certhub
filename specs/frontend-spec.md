@@ -512,8 +512,8 @@ Audit event list:
 - Action.
 - Target.
 - Result.
-- Request ID.
 - Source IP or client metadata when available.
+- Raw backend IDs, correlation IDs, request IDs, and audit metadata must not be shown as expandable technical detail panels.
 
 Filters:
 
@@ -535,7 +535,7 @@ Private-key read events must be easy to filter.
 The frontend should:
 
 - Generate or propagate a correlation ID for backend requests when the backend supports it.
-- Include backend error code and correlation ID in user-visible support details.
+- Include backend error code in user-visible support details.
 - Record client-side route errors and API failures in the browser telemetry system if one is configured.
 - Never send private keys, raw tokens, passwords, DNS provider credentials, or certificate material to frontend telemetry.
 

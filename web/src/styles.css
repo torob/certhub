@@ -773,25 +773,6 @@ tr.selectable:focus-within td {
   overflow-wrap: anywhere;
 }
 
-.technical-details {
-  margin-top: 4px;
-  color: #4d5b65;
-}
-
-.technical-details summary {
-  width: fit-content;
-  cursor: pointer;
-  font-weight: 700;
-}
-
-.technical-details > div {
-  display: grid;
-  gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #e4e9ed;
-}
-
 .note,
 .empty {
   padding: 10px;
