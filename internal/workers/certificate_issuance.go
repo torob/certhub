@@ -103,8 +103,9 @@ type CertificateIssuanceRunner struct {
 }
 
 type issuanceFailure struct {
-	code string
-	err  error
+	code       string
+	err        error
+	redactions []string
 }
 
 func (e issuanceFailure) Error() string { return e.err.Error() }
@@ -179,17 +180,22 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 	if err := s.completeClaimedJob(ctx, workerID, job); err != nil {
 		_ = s.cleanupRecordedChallenges(ctx, job)
 		code, message := sanitizedFailure(err)
+		retryable := retryableIssuanceFailure(code)
 		failed, failErr := s.Certificates.FailIssuanceJob(ctx, certificates.FailIssuanceJobParams{
 			JobID:          job.ID,
 			WorkerID:       workerID,
 			FailureCode:    code,
 			FailureMessage: &message,
-			Retryable:      retryableIssuanceFailure(code),
+			Retryable:      retryable,
 			MaxAttempts:    s.maxAttempts(),
 			RetryAfter:     s.retryBackoff(job.Attempt),
 		})
 		_ = s.recordEvent(ctx, job, "certificate_issuance_failed", certificates.EventResultFailure, map[string]any{
-			"failure_code": code,
+			"failure_code":             code,
+			"failure_message":          message,
+			"retryable":                retryable,
+			"job_status_after_failure": string(failed.Status),
+			"next_run_at":              failed.NextRunAt,
 		})
 		if failErr != nil {
 			return failed, true, failErr
@@ -533,7 +539,7 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 			ChallengeURL:      challenge.authz.DNSChallenge.URL,
 			Token:             challenge.authz.DNSChallenge.Token,
 		}); err != nil {
-			return issuanceFailure{code: "dns_validation_failed", err: err}
+			return issuanceFailure{code: "dns_validation_failed", err: err, redactions: []string{challenge.authz.DNSChallenge.Token, challenge.op.TXTValue}}
 		}
 		if _, err := s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{
 			ID:     challenge.record.ID,
@@ -642,7 +648,7 @@ func (s *CertificateIssuanceService) presentDNSChallenge(ctx context.Context, pr
 			return issuanceFailure{code: "dns_provider_credentials_invalid", err: err}
 		}
 		if err := s.Cloudflare.Present(ctx, creds, op); err != nil {
-			return issuanceFailure{code: "dns_challenge_present_failed", err: err}
+			return issuanceFailure{code: "dns_challenge_present_failed", err: err, redactions: []string{op.TXTValue}}
 		}
 	case dnsdomain.ProviderTypeArvanCloud:
 		var creds dnsdomain.ArvanCloudCredentials
@@ -650,7 +656,7 @@ func (s *CertificateIssuanceService) presentDNSChallenge(ctx context.Context, pr
 			return issuanceFailure{code: "dns_provider_credentials_invalid", err: err}
 		}
 		if err := s.ArvanCloud.Present(ctx, creds, op); err != nil {
-			return issuanceFailure{code: "dns_challenge_present_failed", err: err}
+			return issuanceFailure{code: "dns_challenge_present_failed", err: err, redactions: []string{op.TXTValue}}
 		}
 	default:
 		return issuanceFailure{code: "dns_provider_unsupported", err: fmt.Errorf("unsupported dns provider type %s", provider.Type)}
@@ -706,8 +712,9 @@ func (s *CertificateIssuanceService) cleanupChallenges(ctx context.Context, reco
 		}
 		op := dnsdomain.DNS01ChallengeOperation{ZoneName: zone.ZoneName, RecordName: record.RecordName, TXTValue: string(txt), TTL: s.dnsChallengeTTL()}
 		if err := s.cleanupDNSChallenge(ctx, provider, op); err != nil {
-			cleanupErr = errors.Join(cleanupErr, issuanceFailure{code: "dns_challenge_cleanup_failed", err: err})
-			_, _ = s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{ID: record.ID, Status: certificates.DNSChallengeStatusCleanupFailed, FailureCode: "dns_challenge_cleanup_failed", FailureMessage: optionalMessage(err)})
+			failure := issuanceFailure{code: "dns_challenge_cleanup_failed", err: err, redactions: []string{op.TXTValue}}
+			cleanupErr = errors.Join(cleanupErr, failure)
+			_, _ = s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{ID: record.ID, Status: certificates.DNSChallengeStatusCleanupFailed, FailureCode: "dns_challenge_cleanup_failed", FailureMessage: optionalMessage(failure)})
 			continue
 		}
 		_, _ = s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{ID: record.ID, Status: certificates.DNSChallengeStatusCleaned})
@@ -1080,11 +1087,13 @@ func authorizationDNSName(authz acmedomain.Authorization) (string, error) {
 
 func sanitizedFailure(err error) (string, string) {
 	code := "issuance_failed"
+	var redactions []string
 	var failure issuanceFailure
 	if errors.As(err, &failure) && failure.code != "" {
 		code = failure.code
+		redactions = failure.redactions
 	}
-	message := security.RedactString(err.Error())
+	message := security.RedactValues(err.Error(), redactions...)
 	if message == "" {
 		message = code
 	}

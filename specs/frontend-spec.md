@@ -269,7 +269,7 @@ Certificate detail page:
 
 Current certificate archive downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-archive`. Version-specific archive downloads must call `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` and be offered for downloadable `valid` or `revoked` CertificateVersions. The frontend must not use criteria-based material endpoints for User/browser downloads. Every archive download is a private-key-capable operation and must require an explicit audited user action.
 
-Certificate renewal and version history must call `GET /v1/certificates/{certificate_id}/versions`. The frontend must not try to reconstruct complete version history from the single `latest_version` field.
+Certificate renewal and version history must call `GET /v1/certificates/{certificate_id}/versions`. The frontend must not try to reconstruct complete version history from the single `latest_version` field. Certificate detail must show sanitized `failure_code` and `failure_message` when the Certificate carries latest failure metadata. Version history must show per-version `failure_code`, and must offer a failure-message button that opens the full sanitized `failure_message` in a preformatted dialog so managers can identify the root cause and fix issuer, DNS provider, or domain-scope configuration.
 
 Browser downloads of the tar.gz archive must use the backend `Content-Disposition` filename, which must be `<safe_certificate_name>.tar.gz`. The `<safe_certificate_name>` basename is derived by the backend from the first normalized SAN, falls back to Certificate ID, and must not contain `*` or `.`.
 

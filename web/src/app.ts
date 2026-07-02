@@ -1029,6 +1029,7 @@ function CertificatesPage(props: PageProps) {
 function CertificateDetailPage(props: PageProps) {
   const id = resourceID(props);
   const [refresh, setRefresh] = useState(0);
+  const [failureMessage, setFailureMessage] = useState("");
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
   const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
@@ -1073,6 +1074,8 @@ function CertificateDetailPage(props: PageProps) {
       kv("Status", cert.status),
       kv("Key type", cert.key_type),
       kv("Issuer", cert.issuer_name || "Default issuer"),
+      cert.failure_code ? kv("Failure code", cert.failure_code) : null,
+      cert.failure_message ? kv("Failure message", cert.failure_message) : null,
       kv("Latest not after", cert.latest_version?.not_after || ""),
       kv("Fingerprint", cert.latest_version?.fingerprint_sha256 || ""),
       kv("Created at", cert.created_at),
@@ -1080,13 +1083,15 @@ function CertificateDetailPage(props: PageProps) {
     ),
     createElement("h2", null, "Versions"),
     table(versions, ["version", "status", "reason", "not_after", "revocation_reason", "failure_code",
+      { key: "failure_message", label: "Failure message", render: (version) => version.failure_message ? rowAction("View", () => setFailureMessage(String(version.failure_message)), { label: `View failure message for version ${version.version}` }) : "" },
       actionsColumn((version) => [
         canDownloadArchive && versionDownloadable(version) ? rowAction("Download", () => downloadArchive(props.session, cert.id, props.setNotice, version.id), { icon: Download, label: `Download version ${version.version}` }) : null,
         canLifecycle && version.status === "valid" ? rowAction("Revoke", () => versionAction(version, "/revoke", { reason: "cessation_of_operation" }), { icon: X, danger: true, label: `Revoke version ${version.version}` }) : null
       ])
     ]),
     createElement("h2", null, "Events"),
-    table(events, auditColumns())
+    table(events, auditColumns()),
+    failureMessage ? createElement(FailureMessageDialog, { message: failureMessage, onClose: () => setFailureMessage("") }) : null
   );
 }
 
@@ -2112,6 +2117,35 @@ function rowAction(label: string, onClick: () => void, options: { icon?: any; da
       onClick();
     }
   }, Icon ? createElement(Icon, { size: 14 }) : null, label);
+}
+
+function FailureMessageDialog(props: { message: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [props.onClose]);
+  return createElement("div", {
+    className: "modal-backdrop",
+    role: "presentation",
+    onClick: props.onClose
+  },
+    createElement("section", {
+      className: "modal-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "failure-message-title",
+      onClick: (event: any) => event.stopPropagation()
+    },
+      createElement("div", { className: "modal-header" },
+        createElement("h2", { id: "failure-message-title" }, "Failure message"),
+        createElement("button", { type: "button", className: "modal-close", onClick: props.onClose, "aria-label": "Close failure message", title: "Close failure message" }, createElement(X, { size: 18 }))
+      ),
+      createElement("pre", { className: "failure-message-block" }, createElement("code", null, props.message))
+    )
+  );
 }
 
 function input(label: string, value: string, onChange: (v: string) => void, type = "text") {

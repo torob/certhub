@@ -340,7 +340,7 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	if claimedFailed.ID != failedJob.ID {
 		t.Fatalf("claimed failed job = %#v want %s", claimedFailed, failedJob.ID)
 	}
-	failureMessage := "dns validation failed"
+	failureMessage := "dns validation failed: provider rejected challenge"
 	failedJob, err = certRepo.FailIssuanceJob(ctx, certificates.FailIssuanceJobParams{
 		JobID:          claimedFailed.ID,
 		WorkerID:       "m5-worker",
@@ -350,7 +350,21 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failedJob.Status != certificates.JobStatusFailed || failedJob.FailureCode == nil || *failedJob.FailureCode != "dns_validation_failed" {
+	if failedJob.Status != certificates.JobStatusFailed || failedJob.FailureCode == nil || *failedJob.FailureCode != "dns_validation_failed" || failedJob.FailureMessage == nil || *failedJob.FailureMessage != failureMessage {
 		t.Fatalf("failed job = %#v", failedJob)
+	}
+	failedVersion, err = certRepo.GetVersion(ctx, failedVersion.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedVersion.Status != certificates.VersionStatusFailed || failedVersion.FailureCode == nil || *failedVersion.FailureCode != "dns_validation_failed" || failedVersion.FailureMessage == nil || *failedVersion.FailureMessage != failureMessage {
+		t.Fatalf("failed version = %#v", failedVersion)
+	}
+	failedCert, err = certRepo.Get(ctx, failedCert.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedCert.Status != certificates.StatusFailed || failedCert.FailureCode == nil || *failedCert.FailureCode != "dns_validation_failed" || failedCert.FailureMessage == nil || *failedCert.FailureMessage != failureMessage {
+		t.Fatalf("failed certificate = %#v", failedCert)
 	}
 }

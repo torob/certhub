@@ -3133,6 +3133,8 @@ Logging requirements:
 Secret redaction and external error sanitization:
 
 - Certhub must sanitize all externally sourced error strings before storing them in `failure_message`, audit metadata, logs, or public API responses.
+- Certificate issuance failures must persist the sanitized actual root-cause error text in `failure_message` on the failed job and failed CertificateVersion, and on the parent Certificate when no active valid material remains.
+- `certificate_issuance_failed` audit events must include sanitized failure metadata sufficient for operators to troubleshoot: stable `failure_code`, sanitized `failure_message`, job reason, job attempt, retryable flag, and resulting job status.
 - Sanitization must redact Authorization and Cookie headers, raw Application tokens, raw User access tokens, passwords, TOTP codes, TOTP secrets, provisioning URIs, OIDC authorization codes, OIDC state values, OIDC code verifiers, private keys, ACME account keys, DNS provider credentials, and encrypted payloads.
 - Sanitization must apply before persistence, not only at render time.
 - Public `failure_message` values should prefer stable, non-secret summaries. Full provider responses may be logged only after the same sanitizer runs.

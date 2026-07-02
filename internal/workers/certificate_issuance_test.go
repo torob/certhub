@@ -189,6 +189,76 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 	}
 }
 
+func TestIssuanceFailureStoresSanitizedRootCauseInJobAndAuditEvent(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.service.Cloudflare = fakeCloudflareOperator{
+		recorder:   fixture.recorder,
+		presentErr: fmt.Errorf("provider rejected TXT txt-cf with token=cth_uat_v1_SECRETUSER"),
+	}
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
+	}
+	if job.Status != certificates.JobStatusPending {
+		t.Fatalf("job status = %s", job.Status)
+	}
+	if len(fixture.store.failJobCalls) != 1 {
+		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
+	}
+	failure := fixture.store.failJobCalls[0]
+	if failure.FailureCode != "dns_challenge_present_failed" {
+		t.Fatalf("failure code = %s", failure.FailureCode)
+	}
+	if failure.FailureMessage == nil {
+		t.Fatal("missing failure message")
+	}
+	message := *failure.FailureMessage
+	if !strings.Contains(message, "provider rejected TXT") {
+		t.Fatalf("failure message lost root cause: %q", message)
+	}
+	for _, leaked := range []string{"txt-cf", "SECRETUSER"} {
+		if strings.Contains(message, leaked) {
+			t.Fatalf("failure message leaked %s in %q", leaked, message)
+		}
+	}
+	var failureEvent *certificates.RecordEventParams
+	for i := range fixture.store.events {
+		if fixture.store.events[i].EventType == "certificate_issuance_failed" {
+			failureEvent = &fixture.store.events[i]
+			break
+		}
+	}
+	if failureEvent == nil {
+		t.Fatalf("events = %#v", fixture.store.events)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(failureEvent.Metadata, &metadata); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if metadata["failure_code"] != "dns_challenge_present_failed" {
+		t.Fatalf("metadata failure_code = %#v", metadata["failure_code"])
+	}
+	if got, ok := metadata["failure_message"].(string); !ok || got != message {
+		t.Fatalf("metadata failure_message = %#v want %q", metadata["failure_message"], message)
+	}
+	if metadata["retryable"] != true {
+		t.Fatalf("metadata retryable = %#v", metadata["retryable"])
+	}
+	if metadata["job_status_after_failure"] != string(certificates.JobStatusPending) {
+		t.Fatalf("metadata job_status_after_failure = %#v", metadata["job_status_after_failure"])
+	}
+	for _, leaked := range []string{"txt-cf", "SECRETUSER"} {
+		if strings.Contains(string(failureEvent.Metadata), leaked) {
+			t.Fatalf("metadata leaked %s in %s", leaked, string(failureEvent.Metadata))
+		}
+	}
+}
+
 func TestRenewalGeneratesFreshPrivateKeyForNewVersion(t *testing.T) {
 	fixture := newIssuanceWorkerFixture(t)
 	fixture.job.Reason = certificates.JobReasonRenewal
@@ -428,12 +498,15 @@ func (r *challengeRecorder) txtVisible(_ context.Context, recordName, txtValue s
 
 type fakeCloudflareOperator struct {
 	recorder   *challengeRecorder
+	presentErr error
 	cleanupErr error
 }
 
 func (o fakeCloudflareOperator) Present(_ context.Context, _ dnsdomain.CloudflareCredentials, op dnsdomain.DNS01ChallengeOperation) error {
-	o.recorder.present(string(dnsdomain.ProviderTypeCloudflare), op)
-	return nil
+	if o.recorder != nil {
+		o.recorder.present(string(dnsdomain.ProviderTypeCloudflare), op)
+	}
+	return o.presentErr
 }
 
 func (o fakeCloudflareOperator) CleanUp(_ context.Context, _ dnsdomain.CloudflareCredentials, op dnsdomain.DNS01ChallengeOperation) error {
@@ -445,12 +518,15 @@ func (o fakeCloudflareOperator) CleanUp(_ context.Context, _ dnsdomain.Cloudflar
 
 type fakeArvanCloudOperator struct {
 	recorder   *challengeRecorder
+	presentErr error
 	cleanupErr error
 }
 
 func (o fakeArvanCloudOperator) Present(_ context.Context, _ dnsdomain.ArvanCloudCredentials, op dnsdomain.DNS01ChallengeOperation) error {
-	o.recorder.present(string(dnsdomain.ProviderTypeArvanCloud), op)
-	return nil
+	if o.recorder != nil {
+		o.recorder.present(string(dnsdomain.ProviderTypeArvanCloud), op)
+	}
+	return o.presentErr
 }
 
 func (o fakeArvanCloudOperator) CleanUp(_ context.Context, _ dnsdomain.ArvanCloudCredentials, op dnsdomain.DNS01ChallengeOperation) error {
