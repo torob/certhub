@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,12 +41,17 @@ type refreshRequest struct {
 }
 
 type userCreateRequest struct {
-	Email                string  `json:"email"`
-	DisplayName          string  `json:"display_name"`
-	GlobalRole           string  `json:"global_role"`
-	Status               string  `json:"status"`
-	Password             *string `json:"password"`
-	ProvisionPassword2FA bool    `json:"provision_password_2fa"`
+	Email      string `json:"email"`
+	GlobalRole string `json:"global_role"`
+}
+
+type userInviteSignupRequest struct {
+	DisplayName string `json:"display_name"`
+	Password    string `json:"password"`
+}
+
+type userInviteConfirm2FARequest struct {
+	TOTPCode string `json:"totp_code"`
 }
 
 type apiUser struct {
@@ -85,6 +91,7 @@ func isIdentityEndpoint(p string) bool {
 		p == "/v1/auth/oidc/login" ||
 		p == "/v1/auth/oidc/callback" ||
 		p == "/v1/auth/oidc/handoff" ||
+		(strings.HasPrefix(p, "/v1/auth/user-invites/") && (strings.Count(strings.TrimPrefix(p, "/v1/auth/user-invites/"), "/") == 0 || strings.HasSuffix(p, "/signup") || strings.HasSuffix(p, "/signup/confirm-2fa"))) ||
 		p == "/v1/auth/refresh" ||
 		p == "/v1/auth/logout" ||
 		p == "/v1/auth/me" ||
@@ -94,8 +101,13 @@ func isIdentityEndpoint(p string) bool {
 }
 
 func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	isInviteEndpoint := strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/")
 	if r.URL.Path == "/v1/auth/me" {
 		if s.auth == nil && s.apps == nil {
+			return writeIdentityError(w, auth.ErrIdentityServiceUnavailable)
+		}
+	} else if isInviteEndpoint {
+		if s.users == nil {
 			return writeIdentityError(w, auth.ErrIdentityServiceUnavailable)
 		}
 	} else if s.auth == nil || (strings.HasPrefix(r.URL.Path, "/v1/users") && s.users == nil) {
@@ -116,6 +128,12 @@ func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx Re
 		return s.handleCompleteOIDCCallback(w, r, reqctx)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/oidc/handoff":
 		return s.handleOIDCHandoff(w, r, reqctx)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/") && strings.Count(strings.TrimPrefix(r.URL.Path, "/v1/auth/user-invites/"), "/") == 0:
+		return s.handlePreviewUserInvite(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/") && strings.HasSuffix(r.URL.Path, "/signup"):
+		return s.handleSignupUserInvite(w, r, reqctx)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/auth/user-invites/") && strings.HasSuffix(r.URL.Path, "/signup/confirm-2fa"):
+		return s.handleConfirmUserInvite2FA(w, r, reqctx)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/refresh":
 		return s.handleRefresh(w, r, reqctx)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/logout":
@@ -373,28 +391,91 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request, reqctx
 		return status, code
 	}
 	var body userCreateRequest
-	if err := decodeJSONBody(r, &body); err != nil || body.Email == "" || body.DisplayName == "" {
+	if err := decodeJSONBody(r, &body); err != nil || body.Email == "" {
 		return writeIdentityError(w, userdomain.ErrInvalidRequest)
 	}
-	params := userdomain.CreateUserServiceParams{
-		Email:                body.Email,
-		DisplayName:          body.DisplayName,
-		GlobalRole:           userdomain.GlobalRole(body.GlobalRole),
-		Status:               userdomain.Status(body.Status),
-		Password:             body.Password,
-		ProvisionPassword2FA: body.ProvisionPassword2FA,
-	}
-	result, err := s.users.CreateUser(r.Context(), userActor(current), params, s.userAuditContext(reqctx))
+	result, err := s.users.CreateUserInvite(r.Context(), userActor(current), userdomain.CreateUserInviteServiceParams{
+		Email:      body.Email,
+		GlobalRole: userdomain.GlobalRole(body.GlobalRole),
+		InviteURL:  func(token string) string { return s.userInviteURL(reqctx, token) },
+	}, s.userAuditContext(reqctx))
 	if err != nil {
 		return writeIdentityError(w, err)
 	}
-	response := map[string]any{"user": serializeUser(result.User)}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"invite": map[string]any{
+			"email":       result.Invite.Email,
+			"global_role": string(result.Invite.GlobalRole),
+			"expires_at":  result.Invite.ExpiresAt,
+			"invite_url":  result.InviteURL,
+		},
+	})
+	return http.StatusCreated, ""
+}
+
+func (s *Server) handlePreviewUserInvite(w http.ResponseWriter, r *http.Request) (int, string) {
+	token, ok := userInviteTokenFromPath(r.URL.Path, "")
+	if !ok {
+		return writeIdentityError(w, userdomain.ErrInvalidInvite)
+	}
+	result, err := s.users.PreviewUserInvite(r.Context(), token)
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"invite": map[string]any{
+			"email":                 result.Invite.Email,
+			"global_role":           string(result.Invite.GlobalRole),
+			"expires_at":            result.Invite.ExpiresAt,
+			"password_2fa_required": result.Password2FARequired,
+		},
+	})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleSignupUserInvite(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	token, ok := userInviteTokenFromPath(r.URL.Path, "/signup")
+	if !ok {
+		return writeIdentityError(w, userdomain.ErrInvalidInvite)
+	}
+	var body userInviteSignupRequest
+	if err := decodeJSONBody(r, &body); err != nil || body.DisplayName == "" || body.Password == "" {
+		return writeIdentityError(w, userdomain.ErrInvalidRequest)
+	}
+	result, err := s.users.SignupUserInvite(r.Context(), token, userdomain.SignupUserInviteParams{
+		DisplayName: body.DisplayName,
+		Password:    body.Password,
+	}, s.userAuditContext(reqctx))
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	response := map[string]any{"status": result.Status}
 	if result.Password2FA != nil {
 		response["password_2fa"] = serializeUserTOTP(*result.Password2FA)
 	}
 	noStoreHeaders(w.Header())
-	writeJSON(w, http.StatusCreated, response)
-	return http.StatusCreated, ""
+	writeJSON(w, http.StatusOK, response)
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleConfirmUserInvite2FA(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
+	token, ok := userInviteTokenFromPath(r.URL.Path, "/signup/confirm-2fa")
+	if !ok {
+		return writeIdentityError(w, userdomain.ErrInvalidInvite)
+	}
+	var body userInviteConfirm2FARequest
+	if err := decodeJSONBody(r, &body); err != nil || body.TOTPCode == "" {
+		return writeIdentityError(w, userdomain.ErrInvalidRequest)
+	}
+	result, err := s.users.ConfirmUserInvite2FA(r.Context(), token, body.TOTPCode, s.userAuditContext(reqctx))
+	if err != nil {
+		return writeIdentityError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{"status": result.Status})
+	return http.StatusOK, ""
 }
 
 func (s *Server) handleLookupUser(w http.ResponseWriter, r *http.Request, _ RequestContext) (int, string) {
@@ -509,7 +590,9 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusUnauthorized, "invalid_credentials", "Credentials are invalid."
 	case errors.Is(err, auth.ErrInvalid2FACode):
 		status, code, message = http.StatusUnauthorized, "invalid_2fa_code", "Authentication code is invalid."
-	case errors.Is(err, auth.ErrPasswordAuthDisabled):
+	case errors.Is(err, userdomain.ErrInvalid2FACode):
+		status, code, message = http.StatusUnauthorized, "invalid_2fa_code", "Authentication code is invalid."
+	case errors.Is(err, auth.ErrPasswordAuthDisabled), errors.Is(err, userdomain.ErrPasswordAuthDisabled):
 		status, code, message = http.StatusForbidden, "password_auth_disabled", "Password authentication is disabled."
 	case errors.Is(err, auth.ErrPassword2FARequired), errors.Is(err, userdomain.ErrPassword2FARequired):
 		status, code, message = http.StatusForbidden, "password_2fa_required", "Password 2FA is required."
@@ -528,6 +611,8 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 	case errors.Is(err, auth.ErrConflict), errors.Is(err, userdomain.ErrConflict):
 		status, code, message = http.StatusConflict, "conflict", "Resource state conflicts with this request."
 		retryAfter = 1
+	case errors.Is(err, userdomain.ErrInvalidInvite):
+		status, code, message = http.StatusNotFound, "invalid_invite", "Invite link is invalid, expired, or already used."
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, userdomain.ErrNotFound):
 		status, code, message = http.StatusNotFound, "certificate_not_found", "Resource does not exist or is not visible."
 	case errors.Is(err, auth.ErrForbidden), errors.Is(err, userdomain.ErrForbidden):
@@ -715,6 +800,35 @@ func userIDFromPath(p string) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+func userInviteTokenFromPath(p, suffix string) (string, bool) {
+	if suffix != "" {
+		if !strings.HasSuffix(p, suffix) {
+			return "", false
+		}
+		p = strings.TrimSuffix(p, suffix)
+	}
+	token := strings.TrimPrefix(p, "/v1/auth/user-invites/")
+	if token == "" || strings.Contains(token, "/") {
+		return "", false
+	}
+	return token, true
+}
+
+func (s *Server) userInviteURL(reqctx RequestContext, token string) string {
+	scheme := reqctx.EffectiveScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	host := reqctx.EffectiveHost
+	if host == "" {
+		host = s.cfg.Server.PublicHostname
+	}
+	if host == "" {
+		return "/signup?invite=" + url.QueryEscape(token)
+	}
+	return scheme + "://" + host + "/signup?invite=" + url.QueryEscape(token)
 }
 
 func serializeUser(user userdomain.User) apiUser {

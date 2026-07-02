@@ -118,6 +118,7 @@ type AuthConfig struct {
 	OIDC                       OIDCConfig
 	UserAccessTokenTTLSeconds  int
 	UserRefreshTokenTTLSeconds int
+	UserInviteTTLSeconds       int
 }
 
 type PasswordConfig struct {
@@ -239,6 +240,7 @@ type rawAuth struct {
 	OIDC                       rawOIDC     `yaml:"oidc"`
 	UserAccessTokenTTLSeconds  *int        `yaml:"user_access_token_ttl_seconds"`
 	UserRefreshTokenTTLSeconds *int        `yaml:"user_refresh_token_ttl_seconds"`
+	UserInviteTTLSeconds       *int        `yaml:"user_invite_ttl_seconds"`
 }
 
 type rawPassword struct {
@@ -332,6 +334,7 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 			Password:                   PasswordConfig{Enabled: true, TwoFARequired: true},
 			UserAccessTokenTTLSeconds:  300,
 			UserRefreshTokenTTLSeconds: 28800,
+			UserInviteTTLSeconds:       86400,
 		},
 		ApplicationToken: ApplicationTokenConfig{
 			DefaultTTLSeconds: 7776000,
@@ -498,6 +501,9 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 		return nil, err
 	}
 	if err := positiveInt("auth.user_refresh_token_ttl_seconds", raw.Auth.UserRefreshTokenTTLSeconds, &cfg.Auth.UserRefreshTokenTTLSeconds); err != nil {
+		return nil, err
+	}
+	if err := positiveInt("auth.user_invite_ttl_seconds", raw.Auth.UserInviteTTLSeconds, &cfg.Auth.UserInviteTTLSeconds); err != nil {
 		return nil, err
 	}
 	if cfg.Auth.UserRefreshTokenTTLSeconds <= cfg.Auth.UserAccessTokenTTLSeconds {

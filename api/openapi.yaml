@@ -1087,8 +1087,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
     post:
       tags: [Users]
-      operationId: createUser
-      summary: Create a User.
+      operationId: createUserInvite
+      summary: Create a one-time User invite link.
       security:
         - UserBearerAuth: []
       requestBody:
@@ -1098,11 +1098,11 @@ paths:
             schema:
               $ref: '#/components/schemas/UserCreateRequest'
             examples:
-              passwordUser:
+              invite:
                 $ref: '#/components/examples/UserCreateRequest'
       responses:
         '201':
-          description: User created.
+          description: User invite created.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/XRequestID'
@@ -1115,7 +1115,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/UserCreateResponse'
               examples:
-                user:
+                invite:
                   $ref: '#/components/examples/UserCreateResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -1123,6 +1123,141 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/auth/user-invites/{invite_token}:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - name: invite_token
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 54
+          maxLength: 54
+    get:
+      tags: [Authentication]
+      operationId: previewUserInvite
+      summary: Preview an active User invite.
+      security: []
+      responses:
+        '200':
+          description: Invite metadata for signup.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInvitePreviewResponse'
+              examples:
+                invite:
+                  $ref: '#/components/examples/UserInvitePreviewResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/auth/user-invites/{invite_token}/signup:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - name: invite_token
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 54
+          maxLength: 54
+    post:
+      tags: [Authentication]
+      operationId: signupUserInvite
+      summary: Start or complete signup from a User invite.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserInviteSignupRequest'
+            examples:
+              signup:
+                $ref: '#/components/examples/UserInviteSignupRequest'
+      responses:
+        '200':
+          description: Signup completed or 2FA setup is required.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInviteSignupResponse'
+              examples:
+                requires2FA:
+                  $ref: '#/components/examples/UserInviteSignupRequires2FAResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/auth/user-invites/{invite_token}/signup/confirm-2fa:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - name: invite_token
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 54
+          maxLength: 54
+    post:
+      tags: [Authentication]
+      operationId: confirmUserInvite2FA
+      summary: Complete invite signup after validating TOTP setup.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserInviteConfirm2FARequest'
+            examples:
+              confirm:
+                $ref: '#/components/examples/Password2FAConfirmRequest'
+      responses:
+        '200':
+          description: Signup completed.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInviteSignupCompleteResponse'
+              examples:
+                completed:
+                  $ref: '#/components/examples/UserInviteSignupCompleteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
 
@@ -2995,6 +3130,9 @@ components:
       enum:
         - bootstrap_admin_created
         - user_created
+        - user_invite_created
+        - user_invite_signup_started
+        - user_invite_consumed
         - user_updated
         - user_login_succeeded
         - user_login_failed
@@ -3062,6 +3200,7 @@ components:
         - password_2fa_required
         - user_disabled
         - user_not_provisioned
+        - invalid_invite
         - certificate_not_found
         - certificate_not_ready
         - certificate_expired
@@ -3514,12 +3653,44 @@ components:
     UserCreateResponse:
       type: object
       additionalProperties: false
-      required: [user]
+      required: [invite]
       properties:
-        user:
-          $ref: '#/components/schemas/User'
-        password_2fa:
-          $ref: '#/components/schemas/Password2FAProvisioning'
+        invite:
+          $ref: '#/components/schemas/UserInvite'
+    UserInvite:
+      type: object
+      additionalProperties: false
+      required: [email, global_role, expires_at, invite_url]
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
+        global_role:
+          $ref: '#/components/schemas/GlobalRole'
+        expires_at:
+          type: string
+          format: date-time
+        invite_url:
+          type: string
+          format: uri-reference
+    UserInvitePreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [invite]
+      properties:
+        invite:
+          type: object
+          additionalProperties: false
+          required: [email, global_role, expires_at, password_2fa_required]
+          properties:
+            email:
+              $ref: '#/components/schemas/Email'
+            global_role:
+              $ref: '#/components/schemas/GlobalRole'
+            expires_at:
+              type: string
+              format: date-time
+            password_2fa_required:
+              type: boolean
     UserListResponse:
       type: object
       additionalProperties: false
@@ -3551,22 +3722,53 @@ components:
     UserCreateRequest:
       type: object
       additionalProperties: false
-      required: [email, display_name]
+      required: [email]
       properties:
         email:
           $ref: '#/components/schemas/Email'
-        display_name:
-          $ref: '#/components/schemas/HumanName'
         global_role:
           $ref: '#/components/schemas/GlobalRole'
-        status:
-          $ref: '#/components/schemas/UserStatus'
+    UserInviteSignupRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, password]
+      properties:
+        display_name:
+          $ref: '#/components/schemas/HumanName'
         password:
           type: string
           minLength: 12
           maxLength: 1024
-        provision_password_2fa:
-          type: boolean
+    UserInviteSignupResponse:
+      oneOf:
+        - $ref: '#/components/schemas/UserInviteSignupCompleteResponse'
+        - $ref: '#/components/schemas/UserInviteSignupRequires2FAResponse'
+    UserInviteSignupCompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [completed]
+    UserInviteSignupRequires2FAResponse:
+      type: object
+      additionalProperties: false
+      required: [status, password_2fa]
+      properties:
+        status:
+          type: string
+          enum: [password_2fa_required]
+        password_2fa:
+          $ref: '#/components/schemas/Password2FAProvisioning'
+    UserInviteConfirm2FARequest:
+      type: object
+      additionalProperties: false
+      required: [totp_code]
+      properties:
+        totp_code:
+          type: string
+          pattern: '^[0-9]{6}$'
     UserPatchRequest:
       type: object
       additionalProperties: false
@@ -4785,31 +4987,36 @@ components:
     UserCreateRequest:
       value:
         email: user@example.com
-        display_name: User Name
         global_role: user
-        status: active
-        password: correct horse battery staple
-        provision_password_2fa: true
     UserCreateResponse:
       value:
-        user:
-          id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d50
+        invite:
           email: user@example.com
-          display_name: User Name
-          password_login_enabled: true
-          password_2fa_enabled: false
-          oidc_linked: false
           global_role: user
-          status: active
-          application_grant_count: 0
-          created_at: '2026-06-24T12:00:00Z'
-          updated_at: '2026-06-24T12:00:00Z'
-          last_login_at: null
+          expires_at: '2026-06-25T12:00:00Z'
+          invite_url: https://certhub.example/signup?invite=cth_inv_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    UserInvitePreviewResponse:
+      value:
+        invite:
+          email: user@example.com
+          global_role: user
+          expires_at: '2026-06-25T12:00:00Z'
+          password_2fa_required: true
+    UserInviteSignupRequest:
+      value:
+        display_name: User Name
+        password: correct horse battery staple
+    UserInviteSignupRequires2FAResponse:
+      value:
+        status: password_2fa_required
         password_2fa:
           issuer: Certhub
           account_label: user@example.com
           secret: JBSWY3DPEHPK3PXP
           provisioning_uri: otpauth://totp/Certhub:user%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Certhub
+    UserInviteSignupCompleteResponse:
+      value:
+        status: completed
     UserLookupResponse:
       value:
         user:

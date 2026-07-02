@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/torob/certhub/internal/audit"
 	"github.com/torob/certhub/internal/config"
@@ -63,6 +64,108 @@ func TestCreateUserAllowsPasswordlessUserWhenOIDCEnabled(t *testing.T) {
 	}
 	if result.User.Email != "user@example.com" || store.created.PasswordHash != nil || store.created.OIDCIssuer != nil || store.created.OIDCSubject != nil {
 		t.Fatalf("passwordless OIDC-provisioned user = result %#v created %#v", result.User, store.created)
+	}
+}
+
+func TestCreateUserInviteReturnsOneTimeLinkAndStoresHash(t *testing.T) {
+	store := &serviceFakeStore{}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          serviceTestKeySet(t),
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true}, UserInviteTTLSeconds: 3600},
+	})
+	result, err := service.CreateUserInvite(context.Background(), Actor{ID: "12345678-1234-4234-9234-123456789abc", GlobalRole: GlobalRoleAdmin}, CreateUserInviteServiceParams{
+		Email:      "Invitee@Example.COM",
+		GlobalRole: GlobalRoleAdmin,
+		InviteURL:  func(token string) string { return "https://certhub.example/signup?invite=" + token },
+	}, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Invite.Email != "invitee@example.com" || result.Invite.GlobalRole != GlobalRoleAdmin {
+		t.Fatalf("invite = %#v", result.Invite)
+	}
+	if !strings.Contains(result.InviteURL, "cth_inv_v1_") {
+		t.Fatalf("invite url = %q", result.InviteURL)
+	}
+	if store.createdInvite.TokenHash == "" || strings.Contains(result.InviteURL, store.createdInvite.TokenHash) {
+		t.Fatalf("token hash leaked or missing: url=%q hash=%q", result.InviteURL, store.createdInvite.TokenHash)
+	}
+}
+
+func TestSignupUserInviteWithoutForced2FAConsumesInvite(t *testing.T) {
+	token := "cth_inv_v1_" + strings.Repeat("A", 43)
+	keys := serviceTestKeySet(t)
+	store := &serviceFakeStore{invite: UserInvite{
+		ID:              "22345678-1234-4234-9234-123456789abc",
+		Email:           "invitee@example.com",
+		GlobalRole:      GlobalRoleUser,
+		Status:          "active",
+		TokenHash:       keys.HashToken(token),
+		CreatedByUserID: "12345678-1234-4234-9234-123456789abc",
+	}}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          keys,
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: false}},
+	})
+	result, err := service.SignupUserInvite(context.Background(), token, SignupUserInviteParams{
+		DisplayName: "Invitee User",
+		Password:    "correct horse battery staple",
+	}, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "completed" || result.User == nil {
+		t.Fatalf("result = %#v", result)
+	}
+	if store.created.Email != "invitee@example.com" || store.created.PasswordHash == nil || *store.created.PasswordHash == "correct horse battery staple" {
+		t.Fatalf("created = %#v", store.created)
+	}
+	if store.consumedTokenHash != keys.HashToken(token) {
+		t.Fatalf("consumed token hash = %q", store.consumedTokenHash)
+	}
+}
+
+func TestSignupUserInviteForced2FARequiresVerifiedCode(t *testing.T) {
+	token := "cth_inv_v1_" + strings.Repeat("B", 43)
+	keys := serviceTestKeySet(t)
+	store := &serviceFakeStore{invite: UserInvite{
+		ID:              "22345678-1234-4234-9234-123456789abc",
+		Email:           "invitee@example.com",
+		GlobalRole:      GlobalRoleUser,
+		Status:          "active",
+		TokenHash:       keys.HashToken(token),
+		CreatedByUserID: "12345678-1234-4234-9234-123456789abc",
+	}}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: &serviceFakeAudit{},
+		KeySet:          keys,
+		Config:          config.AuthConfig{Password: config.PasswordConfig{Enabled: true, TwoFARequired: true}},
+	})
+	start, err := service.SignupUserInvite(context.Background(), token, SignupUserInviteParams{
+		DisplayName: "Invitee User",
+		Password:    "correct horse battery staple",
+	}, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.Status != "password_2fa_required" || start.Password2FA == nil || !strings.HasPrefix(start.Password2FA.ProvisioningURI, "otpauth://totp/") {
+		t.Fatalf("start = %#v", start)
+	}
+	if _, err := service.ConfirmUserInvite2FA(context.Background(), token, "000000", AuditContext{}); !errors.Is(err, ErrInvalid2FACode) {
+		t.Fatalf("wrong code err = %v", err)
+	}
+	code := generateUserTOTP(start.Password2FA.Secret, time.Now().UTC().Unix()/userTOTPPeriodSecond, userTOTPDigits)
+	done, err := service.ConfirmUserInvite2FA(context.Background(), token, code, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != "completed" || store.created.TOTPSecretEncrypted == nil || !store.created.Password2FAEnabled {
+		t.Fatalf("done = %#v created = %#v", done, store.created)
 	}
 }
 
@@ -234,9 +337,13 @@ func TestBootstrapCreateAdminConfirmationRunsBeforeCreate(t *testing.T) {
 }
 
 type serviceFakeStore struct {
-	lookupUser User
-	count      int64
-	created    CreateUserParams
+	lookupUser        User
+	invite            UserInvite
+	count             int64
+	created           CreateUserParams
+	createdInvite     CreateUserInviteParams
+	pendingInvite     SetInvitePendingSignupParams
+	consumedTokenHash string
 }
 
 func (s *serviceFakeStore) Create(_ context.Context, params CreateUserParams) (User, error) {
@@ -276,6 +383,46 @@ func (s *serviceFakeStore) LookupActiveByNormalizedEmail(context.Context, string
 		return s.lookupUser, nil
 	}
 	return User{}, errors.New("not implemented")
+}
+
+func (s *serviceFakeStore) CreateInvite(_ context.Context, params CreateUserInviteParams) (UserInvite, error) {
+	s.createdInvite = params
+	return UserInvite{
+		ID:              params.ID,
+		Email:           strings.ToLower(params.Email),
+		GlobalRole:      params.GlobalRole,
+		TokenHash:       params.TokenHash,
+		Status:          "active",
+		CreatedByUserID: params.CreatedByUserID,
+		ExpiresAt:       params.ExpiresAt,
+	}, nil
+}
+
+func (s *serviceFakeStore) LookupActiveInviteByEmail(context.Context, string) (UserInvite, error) {
+	return UserInvite{}, errors.New("not implemented")
+}
+
+func (s *serviceFakeStore) GetActiveInviteByTokenHash(context.Context, string) (UserInvite, error) {
+	if s.invite.ID != "" {
+		return s.invite, nil
+	}
+	return UserInvite{}, errors.New("not implemented")
+}
+
+func (s *serviceFakeStore) SetInvitePendingSignup(_ context.Context, params SetInvitePendingSignupParams) (UserInvite, error) {
+	s.pendingInvite = params
+	s.invite.PendingUserID = &params.PendingUserID
+	s.invite.PendingDisplayName = &params.PendingDisplayName
+	s.invite.PendingPasswordHash = &params.PendingPasswordHash
+	s.invite.PendingTOTPSecretEncrypted = &params.PendingTOTPSecretEncrypted
+	return s.invite, nil
+}
+
+func (s *serviceFakeStore) ConsumeInvite(_ context.Context, tokenHash, createdUserID string) (UserInvite, error) {
+	s.consumedTokenHash = tokenHash
+	s.invite.Status = "consumed"
+	s.invite.CreatedUserID = &createdUserID
+	return s.invite, nil
 }
 
 type serviceFakeAudit struct {

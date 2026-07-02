@@ -140,6 +140,7 @@ Rules:
 - OIDC login does not require Certhub-native 2FA and must not ask for a TOTP code.
 - The login screen must show the OIDC sign-in control only when the same-origin runtime frontend config indicates OIDC login is enabled.
 - The frontend must support TOTP setup, confirmation, and disable flows through `/v1/auth/password-2fa/*`.
+- TOTP setup screens must render the backend `provisioning_uri` as a QR code and must require the User to enter a current TOTP code before setup is considered complete.
 - Profile/Security must show password-2FA configuration only for logged-in Users with password login enabled. Passwordless Users and Application identities must not see password-2FA controls.
 - When password 2FA is enabled but cannot be disabled because instance policy requires it, Profile/Security must omit the disable form and show a message explaining that password 2FA is required by instance policy.
 - OIDC must use Certhub's backend-managed PKCE flow. The frontend must not implement implicit flow, hybrid flow, or direct provider token exchange.
@@ -578,7 +579,10 @@ User administration:
 
 - `GET /v1/users`
 - `GET /v1/users/lookup`
-- `POST /v1/users`
+- `POST /v1/users` to generate a one-time invite link
+- `GET /v1/auth/user-invites/{invite_token}`
+- `POST /v1/auth/user-invites/{invite_token}/signup`
+- `POST /v1/auth/user-invites/{invite_token}/signup/confirm-2fa`
 - `GET /v1/users/{user_id}`
 - `PATCH /v1/users/{user_id}`
 
@@ -695,7 +699,10 @@ Required frontend scenarios:
 - User with `manager` access can list and revoke Application tokens, add/delete domain scopes, and create/replace/remove Application User grants.
 - Non-admin User cannot create Applications.
 - Admin can create Applications and update mutable Application fields.
-- Admin can create Users, update mutable User fields, configure password availability, provision password-login TOTP when required, and inspect OIDC link status without setting, replacing, or clearing the link fields.
+- Admin can generate User invite links from email and selected global role, update mutable User fields, configure password availability for existing Users, and inspect OIDC link status without setting, replacing, or clearing the link fields.
+- Invited Users can open `/signup?invite=...` without an existing session, review the invited email/role, enter display name, set password, and complete signup.
+- If forced password 2FA is configured, invite signup shows a QR code for the TOTP provisioning URI and blocks completion until the User enters a valid current TOTP code.
+- Invite links are not stored in browser persistent storage and cannot be reused after successful signup.
 - Renewal, key rotation, and reissue create a higher-numbered certificate version shown in certificate detail.
 - Admin can view and manage all Applications.
 - Admin can create, inspect, update mutable issuer fields, disable issuers through status, and sees the default issuer uniqueness constraint.
@@ -713,6 +720,7 @@ Required frontend scenarios:
 - API clients attach User bearer tokens only to same-origin Certhub API requests and never to embedded static assets, OIDC provider URLs, downloaded files, or third-party origins.
 - API client redirect tests verify bearer tokens are not forwarded when a request is redirected to a different origin or scheme.
 - Refresh failure, logout, browser tab close, and session-expired handling clear in-memory query caches that may contain identity-specific or private-key metadata.
+- After implementation, redeploy to `/tmp/certhub-compose-test` and use the exposed Tailscale HTTPS endpoint in a browser to verify admin invite generation, invite signup, QR-code 2FA validation, login after signup, and reused invite failure.
 - Browser restart does not preserve the User login session.
 - Production UI uses no external scripts, styles, fonts, icons, images, or source maps.
 - Built production HTML, CSS, and JavaScript contain no `http://` or `https://` references to UI assets, font providers, icon providers, analytics scripts, or CDNs.

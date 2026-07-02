@@ -207,6 +207,12 @@ h3 {
   background: #fff;
 }
 
+.signup-form {
+  width: 100%;
+  padding: 0;
+  border: 0;
+}
+
 .form-section {
   display: grid;
   gap: 10px;
@@ -433,6 +439,15 @@ tr.selectable:focus-within td {
   background: #e6f3ef;
   color: #174f43;
   font-weight: 650;
+}
+
+.qr-code {
+  width: 192px;
+  height: 192px;
+  image-rendering: pixelated;
+  border: 1px solid #d6dee4;
+  border-radius: 6px;
+  background: #fff;
 }
 
 .check-field {

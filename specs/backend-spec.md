@@ -2029,18 +2029,17 @@ Expected responses:
 
 #### POST /v1/users
 
-Summary: Create a User.
+Summary: Create a one-time User invite link.
 
 Description and notes:
 
 - Admin-only in v1.
-- Creates a human identity; Applications remain separate identities.
-- May set an initial password. Passwordless Users may be created when OIDC is enabled so their OIDC identity can be linked later by verified email during login.
-- If `password` is present, Certhub validates password policy and stores only `password_hash`.
-- Does not accept caller-provided TOTP secrets.
-- If `password` is present and `auth.password.2fa_required=true`, the request must set `provision_password_2fa=true`; Certhub generates and enables TOTP and returns the provisioning URI once.
-- If password 2FA is not globally required, Users may self-service setup through `/v1/auth/password-2fa/setup`.
-- User login sessions are created only by login endpoints, not by User administration APIs.
+- Does not create the User immediately.
+- Accepts the invited email and selected `global_role` only.
+- Generates a raw invite token once, stores only its HMAC token hash, and returns a signup URL containing the raw token.
+- The invite expires after `auth.user_invite_ttl_seconds`, default `86400`.
+- Creating an invite conflicts with an existing User email or an existing active unexpired invite for the same email.
+- User login sessions are created only by login endpoints, not by invite or User administration APIs.
 
 ```http
 POST /v1/users
@@ -2055,23 +2054,63 @@ Request body:
 ```json
 {
   "email": "user@example.com",
-  "display_name": "User Name",
-  "global_role": "user",
-  "status": "active",
-  "password": "initial password",
-  "provision_password_2fa": true
+  "global_role": "user"
 }
 ```
 
-`password` and `provision_password_2fa` are optional. `oidc_issuer` and `oidc_subject` are not accepted in this request.
-
 Expected responses:
 
-- `201 Created`: User created.
+- `201 Created`: invite link created.
 - `400 Bad Request`: invalid body.
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User is not an admin.
-- `409 Conflict`: email already exists.
+- `409 Conflict`: email already exists or has an active invite.
+
+#### GET /v1/auth/user-invites/{invite_token}
+
+Summary: Preview an active User invite before signup.
+
+Description and notes:
+
+- Public unauthenticated endpoint.
+- Returns email, selected global role, expiration time, and whether password 2FA is required by instance policy.
+- Missing, expired, consumed, and malformed invite tokens all return `invalid_invite`.
+- Does not consume the invite.
+
+#### POST /v1/auth/user-invites/{invite_token}/signup
+
+Summary: Start or complete signup from an invite.
+
+Description and notes:
+
+- Public unauthenticated endpoint.
+- Accepts `display_name` and `password`.
+- Validates password policy against the invited email and stores only a password hash.
+- If `auth.password.2fa_required=false`, creates an active User and consumes the invite atomically.
+- If `auth.password.2fa_required=true`, stores pending signup state on the invite and returns TOTP provisioning data. The frontend must render the `provisioning_uri` as a QR code.
+- The invite is not consumed until the account is completed successfully.
+
+#### POST /v1/auth/user-invites/{invite_token}/signup/confirm-2fa
+
+Summary: Complete invite signup after validating TOTP setup.
+
+Description and notes:
+
+- Public unauthenticated endpoint.
+- Accepts a six-digit `totp_code`.
+- Verifies the code against the pending TOTP secret before creating the User.
+- On success, creates an active User with password 2FA enabled, consumes the invite atomically, and clears pending invite secrets.
+- Wrong TOTP returns `invalid_2fa_code` and leaves the invite usable until expiration.
+- A consumed invite cannot be reused.
+
+Expected responses:
+
+- `200 OK`: signup completed or TOTP setup required.
+- `400 Bad Request`: invalid body.
+- `401 Unauthorized`: invalid TOTP code for confirm.
+- `403 Forbidden`: password authentication is disabled.
+- `404 Not Found`: invite is invalid, expired, or already used.
+- `409 Conflict`: User email already exists.
 
 #### GET /v1/users/{user_id}
 
@@ -3155,6 +3194,30 @@ Constraints:
 - If `auth.password.2fa_required=true`, Users with `password_hash` must have `password_2fa_enabled=true` before password login can create a session.
 - OIDC login ignores `password_2fa_enabled` and does not require TOTP.
 
+### `user_invites`
+
+One-time signup invitations created by admins.
+
+| Field | Type | Constraints | Description |
+| --- | --- | --- | --- |
+| `id` | UUID | Primary key | Stable invite row ID. |
+| `email` | string | Required, normalized email | Email address that will become the User email. |
+| `global_role` | enum | Required, one of `user`, `admin`; default `user` | Role assigned after signup completes. |
+| `token_hash` | string | Required, unique | HMAC-SHA-256 hash of the raw invite token. Raw invite tokens are never stored. |
+| `status` | enum | Required, one of `active`, `consumed`, `expired`; default `active` | Active invites may be used until expiry; consumed invites cannot be reused. |
+| `created_by_user_id` | UUID | Required, foreign key to `users.id` | Admin that generated the invite. |
+| `created_user_id` | UUID | Nullable, foreign key to `users.id` | User created when the invite is consumed. |
+| `pending_*` | mixed | Nullable | Pending display name, password hash, User ID, and encrypted TOTP secret for forced-2FA signup. |
+| `created_at` | timestamptz | Required | Invite creation time. |
+| `expires_at` | timestamptz | Required | Invite expiration time. |
+| `consumed_at` | timestamptz | Nullable | Successful signup completion time. |
+
+Constraints:
+
+- `token_hash` must be derived from the full raw invite token including the `cth_inv_v1_` prefix.
+- Pending signup state must be cleared when the invite is consumed.
+- Raw invite tokens, TOTP secrets, TOTP codes, and invite URLs must never be written to logs or audit metadata.
+
 ### `user_sessions`
 
 Login sessions for human Users. User access tokens and refresh tokens are opaque random bearer secrets, not JWTs. Access tokens are short-lived and used for User-authenticated API calls. Refresh tokens are longer-lived and used only to rotate the session.
@@ -3674,6 +3737,9 @@ Required audit actions include:
 
 - `bootstrap_admin_created`
 - `user_created`
+- `user_invite_created`
+- `user_invite_signup_started`
+- `user_invite_consumed`
 - `user_updated`
 - `user_login_succeeded`
 - `user_login_failed`
@@ -3930,7 +3996,10 @@ Required backend scenarios:
 - Interactive admin 2FA tests prove Certhub displays the TOTP provisioning URI exactly once, verifies a current TOTP code before committing the admin User, and rolls back all User/TOTP state when the operator aborts or confirmation fails.
 - Interactive bootstrap wizard tests prove issuer, DNS provider, and DNS zone choices call the same services and validators as the noninteractive bootstrap commands.
 - `certhub-server bootstrap create-issuer`, `create-dns-provider`, `add-dns-provider-zone`, and `refresh-dns-provider-zones` enforce the same service validations and audit/secret-redaction behavior as their authenticated management API equivalents.
-- Admin User creation with password and default password-2FA policy requires `provision_password_2fa=true`, generates and enables TOTP, and returns the provisioning URI once.
+- Admin User creation generates a one-time invite link with configured expiration and stores only the invite token hash.
+- Invite signup without forced 2FA creates one active User and consumes the invite exactly once.
+- Invite signup with forced 2FA returns TOTP provisioning data, requires the frontend QR-code setup step to validate a current TOTP code, and creates the User only after successful TOTP confirmation.
+- Consumed, expired, missing, and malformed invite tokens return `invalid_invite` and cannot create another User.
 - Password login succeeds for active Users with valid password hashes and returns a short-lived User access token plus a longer-lived refresh token.
 - Password login failures use `invalid_credentials` without revealing whether the email exists.
 - Password login for disabled Users, Users without password hashes, unknown emails, and wrong passwords all return the same generic `invalid_credentials`.

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -23,10 +24,12 @@ import (
 )
 
 const (
-	userTOTPSecretBytes  = 20
-	userTOTPIssuer       = "Certhub"
-	userTOTPDigits       = 6
-	userTOTPPeriodSecond = 30
+	userTOTPSecretBytes   = 20
+	userTOTPIssuer        = "Certhub"
+	userTOTPDigits        = 6
+	userTOTPPeriodSecond  = 30
+	userInviteTokenPrefix = "cth_inv_v1_"
+	userInviteTokenBytes  = 32
 )
 
 var (
@@ -35,6 +38,9 @@ var (
 	ErrConflict               = errors.New("conflict")
 	ErrInvalidRequest         = errors.New("invalid request")
 	ErrPassword2FARequired    = errors.New("password 2fa required")
+	ErrPasswordAuthDisabled   = errors.New("password auth disabled")
+	ErrInvalid2FACode         = errors.New("invalid 2fa code")
+	ErrInvalidInvite          = errors.New("invalid invite")
 	ErrUserServiceUnavailable = errors.New("user service unavailable")
 )
 
@@ -49,6 +55,11 @@ type Store interface {
 	Get(context.Context, string) (User, error)
 	Update(context.Context, string, UpdateUserParams) (User, error)
 	LookupActiveByNormalizedEmail(context.Context, string) (User, error)
+	CreateInvite(context.Context, CreateUserInviteParams) (UserInvite, error)
+	LookupActiveInviteByEmail(context.Context, string) (UserInvite, error)
+	GetActiveInviteByTokenHash(context.Context, string) (UserInvite, error)
+	SetInvitePendingSignup(context.Context, SetInvitePendingSignupParams) (UserInvite, error)
+	ConsumeInvite(context.Context, string, string) (UserInvite, error)
 }
 
 type GrantLookupReader interface {
@@ -111,6 +122,33 @@ type CreateUserResult struct {
 	Password2FA *TOTPProvisioning
 }
 
+type CreateUserInviteServiceParams struct {
+	Email      string
+	GlobalRole GlobalRole
+	InviteURL  func(string) string
+}
+
+type CreateUserInviteResult struct {
+	Invite    UserInvite
+	InviteURL string
+}
+
+type UserInvitePreviewResult struct {
+	Invite              UserInvite
+	Password2FARequired bool
+}
+
+type SignupUserInviteParams struct {
+	DisplayName string
+	Password    string
+}
+
+type SignupUserInviteResult struct {
+	Status      string
+	User        *User
+	Password2FA *TOTPProvisioning
+}
+
 type BootstrapCreateAdminParams struct {
 	Email              string
 	DisplayName        string
@@ -166,6 +204,216 @@ func (s *Service) CreateUser(ctx context.Context, actor Actor, params CreateUser
 		return err
 	})
 	return result, err
+}
+
+func (s *Service) CreateUserInvite(ctx context.Context, actor Actor, params CreateUserInviteServiceParams, auditCtx AuditContext) (CreateUserInviteResult, error) {
+	var result CreateUserInviteResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.createUserInvite(ctx, actor, params, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) createUserInvite(ctx context.Context, actor Actor, params CreateUserInviteServiceParams, auditCtx AuditContext) (CreateUserInviteResult, error) {
+	if err := s.ready(); err != nil {
+		return CreateUserInviteResult{}, err
+	}
+	if !actor.admin() {
+		return CreateUserInviteResult{}, ErrForbidden
+	}
+	normalizedEmail, err := storage.NormalizeEmail(params.Email)
+	if err != nil {
+		return CreateUserInviteResult{}, ErrInvalidRequest
+	}
+	if params.GlobalRole != "" && params.GlobalRole != GlobalRoleUser && params.GlobalRole != GlobalRoleAdmin {
+		return CreateUserInviteResult{}, ErrInvalidRequest
+	}
+	if _, err := s.repo.LookupActiveByNormalizedEmail(ctx, normalizedEmail); err == nil {
+		return CreateUserInviteResult{}, ErrConflict
+	}
+	if _, err := s.repo.LookupActiveInviteByEmail(ctx, normalizedEmail); err == nil {
+		return CreateUserInviteResult{}, ErrConflict
+	}
+	token, err := randomInviteToken()
+	if err != nil {
+		return CreateUserInviteResult{}, err
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(s.cfg.UserInviteTTLSeconds) * time.Second)
+	invite, err := s.repo.CreateInvite(ctx, CreateUserInviteParams{
+		Email:           normalizedEmail,
+		GlobalRole:      params.GlobalRole,
+		TokenHash:       s.keys.HashToken(token),
+		CreatedByUserID: actor.ID,
+		ExpiresAt:       expiresAt,
+	})
+	if err != nil {
+		return CreateUserInviteResult{}, classifyWriteError(err)
+	}
+	if err := s.auditUserEvent(ctx, actor.ID, "user_invite_created", nil, auditCtx, map[string]any{"email": invite.Email, "global_role": string(invite.GlobalRole)}); err != nil {
+		return CreateUserInviteResult{}, err
+	}
+	inviteURL := token
+	if params.InviteURL != nil {
+		inviteURL = params.InviteURL(token)
+	}
+	return CreateUserInviteResult{Invite: invite, InviteURL: inviteURL}, nil
+}
+
+func (s *Service) PreviewUserInvite(ctx context.Context, token string) (UserInvitePreviewResult, error) {
+	if err := s.ready(); err != nil {
+		return UserInvitePreviewResult{}, err
+	}
+	if err := validatePresentedInviteToken(token); err != nil {
+		return UserInvitePreviewResult{}, ErrInvalidInvite
+	}
+	invite, err := s.repo.GetActiveInviteByTokenHash(ctx, s.keys.HashToken(token))
+	if err != nil {
+		return UserInvitePreviewResult{}, ErrInvalidInvite
+	}
+	return UserInvitePreviewResult{Invite: invite, Password2FARequired: s.cfg.Password.TwoFARequired}, nil
+}
+
+func (s *Service) SignupUserInvite(ctx context.Context, token string, params SignupUserInviteParams, auditCtx AuditContext) (SignupUserInviteResult, error) {
+	var result SignupUserInviteResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.signupUserInvite(ctx, token, params, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) signupUserInvite(ctx context.Context, token string, params SignupUserInviteParams, auditCtx AuditContext) (SignupUserInviteResult, error) {
+	if err := s.ready(); err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	if !s.cfg.Password.Enabled {
+		return SignupUserInviteResult{}, ErrPasswordAuthDisabled
+	}
+	if err := validatePresentedInviteToken(token); err != nil {
+		return SignupUserInviteResult{}, ErrInvalidInvite
+	}
+	tokenHash := s.keys.HashToken(token)
+	invite, err := s.repo.GetActiveInviteByTokenHash(ctx, tokenHash)
+	if err != nil {
+		return SignupUserInviteResult{}, ErrInvalidInvite
+	}
+	if err := storage.ValidateHumanString(params.DisplayName, "display_name", 1, 255); err != nil {
+		return SignupUserInviteResult{}, ErrInvalidRequest
+	}
+	if err := security.ValidatePasswordPolicy(params.Password, invite.Email); err != nil {
+		return SignupUserInviteResult{}, ErrInvalidRequest
+	}
+	passwordHash, err := security.HashPassword(params.Password)
+	if err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	if s.cfg.Password.TwoFARequired {
+		pendingUserID, err := storage.NewUUID()
+		if err != nil {
+			return SignupUserInviteResult{}, err
+		}
+		provisioning, encrypted, err := s.newTOTPProvisioning(pendingUserID, invite.Email)
+		if err != nil {
+			return SignupUserInviteResult{}, err
+		}
+		if _, err := s.repo.SetInvitePendingSignup(ctx, SetInvitePendingSignupParams{
+			TokenHash:                  tokenHash,
+			PendingUserID:              pendingUserID,
+			PendingDisplayName:         params.DisplayName,
+			PendingPasswordHash:        passwordHash,
+			PendingTOTPSecretEncrypted: encrypted,
+		}); err != nil {
+			return SignupUserInviteResult{}, ErrInvalidInvite
+		}
+		if err := s.auditUserEvent(ctx, invite.CreatedByUserID, "user_invite_signup_started", nil, auditCtx, map[string]any{"email": invite.Email, "password_2fa_required": true}); err != nil {
+			return SignupUserInviteResult{}, err
+		}
+		return SignupUserInviteResult{Status: "password_2fa_required", Password2FA: &provisioning}, nil
+	}
+	user, err := s.createInvitedUser(ctx, invite, CreateUserParams{
+		Email:        invite.Email,
+		DisplayName:  params.DisplayName,
+		GlobalRole:   invite.GlobalRole,
+		Status:       StatusActive,
+		PasswordHash: &passwordHash,
+	}, tokenHash, auditCtx)
+	if err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	return SignupUserInviteResult{Status: "completed", User: &user}, nil
+}
+
+func (s *Service) ConfirmUserInvite2FA(ctx context.Context, token, code string, auditCtx AuditContext) (SignupUserInviteResult, error) {
+	var result SignupUserInviteResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.confirmUserInvite2FA(ctx, token, code, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) confirmUserInvite2FA(ctx context.Context, token, code string, auditCtx AuditContext) (SignupUserInviteResult, error) {
+	if err := s.ready(); err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	if err := validatePresentedInviteToken(token); err != nil {
+		return SignupUserInviteResult{}, ErrInvalidInvite
+	}
+	tokenHash := s.keys.HashToken(token)
+	invite, err := s.repo.GetActiveInviteByTokenHash(ctx, tokenHash)
+	if err != nil {
+		return SignupUserInviteResult{}, ErrInvalidInvite
+	}
+	if invite.PendingUserID == nil || invite.PendingDisplayName == nil || invite.PendingPasswordHash == nil || invite.PendingTOTPSecretEncrypted == nil {
+		return SignupUserInviteResult{}, ErrInvalidInvite
+	}
+	secret, err := s.keys.DecryptTOTPSecret(*invite.PendingTOTPSecretEncrypted, totpAAD(*invite.PendingUserID))
+	if err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	if !verifyUserTOTP(secret, code, time.Now().UTC()) {
+		return SignupUserInviteResult{}, ErrInvalid2FACode
+	}
+	user, err := s.createInvitedUser(ctx, invite, CreateUserParams{
+		ID:                  *invite.PendingUserID,
+		Email:               invite.Email,
+		DisplayName:         *invite.PendingDisplayName,
+		GlobalRole:          invite.GlobalRole,
+		Status:              StatusActive,
+		PasswordHash:        invite.PendingPasswordHash,
+		Password2FAEnabled:  true,
+		TOTPSecretEncrypted: invite.PendingTOTPSecretEncrypted,
+	}, tokenHash, auditCtx)
+	if err != nil {
+		return SignupUserInviteResult{}, err
+	}
+	return SignupUserInviteResult{Status: "completed", User: &user}, nil
+}
+
+func (s *Service) createInvitedUser(ctx context.Context, invite UserInvite, create CreateUserParams, tokenHash string, auditCtx AuditContext) (User, error) {
+	user, err := s.repo.Create(ctx, create)
+	if err != nil {
+		return User{}, classifyWriteError(err)
+	}
+	if _, err := s.repo.ConsumeInvite(ctx, tokenHash, user.ID); err != nil {
+		return User{}, ErrInvalidInvite
+	}
+	if err := s.auditUserEvent(ctx, invite.CreatedByUserID, "user_created", &user.ID, auditCtx, map[string]any{"global_role": string(user.GlobalRole), "status": string(user.Status), "source": "invite"}); err != nil {
+		return User{}, err
+	}
+	if user.Password2FAEnabled {
+		if err := s.auditUserEvent(ctx, invite.CreatedByUserID, "password_2fa_enabled", &user.ID, auditCtx, map[string]any{"source": "invite_signup"}); err != nil {
+			return User{}, err
+		}
+	}
+	if err := s.auditUserEvent(ctx, invite.CreatedByUserID, "user_invite_consumed", &user.ID, auditCtx, map[string]any{"email": invite.Email}); err != nil {
+		return User{}, err
+	}
+	return user, nil
 }
 
 func (s *Service) createUser(ctx context.Context, actor Actor, params CreateUserServiceParams, auditCtx AuditContext) (CreateUserResult, error) {
@@ -636,6 +884,30 @@ func verifyUserTOTP(secret, code string, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+func randomInviteToken() (string, error) {
+	buf := make([]byte, userInviteTokenBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return userInviteTokenPrefix + base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func validatePresentedInviteToken(token string) error {
+	if !strings.HasPrefix(token, userInviteTokenPrefix) {
+		return ErrInvalidRequest
+	}
+	if len(token) != len(userInviteTokenPrefix)+43 {
+		return ErrInvalidRequest
+	}
+	for _, r := range strings.TrimPrefix(token, userInviteTokenPrefix) {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return ErrInvalidRequest
+	}
+	return nil
 }
 
 func generateUserTOTP(secret string, counter int64, digits int) string {

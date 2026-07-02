@@ -43,6 +43,24 @@ type User struct {
 	ApplicationGrantCount      int64
 }
 
+type UserInvite struct {
+	ID                         string
+	Email                      string
+	GlobalRole                 GlobalRole
+	TokenHash                  string
+	Status                     string
+	CreatedByUserID            string
+	CreatedUserID              *string
+	PendingUserID              *string
+	PendingDisplayName         *string
+	PendingPasswordHash        *string
+	PendingTOTPSecretEncrypted *string
+	PendingStartedAt           *time.Time
+	CreatedAt                  time.Time
+	ExpiresAt                  time.Time
+	ConsumedAt                 *time.Time
+}
+
 type Repository struct {
 	db storage.DBTX
 }
@@ -85,6 +103,23 @@ type ListUsersParams struct {
 	Search     string
 }
 
+type CreateUserInviteParams struct {
+	ID              string
+	Email           string
+	GlobalRole      GlobalRole
+	TokenHash       string
+	CreatedByUserID string
+	ExpiresAt       time.Time
+}
+
+type SetInvitePendingSignupParams struct {
+	TokenHash                  string
+	PendingUserID              string
+	PendingDisplayName         string
+	PendingPasswordHash        string
+	PendingTOTPSecretEncrypted string
+}
+
 func (r Repository) Create(ctx context.Context, params CreateUserParams) (User, error) {
 	if r.db == nil {
 		return User{}, errors.New("users repository storage is required")
@@ -121,6 +156,111 @@ returning id, email, display_name, password_hash, password_2fa_enabled,
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
 	return user, nil
+}
+
+func (r Repository) CreateInvite(ctx context.Context, params CreateUserInviteParams) (UserInvite, error) {
+	if r.db == nil {
+		return UserInvite{}, errors.New("users repository storage is required")
+	}
+	if params.ID == "" {
+		id, err := storage.NewUUID()
+		if err != nil {
+			return UserInvite{}, err
+		}
+		params.ID = id
+	}
+	if err := validateCreateInvite(&params); err != nil {
+		return UserInvite{}, err
+	}
+	row := r.db.QueryRow(ctx, `
+insert into user_invites (
+    id, email, global_role, token_hash, created_by_user_id, expires_at
+) values (
+    $1, $2, $3, $4, $5, $6
+)
+returning `+inviteColumnsSQL(), params.ID, params.Email, string(params.GlobalRole), params.TokenHash, params.CreatedByUserID, params.ExpiresAt)
+	invite, err := scanInvite(row)
+	if err != nil {
+		return UserInvite{}, fmt.Errorf("create user invite: %w", err)
+	}
+	return invite, nil
+}
+
+func (r Repository) LookupActiveInviteByEmail(ctx context.Context, email string) (UserInvite, error) {
+	normalized, err := storage.NormalizeEmail(email)
+	if err != nil {
+		return UserInvite{}, err
+	}
+	return r.getInviteWhere(ctx, "email = $1 and status = 'active' and expires_at > now()", normalized)
+}
+
+func (r Repository) GetActiveInviteByTokenHash(ctx context.Context, tokenHash string) (UserInvite, error) {
+	if err := storage.ValidateTokenHash(tokenHash, "token_hash"); err != nil {
+		return UserInvite{}, err
+	}
+	return r.getInviteWhere(ctx, "token_hash = $1 and status = 'active' and expires_at > now()", tokenHash)
+}
+
+func (r Repository) SetInvitePendingSignup(ctx context.Context, params SetInvitePendingSignupParams) (UserInvite, error) {
+	if err := storage.ValidateTokenHash(params.TokenHash, "token_hash"); err != nil {
+		return UserInvite{}, err
+	}
+	if err := storage.ValidateUUID(params.PendingUserID, "pending_user_id"); err != nil {
+		return UserInvite{}, err
+	}
+	if err := storage.ValidateHumanString(params.PendingDisplayName, "display_name", 1, 255); err != nil {
+		return UserInvite{}, err
+	}
+	if err := storage.ValidateHumanString(params.PendingPasswordHash, "password_hash", 1, 4096); err != nil {
+		return UserInvite{}, err
+	}
+	if err := storage.ValidateEncryptedEnvelope(&params.PendingTOTPSecretEncrypted, "pending_totp_secret_encrypted"); err != nil {
+		return UserInvite{}, err
+	}
+	row := r.db.QueryRow(ctx, `
+update user_invites
+set pending_user_id = $2,
+    pending_display_name = $3,
+    pending_password_hash = $4,
+    pending_totp_secret_encrypted = $5,
+    pending_started_at = now()
+where token_hash = $1
+  and status = 'active'
+  and expires_at > now()
+returning `+inviteColumnsSQL(), params.TokenHash, params.PendingUserID, params.PendingDisplayName, params.PendingPasswordHash, params.PendingTOTPSecretEncrypted)
+	invite, err := scanInvite(row)
+	if err != nil {
+		return UserInvite{}, fmt.Errorf("set user invite pending signup: %w", err)
+	}
+	return invite, nil
+}
+
+func (r Repository) ConsumeInvite(ctx context.Context, tokenHash, createdUserID string) (UserInvite, error) {
+	if err := storage.ValidateTokenHash(tokenHash, "token_hash"); err != nil {
+		return UserInvite{}, err
+	}
+	if err := storage.ValidateUUID(createdUserID, "created_user_id"); err != nil {
+		return UserInvite{}, err
+	}
+	row := r.db.QueryRow(ctx, `
+update user_invites
+set status = 'consumed',
+    consumed_at = now(),
+    created_user_id = $2,
+    pending_user_id = null,
+    pending_display_name = null,
+    pending_password_hash = null,
+    pending_totp_secret_encrypted = null,
+    pending_started_at = null
+where token_hash = $1
+  and status = 'active'
+  and expires_at > now()
+returning `+inviteColumnsSQL(), tokenHash, createdUserID)
+	invite, err := scanInvite(row)
+	if err != nil {
+		return UserInvite{}, fmt.Errorf("consume user invite: %w", err)
+	}
+	return invite, nil
 }
 
 func (r Repository) Get(ctx context.Context, id string) (User, error) {
@@ -376,6 +516,63 @@ func scanUser(row scanner) (User, error) {
 	return user, nil
 }
 
+func (r Repository) getInviteWhere(ctx context.Context, predicate string, args ...any) (UserInvite, error) {
+	if r.db == nil {
+		return UserInvite{}, errors.New("users repository storage is required")
+	}
+	query := `select ` + inviteColumnsSQL() + ` from user_invites where ` + predicate
+	invite, err := scanInvite(r.db.QueryRow(ctx, query, args...))
+	if err != nil {
+		return UserInvite{}, fmt.Errorf("get user invite: %w", err)
+	}
+	return invite, nil
+}
+
+func inviteColumnsSQL() string {
+	return `id, email, global_role, token_hash, status, created_by_user_id, created_user_id,
+    pending_user_id, pending_display_name, pending_password_hash, pending_totp_secret_encrypted,
+    pending_started_at, created_at, expires_at, consumed_at`
+}
+
+func scanInvite(row scanner) (UserInvite, error) {
+	var invite UserInvite
+	var globalRole string
+	var createdUserID, pendingUserID, pendingDisplayName, pendingPasswordHash, pendingTOTPSecret sql.NullString
+	var pendingStartedAt, consumedAt sql.NullTime
+	if err := row.Scan(
+		&invite.ID,
+		&invite.Email,
+		&globalRole,
+		&invite.TokenHash,
+		&invite.Status,
+		&invite.CreatedByUserID,
+		&createdUserID,
+		&pendingUserID,
+		&pendingDisplayName,
+		&pendingPasswordHash,
+		&pendingTOTPSecret,
+		&pendingStartedAt,
+		&invite.CreatedAt,
+		&invite.ExpiresAt,
+		&consumedAt,
+	); err != nil {
+		return UserInvite{}, err
+	}
+	invite.GlobalRole = GlobalRole(globalRole)
+	invite.CreatedUserID = ptrFromNullString(createdUserID)
+	invite.PendingUserID = ptrFromNullString(pendingUserID)
+	invite.PendingDisplayName = ptrFromNullString(pendingDisplayName)
+	invite.PendingPasswordHash = ptrFromNullString(pendingPasswordHash)
+	invite.PendingTOTPSecretEncrypted = ptrFromNullString(pendingTOTPSecret)
+	if pendingStartedAt.Valid {
+		invite.PendingStartedAt = &pendingStartedAt.Time
+	}
+	if consumedAt.Valid {
+		invite.ConsumedAt = &consumedAt.Time
+	}
+	return invite, nil
+}
+
 func ptrFromNullString(value sql.NullString) *string {
 	if !value.Valid {
 		return nil
@@ -431,6 +628,33 @@ func validateCreateUser(params *CreateUserParams) error {
 		if err := storage.ValidateHumanString(*params.OIDCSubject, "oidc_subject", 1, 255); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateCreateInvite(params *CreateUserInviteParams) error {
+	if err := storage.ValidateUUID(params.ID, "user_invite_id"); err != nil {
+		return err
+	}
+	normalized, err := storage.NormalizeEmail(params.Email)
+	if err != nil {
+		return err
+	}
+	params.Email = normalized
+	if params.GlobalRole == "" {
+		params.GlobalRole = GlobalRoleUser
+	}
+	if err := validateGlobalRole(params.GlobalRole); err != nil {
+		return err
+	}
+	if err := storage.ValidateTokenHash(params.TokenHash, "token_hash"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.CreatedByUserID, "created_by_user_id"); err != nil {
+		return err
+	}
+	if !params.ExpiresAt.After(time.Now().UTC()) {
+		return errors.New("expires_at must be in the future")
 	}
 	return nil
 }

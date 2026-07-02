@@ -3,6 +3,7 @@ import {
   Activity,
   AppWindow,
   BadgeCheck,
+  Copy,
   Download,
   Globe2,
   Home,
@@ -20,6 +21,7 @@ import {
   Users,
   X
 } from "lucide-react";
+import QRCode from "qrcode";
 import { createElement, useEffect, useMemo, useState } from "react";
 import type { components } from "./api-types";
 
@@ -111,6 +113,7 @@ type RouteState = {
   edit?: ResourceType;
   id?: string;
   profile?: boolean;
+  signup?: boolean;
   path: string;
   query: URLSearchParams;
 };
@@ -142,6 +145,7 @@ function parseRoute(): RouteState {
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const query = url.searchParams;
   const parts = path.split("/").filter(Boolean);
+  if (path === "/signup") return { page: "home", signup: true, path, query };
   if (path === "/profile") return { page: "home", profile: true, path, query };
   if (parts.length === 2 && parts[0] === "certificates" && parts[1] !== "new") return { page: "certificates", detail: "certificate", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "applications" && parts[1] !== "new") return { page: "applications", detail: "application", id: parts[1], path, query };
@@ -472,6 +476,7 @@ function AppShell() {
   }, [session?.identity, route.page]);
 
   if (!session?.accessToken) {
+    if (route.signup) return createElement(PublicSignupPage, { route, navigate, onDone: setLoginNotice });
     return createElement(Login, { onLogin: setSession, notice: loginNotice });
   }
 
@@ -574,6 +579,99 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   );
 }
 
+function PublicSignupPage(props: { route: RouteState; navigate: (path: string, replace?: boolean) => void; onDone: (message: string) => void }) {
+  const token = props.route.query.get("invite") || "";
+  const preview = useAsync<{ invite: any }>(undefined, token ? `/v1/auth/user-invites/${encodeURIComponent(token)}` : "", [token]);
+  const invite = preview.data?.invite;
+  const [step, setStep] = useState<"profile" | "password" | "totp" | "done">("profile");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [totp, setTotp] = useState("");
+  const [provisioning, setProvisioning] = useState<any>(undefined);
+  const [error, setError] = useState("");
+  const profileError = required(displayName, "display_name");
+  const passwordError = !password ? "password is required" : password.length < 12 ? "password must be at least 12 characters" : password !== confirmPassword ? "passwords do not match" : "";
+  const submitPassword = async (e: Event) => {
+    e.preventDefault();
+    if (passwordError) return setError(passwordError);
+    const result = await api<any>(`/v1/auth/user-invites/${encodeURIComponent(token)}/signup`, undefined, {
+      method: "POST",
+      body: JSON.stringify({ display_name: displayName, password })
+    });
+    if (result.error) return setError(errorText(result));
+    if (result.data?.status === "password_2fa_required") {
+      setProvisioning(result.data.password_2fa);
+      setStep("totp");
+      setError("");
+      return;
+    }
+    props.onDone("Signup completed. Sign in with your new password.");
+    props.navigate("/", true);
+  };
+  const confirm2FA = async (e: Event) => {
+    e.preventDefault();
+    if (!totp) return setError("totp_code is required");
+    const result = await api<any>(`/v1/auth/user-invites/${encodeURIComponent(token)}/signup/confirm-2fa`, undefined, {
+      method: "POST",
+      body: JSON.stringify({ totp_code: totp })
+    });
+    if (result.error) return setError(errorText(result));
+    props.onDone("Signup completed. Sign in with your new password.");
+    props.navigate("/", true);
+  };
+  if (!token) {
+    return createElement("main", { className: "login" },
+      createElement("section", { className: "login-panel" },
+        createElement("div", { className: "brand large" }, createElement(ShieldCheck, { size: 30 }), createElement("strong", null, "Certhub")),
+        createElement("p", { className: "error" }, "invalid_invite: invite token is missing")
+      )
+    );
+  }
+  return createElement("main", { className: "login signup-screen" },
+    createElement("section", { className: "login-panel signup-panel" },
+      createElement("div", { className: "brand large" }, createElement(ShieldCheck, { size: 30 }), createElement("strong", null, "Certhub")),
+      preview.loading ? createElement("p", { className: "empty" }, "Loading") : preview.error ? createElement("p", { className: "error" }, errorText(preview)) :
+        createElement("form", { className: "create-form signup-form", onSubmit: step === "totp" ? confirm2FA : submitPassword },
+          createElement("div", { className: "stepper" },
+            createElement("span", { className: step === "profile" ? "active" : "" }, "Profile"),
+            createElement("span", { className: step === "password" ? "active" : "" }, "Password"),
+            invite?.password_2fa_required ? createElement("span", { className: step === "totp" ? "active" : "" }, "2FA") : null
+          ),
+          kv("Email", invite?.email),
+          kv("Global role", invite?.global_role),
+          kv("Expires at", invite?.expires_at),
+          step === "profile" ? createElement("section", { className: "form-section" },
+            input("display_name", displayName, setDisplayName),
+            profileError ? createElement("span", { className: "field-error" }, profileError) : null,
+            createElement("div", { className: "toolbar" },
+              createElement("button", { className: "primary", type: "button", disabled: Boolean(profileError), onClick: () => setStep("password") }, "Next")
+            )
+          ) : null,
+          step === "password" ? createElement("section", { className: "form-section" },
+            input("password", password, setPassword, "password"),
+            input("confirm_password", confirmPassword, setConfirmPassword, "password"),
+            passwordError ? createElement("span", { className: "field-error" }, passwordError) : null,
+            createElement("div", { className: "toolbar" },
+              createElement("button", { type: "button", onClick: () => setStep("profile") }, "Back"),
+              createElement("button", { className: "primary", disabled: Boolean(passwordError) }, invite?.password_2fa_required ? "Set up 2FA" : "Complete signup")
+            )
+          ) : null,
+          step === "totp" ? createElement("section", { className: "form-section" },
+            provisioning?.provisioning_uri ? createElement(QRCodeImage, { value: provisioning.provisioning_uri }) : null,
+            kv("Secret", provisioning?.secret),
+            input("totp_code", totp, setTotp),
+            createElement("div", { className: "toolbar" },
+              createElement("button", { type: "button", onClick: () => setStep("password") }, "Back"),
+              createElement("button", { className: "primary", disabled: !totp }, "Confirm")
+            )
+          ) : null,
+          error ? createElement("p", { className: "error" }, error) : null
+        )
+    )
+  );
+}
+
 function ToastStack(props: { notices: ToastNotice[]; onDismiss: (id: number) => void }) {
   return createElement(
     "div",
@@ -640,6 +738,7 @@ function Password2FASection(props: { session: Session; setNotice: (s: string) =>
     createElement("h2", null, "Password 2FA"),
     kv("Status", password2FAEnabled ? "enabled" : "not configured"),
     provisioning ? createElement("div", { className: "secret-once" },
+      provisioning.provisioning_uri ? createElement(QRCodeImage, { value: provisioning.provisioning_uri }) : null,
       kv("Issuer", provisioning.issuer),
       kv("Account", provisioning.account_label),
       kv("Secret", provisioning.secret),
@@ -1326,79 +1425,40 @@ function ApplicationCreatePage(props: PageProps) {
 }
 
 function UserCreatePage(props: PageProps) {
-  const [step, setStep] = useState(1);
-  const [result2FA, setResult2FA] = useState<any>(undefined);
-  const [body, setBody] = useState({
-    email: "",
-    display_name: "",
-    global_role: "user",
-	    status: "active",
-	    auth_method: "password",
-	    password: "",
-	    provision_password_2fa: true
-	  });
+  const [body, setBody] = useState({ email: "", global_role: "user" });
+  const [invite, setInvite] = useState<any>(undefined);
   if (!isAdmin(props.session)) return forbiddenPage("Users");
-  const identityError = required(body.email, "email") || required(body.display_name, "display_name") || validateField("email", body.email) || validateField("global_role", body.global_role) || validateField("status", body.status);
-	  const authError = body.auth_method === "password" ?
-	    (!body.password ? "password is required" : body.password.length < 12 ? "password must be at least 12 characters" : "") :
-	    "";
+  const formError = required(body.email, "email") || validateField("email", body.email) || validateField("global_role", body.global_role);
   const submit = async (e: Event) => {
     e.preventDefault();
-    if (identityError || authError) return props.setNotice(identityError || authError);
-    const payload = body.auth_method === "password" ? {
-      email: body.email,
-      display_name: body.display_name,
-      global_role: body.global_role,
-      status: body.status,
-      password: body.password,
-      provision_password_2fa: body.provision_password_2fa
-	    } : {
-	      email: body.email,
-	      display_name: body.display_name,
-	      global_role: body.global_role,
-	      status: body.status
-	    };
-    const result = await api<any>("/v1/users", props.session, { method: "POST", body: JSON.stringify(payload) });
+    if (formError) return props.setNotice(formError);
+    const result = await api<any>("/v1/users", props.session, { method: "POST", body: JSON.stringify(body) });
     props.setNotice(errorOrOK(result));
-    if (result.data?.password_2fa) {
-      setResult2FA(result.data.password_2fa);
-      setStep(3);
-    } else if (!result.error) props.navigate("/users");
+    if (result.data?.invite) setInvite(result.data.invite);
   };
-  if (step === 3) {
-    return createPage("User Created", "/users", props.navigate,
-      createElement("section", { className: "detail" },
-        createElement("h2", null, "Password 2FA"),
-        kv("Issuer", result2FA?.issuer),
-        kv("Account", result2FA?.account_label),
-        kv("Secret", result2FA?.secret),
-        kv("Provisioning URI", result2FA?.provisioning_uri),
-        createElement("div", { className: "toolbar" }, createElement("button", { className: "primary", onClick: () => props.navigate("/users") }, "Back to Users"))
+  const copyInvite = async () => {
+    if (!invite?.invite_url) return;
+    await navigator.clipboard.writeText(invite.invite_url);
+    props.setNotice("copied");
+  };
+  return createPage("Invite User", "/users", props.navigate,
+    invite ? createElement("section", { className: "detail secret-once" },
+      createElement("h2", null, "Invite Link"),
+      kv("Email", invite.email),
+      kv("Global role", invite.global_role),
+      kv("Expires at", invite.expires_at),
+      kv("Invite URL", invite.invite_url),
+      createElement("div", { className: "toolbar" },
+        createElement("button", { className: "primary", type: "button", onClick: copyInvite }, createElement(Copy, { size: 16 }), "Copy"),
+        createElement("button", { type: "button", onClick: () => props.navigate("/users") }, "Back to Users")
       )
-    );
-  }
-  return createPage("Create User", "/users", props.navigate,
+    ) : null,
     createElement("form", { className: "create-form", onSubmit: submit },
-      createElement("div", { className: "stepper" }, createElement("span", { className: step === 1 ? "active" : "" }, "Identity"), createElement("span", { className: step === 2 ? "active" : "" }, "Authentication")),
-      step === 1 ? createElement("section", { className: "form-section" },
+      createElement("section", { className: "form-section" },
         input("email", body.email, (v) => setBody({ ...body, email: v }), "email"),
-        input("display_name", body.display_name, (v) => setBody({ ...body, display_name: v })),
         selectInput("global_role", body.global_role, (v) => setBody({ ...body, global_role: v }), [["user", "User"], ["admin", "Admin"]]),
-        selectInput("status", body.status, (v) => setBody({ ...body, status: v }), statusOptions()),
-        identityError ? createElement("span", { className: "field-error" }, identityError) : null,
-        createElement("div", { className: "toolbar" },
-          createElement("button", { type: "button", onClick: () => props.navigate("/users") }, "Cancel"),
-          createElement("button", { className: "primary", type: "button", disabled: Boolean(identityError), onClick: () => setStep(2) }, "Next")
-        )
-      ) : createElement("section", { className: "form-section" },
-	        selectInput("auth_method", body.auth_method, (v) => setBody({ ...body, auth_method: v }), [["password", "Password"], ["oidc", "OIDC"]]),
-	        body.auth_method === "password" ? input("password", body.password, (v) => setBody({ ...body, password: v }), "password") : null,
-	        body.auth_method === "password" ? checkboxInput("provision_password_2fa", body.provision_password_2fa, (v) => setBody({ ...body, provision_password_2fa: v })) : null,
-	        authError ? createElement("span", { className: "field-error" }, authError) : null,
-        createElement("div", { className: "toolbar" },
-          createElement("button", { type: "button", onClick: () => setStep(1) }, "Back"),
-          createElement("button", { className: "primary", disabled: Boolean(authError) }, "Create")
-        )
+        formError ? createElement("span", { className: "field-error" }, formError) : null,
+        formActions("Create Invite", "/users", props.navigate)
       )
     )
   );
@@ -1807,6 +1867,27 @@ function rowAction(label: string, onClick: () => void, options: { icon?: any; da
 
 function input(label: string, value: string, onChange: (v: string) => void, type = "text") {
   return createElement("label", null, createElement("span", null, label), createElement("input", { value, type, onChange: (e: Event) => onChange((e.target as HTMLInputElement).value), autoComplete: "off" }));
+}
+
+function QRCodeImage(props: { value: string }) {
+  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    let canceled = false;
+    if (!canvas) return () => {
+      canceled = true;
+    };
+    QRCode.toCanvas(canvas, props.value, { margin: 1, width: 192, errorCorrectionLevel: "M" })
+      .catch(() => {
+        if (!canceled) {
+          const ctx = canvas.getContext("2d");
+          ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      })
+    return () => {
+      canceled = true;
+    };
+  }, [props.value, canvas]);
+  return createElement("canvas", { ref: setCanvas, className: "qr-code", width: 192, height: 192, role: "img", "aria-label": "Authenticator QR code" });
 }
 
 function selectInput(label: string, value: string, onChange: (v: string) => void, options: string[][]) {

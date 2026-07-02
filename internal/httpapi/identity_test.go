@@ -337,7 +337,8 @@ func (f *identityFakeAuthRepo) ConsumeOIDCHandoff(context.Context, string) (auth
 }
 
 type identityFakeUserRepo struct {
-	user userdomain.User
+	user   userdomain.User
+	invite userdomain.UserInvite
 }
 
 func (f *identityFakeUserRepo) Get(context.Context, string) (userdomain.User, error) {
@@ -370,6 +371,37 @@ func (f *identityFakeUserRepo) Count(context.Context, userdomain.ListUsersParams
 
 func (f *identityFakeUserRepo) Update(context.Context, string, userdomain.UpdateUserParams) (userdomain.User, error) {
 	return f.user, nil
+}
+
+func (f *identityFakeUserRepo) CreateInvite(_ context.Context, params userdomain.CreateUserInviteParams) (userdomain.UserInvite, error) {
+	return userdomain.UserInvite{
+		ID:              params.ID,
+		Email:           params.Email,
+		GlobalRole:      params.GlobalRole,
+		TokenHash:       params.TokenHash,
+		Status:          "active",
+		CreatedByUserID: params.CreatedByUserID,
+		ExpiresAt:       params.ExpiresAt,
+	}, nil
+}
+
+func (f *identityFakeUserRepo) LookupActiveInviteByEmail(context.Context, string) (userdomain.UserInvite, error) {
+	return userdomain.UserInvite{}, storage.ErrNoRows
+}
+
+func (f *identityFakeUserRepo) GetActiveInviteByTokenHash(context.Context, string) (userdomain.UserInvite, error) {
+	if f.invite.ID == "" {
+		return userdomain.UserInvite{}, storage.ErrNoRows
+	}
+	return f.invite, nil
+}
+
+func (f *identityFakeUserRepo) SetInvitePendingSignup(context.Context, userdomain.SetInvitePendingSignupParams) (userdomain.UserInvite, error) {
+	return f.invite, nil
+}
+
+func (f *identityFakeUserRepo) ConsumeInvite(context.Context, string, string) (userdomain.UserInvite, error) {
+	return f.invite, nil
 }
 
 type identityFakeAudit struct{}
