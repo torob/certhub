@@ -47,7 +47,7 @@ const ServerHelp = `certhub-server is the Certhub backend server command.
 Usage:
   certhub-server help
   certhub-server --help
-  certhub-server run --config <path>
+  certhub-server run [--migrate] --config <path>
   certhub-server migrate --config <path>
   certhub-server generate-encryption-key
   certhub-server bootstrap ...
@@ -123,12 +123,13 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
 	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	applyMigrations := fs.Bool("migrate", false, "apply pending database migrations before starting")
 	help := fs.Bool("help", false, "show help")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server run --config <path>")
+		fmt.Fprintln(r.Stdout, "Usage: certhub-server run [--migrate] --config <path>")
 		return 0
 	}
 	if fs.NArg() != 0 {
@@ -145,7 +146,11 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "tls validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
 	}
-	resources, err := openRuntimeResources(ctx, cfg, tlsLoader)
+	migrationMode := runtimeMigrationsCheckOnly
+	if *applyMigrations {
+		migrationMode = runtimeMigrationsApply
+	}
+	resources, err := openRuntimeResources(ctx, cfg, tlsLoader, migrationMode)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "server readiness failed: %s\n", security.RedactString(err.Error()))
 		return 1
@@ -432,7 +437,7 @@ func (r ServerRunner) migrate(args []string) int {
 	if err != nil {
 		return r.reportMigrationFailure(*jsonOut, "config validation failed", "config_invalid", err)
 	}
-	resources, err := openRuntimeResources(context.Background(), cfg, nil)
+	resources, err := openRuntimeResources(context.Background(), cfg, nil, runtimeMigrationsApply)
 	if err != nil {
 		return r.reportMigrationFailure(*jsonOut, "migration failed", "migration_failed", err)
 	}
@@ -1022,7 +1027,7 @@ func (r ServerRunner) openBootstrapServices(ctx context.Context, configPath stri
 	if err != nil {
 		return nil, err
 	}
-	resources, err := openRuntimeResources(ctx, cfg, nil)
+	resources, err := openRuntimeResources(ctx, cfg, nil, runtimeMigrationsApply)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,7 +1089,22 @@ type runtimeResources struct {
 	cfg             *config.Config
 }
 
-func openRuntimeResources(ctx context.Context, cfg *config.Config, tlsLoader *config.TLSCertificateLoader) (*runtimeResources, error) {
+type runtimeMigrationMode int
+
+const (
+	runtimeMigrationsCheckOnly runtimeMigrationMode = iota
+	runtimeMigrationsApply
+)
+
+type migrationPendingError struct {
+	Status migrations.Status
+}
+
+func (e migrationPendingError) Error() string {
+	return fmt.Sprintf("database migrations are pending: current_version=%d latest_version=%d pending=%d; run certhub-server migrate or start with certhub-server run --migrate", e.Status.CurrentVersion, e.Status.LatestVersion, e.Status.Pending)
+}
+
+func openRuntimeResources(ctx context.Context, cfg *config.Config, tlsLoader *config.TLSCertificateLoader, migrationMode runtimeMigrationMode) (*runtimeResources, error) {
 	keySet, err := security.NewKeySetFromBase64(string(cfg.Encryption.Key))
 	if err != nil {
 		return nil, fmt.Errorf("encryption key is unavailable")
@@ -1106,7 +1126,7 @@ func openRuntimeResources(ctx context.Context, cfg *config.Config, tlsLoader *co
 		return nil, err
 	}
 	runner := migrations.NewRunner(migrations.DefaultDir)
-	status, err := runner.Up(checkCtx, migrationDB)
+	status, err := runRuntimeMigrations(checkCtx, runner, migrationDB, migrationMode)
 	if err != nil {
 		_ = migrationDB.Close()
 		pool.Close()
@@ -1118,6 +1138,24 @@ func openRuntimeResources(ctx context.Context, cfg *config.Config, tlsLoader *co
 		return nil, migrations.IncompatibleError{Status: status}
 	}
 	return &runtimeResources{Storage: pool, MigrationDB: migrationDB, Migrations: runner, TLSLoader: tlsLoader, KeySet: keySet, cfg: cfg}, nil
+}
+
+func runRuntimeMigrations(ctx context.Context, runner migrations.Runner, db *sql.DB, mode runtimeMigrationMode) (migrations.Status, error) {
+	switch mode {
+	case runtimeMigrationsApply:
+		return runner.Up(ctx, db)
+	case runtimeMigrationsCheckOnly:
+		status, err := runner.Status(ctx, db)
+		if err != nil {
+			return migrations.Status{}, err
+		}
+		if status.CurrentVersion < status.LatestVersion {
+			return status, migrationPendingError{Status: status}
+		}
+		return status, nil
+	default:
+		return migrations.Status{}, errors.New("invalid runtime migration mode")
+	}
 }
 
 func (r *runtimeResources) Close() {

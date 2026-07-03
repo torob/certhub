@@ -59,7 +59,7 @@ Certhub has two configuration layers:
 - Process configuration: deployment-time settings loaded before the backend starts.
 - Operational configuration: database-backed settings managed by admin APIs, such as issuers, DNS providers, DNS zones, normal Applications, Users, grants, tokens, and domain scopes.
 
-Process configuration must be provided by a YAML config file in v1. The backend serving process is started only with `certhub-server run`. The run command accepts the config path with `certhub-server run --config <path>` and defaults to `/etc/certhub/server.yaml` when the flag is omitted. Environment variables must not override server process configuration values in v1, except for explicitly configured secret-value references described below. Certhub must validate process configuration at startup and fail fast when a required value is missing or malformed. Changing process configuration requires restarting the backend process.
+Process configuration must be provided by a YAML config file in v1. The backend serving process is started only with `certhub-server run`. The run command accepts the config path with `certhub-server run --config <path>` and defaults to `/etc/certhub/server.yaml` when the flag is omitted. Operators may pass `--migrate` to apply pending database migrations before the backend starts serving. Environment variables must not override server process configuration values in v1, except for explicitly configured secret-value references described below. Certhub must validate process configuration at startup and fail fast when a required value is missing or malformed. Changing process configuration requires restarting the backend process.
 
 Operational configuration is changed through the public admin APIs and persisted in the database. It must not be configured through the server YAML config file. Initial bootstrap uses direct database management commands under the `certhub-server` binary, not an unauthenticated HTTP API.
 
@@ -229,14 +229,14 @@ Description and notes:
 - Operators must start the server with `certhub-server run`, not bare `certhub-server`.
 - Bare `certhub-server` without a subcommand must not start listeners, workers, metrics, the web UI, or any database-mutating job. It should print command help and exit non-zero unless the user explicitly requested help with `--help` or `help`.
 - `run` loads and validates the YAML server config, opens PostgreSQL, starts required workers, serves backend APIs, serves embedded web UI assets, exposes health/readiness/metrics, and handles graceful shutdown.
-- `run` must run required migrations or fail closed on migration incompatibility before serving API traffic.
+- `run --migrate` must run required migrations before serving API traffic. Plain `run` must check migration status and fail closed before serving API traffic when migrations are pending or the database schema is incompatible with the binary.
 - `run` must acquire any process-level locks needed to prevent unsafe duplicate workers when multiple server replicas are not supported by a specific worker type.
 - `run` must use the same service-layer functions as workers and HTTP handlers.
 
 Example:
 
 ```bash
-certhub-server run --config /etc/certhub/server.yaml
+certhub-server run [--migrate] --config /etc/certhub/server.yaml
 ```
 
 #### `certhub-server generate-encryption-key`
@@ -4056,6 +4056,7 @@ Required backend scenarios:
 - PostgreSQL migrations are idempotent and create required foreign keys, uniqueness constraints, and indexes.
 - Go enum/domain types reject invalid API values before database persistence.
 - `certhub-server run` loads server process configuration only from the YAML config file selected by `certhub-server run --config <path>` or the default `/etc/certhub/server.yaml`; environment variables do not override server config values except for explicitly configured `database.url_env`, `encryption.key_env`, and `outbound_http.proxies.<name>.url_env`.
+- `certhub-server run --migrate` applies pending migrations before starting HTTP listeners, while plain `certhub-server run` fails closed when migrations are pending.
 - Bare `certhub-server` without a subcommand prints help and does not start HTTP listeners, workers, metrics, web UI, migrations, or database-mutating jobs.
 - `certhub-server run` is the only command that starts the long-running backend serving process.
 - Backend startup rejects missing, unreadable, non-regular, symlinked, group/world-writable config files, and rejects config files under unsafe parent directories.

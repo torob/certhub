@@ -16,26 +16,12 @@ services:
       retries: 12
     restart: unless-stopped
 
-  migrate:
-    image: ghcr.io/torob/certhub-server:${CERTHUB_IMAGE_TAG:-0.1.0}
-    command: ["migrate", "--config", "/etc/certhub/server.yaml"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      CERTHUB_DATABASE_URL: postgres://certhub:${CERTHUB_POSTGRES_PASSWORD:?set CERTHUB_POSTGRES_PASSWORD in your env file}@postgres:5432/certhub?sslmode=disable
-      CERTHUB_ENCRYPTION_KEY: ${CERTHUB_ENCRYPTION_KEY:?set CERTHUB_ENCRYPTION_KEY in your env file}
-    volumes:
-      - ./server.yaml:/etc/certhub/server.yaml:ro
-    restart: "no"
-
   server:
     image: ghcr.io/torob/certhub-server:${CERTHUB_IMAGE_TAG:-0.1.0}
+    command: ["run", "--migrate", "--config", "/etc/certhub/server.yaml"]
     depends_on:
       postgres:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     environment:
       CERTHUB_DATABASE_URL: postgres://certhub:${CERTHUB_POSTGRES_PASSWORD:?set CERTHUB_POSTGRES_PASSWORD in your env file}@postgres:5432/certhub?sslmode=disable
       CERTHUB_ENCRYPTION_KEY: ${CERTHUB_ENCRYPTION_KEY:?set CERTHUB_ENCRYPTION_KEY in your env file}

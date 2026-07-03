@@ -215,7 +215,7 @@ Rules:
 - `deploy/docker/cli.Dockerfile` builds the CLI image used for one-shot sync or built-in scheduler mode in Docker Compose and other container runtimes.
 - Helm charts must support installing server and operator independently.
 - systemd units are examples for host-based server and long-running CLI sync deployments.
-- Server deployment manifests should mount or generate the YAML server config file and pass it to `certhub-server run --config <path>`.
+- Server deployment manifests should mount or generate the YAML server config file and pass it to `certhub-server run --config <path>`. Manifests that should apply migrations during startup must pass `--migrate` explicitly.
 - Deployment manifests should reference configuration through files, Kubernetes Secrets, Helm values, or component-specific environment variables where still allowed, not hard-coded credentials.
 
 ## Tests

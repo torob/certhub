@@ -54,7 +54,7 @@ fi
 export CERTHUB_TEST_DATABASE_URL="postgres://certhub:${password}@127.0.0.1:${port}/certhub?sslmode=disable"
 
 "$go_bin" test ./internal/migrations ./internal/storage ./internal/auth ./internal/commands \
-  -run 'Test(PostgresMigrationsApplyIdempotently|Milestone3RepositoriesWithPostgres|Milestone4RepositoriesWithPostgres|Milestone5CertificateLifecycleRepositoryWithPostgres|OIDCLoginFlowWithPostgresServiceTransactions|MigrateWithPostgresIntegration)$' \
+  -run 'Test(PostgresMigrationsApplyIdempotently|Milestone3RepositoriesWithPostgres|Milestone4RepositoriesWithPostgres|Milestone5CertificateLifecycleRepositoryWithPostgres|OIDCLoginFlowWithPostgresServiceTransactions|MigrateWithPostgresIntegration|RunMigrationModeWithPostgresIntegration)$' \
   -count=1 -v
 
 echo "PostgreSQL integration certification passed."

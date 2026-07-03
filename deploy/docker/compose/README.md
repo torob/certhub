@@ -1,8 +1,9 @@
 # Certhub server with Docker Compose
 
-This example starts PostgreSQL, runs Certhub migrations, and starts the
-Certhub server image. It can run in local HTTP mode or direct HTTPS mode with a
-server-managed Let's Encrypt certificate.
+This example starts PostgreSQL and starts the Certhub server image. The server
+command applies pending Certhub migrations before it starts serving HTTP. It can
+run in local HTTP mode or direct HTTPS mode with a server-managed Let's Encrypt
+certificate.
 
 The Compose file bind-mounts `server.yaml` directly into the scratch-based
 server image. Keep secrets in `.env` and reference them from `server.yaml` with
@@ -32,7 +33,7 @@ The web UI and API listen on `http://localhost:8080` by default.
 
 ## Bootstrap an admin
 
-After PostgreSQL and migrations are ready, create the first admin user:
+After PostgreSQL and Certhub are ready, create the first admin user:
 
 ```bash
 cd deploy/docker/compose
@@ -82,7 +83,7 @@ Run migrations:
 
 ```bash
 cd deploy/docker/compose
-docker compose --env-file .env run --rm migrate
+docker compose --env-file .env run --rm server migrate --config /etc/certhub/server.yaml
 ```
 
 Create the admin user if you have not already done so, then create the ACME
@@ -223,11 +224,12 @@ cd deploy/docker/compose
 docker compose --env-file .env up -d --force-recreate server
 ```
 
-Run migrations again when upgrading Certhub or applying a build that may include
-database migrations:
+Recreate the server when upgrading Certhub or applying a build that may include
+database migrations. The server applies pending migrations before it starts
+serving HTTP:
 
 ```bash
-docker compose --env-file .env run --rm migrate
+docker compose --env-file .env up -d --force-recreate server
 ```
 
 For deployments behind an external HTTPS reverse proxy, terminate TLS at the

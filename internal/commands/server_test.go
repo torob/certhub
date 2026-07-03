@@ -13,8 +13,10 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +150,20 @@ func TestMigrateJSONIncompatibleStatusReportsFailed(t *testing.T) {
 	}
 	if body["current_version"].(float64) != 99 || body["latest_version"].(float64) != 1 {
 		t.Fatalf("body = %#v", body)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunHelpIncludesMigrateFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"run", "--help"})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "run [--migrate] --config <path>") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q", stderr.String())
@@ -474,6 +490,60 @@ func TestMigrateWithPostgresIntegration(t *testing.T) {
 	}
 }
 
+func TestRunMigrationModeWithPostgresIntegration(t *testing.T) {
+	dbURL := os.Getenv("CERTHUB_TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("CERTHUB_TEST_DATABASE_URL is not set; skipping certhub-server run migration mode PostgreSQL smoke")
+	}
+	pendingDBURL := commandTestDatabaseURL(t, dbURL)
+	pendingConfigPath := writeCommandConfigWithDatabaseURL(t, pendingDBURL)
+
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"run", "--config", pendingConfigPath})
+	if code == 0 {
+		t.Fatalf("run unexpectedly succeeded without --migrate")
+	}
+	if !strings.Contains(stderr.String(), "database migrations are pending") || !strings.Contains(stderr.String(), "run --migrate") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	migratingDBURL := commandTestDatabaseURL(t, dbURL)
+	migratingConfigPath := writeCommandConfigWithDatabaseURL(t, migratingDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stdout.Reset()
+	stderr.Reset()
+	code = (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(ctx, []string{"run", "--migrate", "--config", migratingConfigPath})
+	if code != 0 {
+		t.Fatalf("run --migrate code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	db, err := migrations.OpenDB(migratingDBURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	status, err := migrations.NewRunner(migrations.DefaultDir).Status(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Compatible || status.Pending != 0 {
+		t.Fatalf("status = %#v", status)
+	}
+
+	currentConfigPath := writeCommandConfigWithDatabaseURL(t, migratingDBURL)
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stdout.Reset()
+	stderr.Reset()
+	code = (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(ctx, []string{"run", "--config", currentConfigPath})
+	if code != 0 {
+		t.Fatalf("run on current schema code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func writeCommandConfig(t *testing.T) string {
 	return writeCommandConfigWithDatabaseURL(t, "postgres://certhub:secret@127.0.0.1:1/certhub?sslmode=disable")
 }
@@ -494,6 +564,30 @@ func newCommandTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func commandTestDatabaseURL(t *testing.T, dbURL string) string {
+	t.Helper()
+	database := "command_test_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	db, err := migrations.OpenDB(dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), "create database "+database); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "drop database if exists "+database+" with (force)")
+		_ = db.Close()
+	})
+
+	parsed, err := neturl.Parse(dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Path = "/" + database
+	return parsed.String()
 }
 
 func writeCommandConfigInDir(t *testing.T, dir, dbURL, extra string) string {
