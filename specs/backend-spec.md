@@ -110,6 +110,10 @@ Configuration keys:
 | `acme.order_timeout_seconds` | No | integer | `600` | Timeout for one ACME order attempt. Must be positive. |
 | `dns.propagation_timeout_seconds` | No | integer | `120` | Maximum DNS propagation wait before an issuance attempt fails. Must be positive. |
 | `dns.propagation_poll_seconds` | No | integer | `5` | DNS propagation polling interval. Must be positive and lower than `dns.propagation_timeout_seconds`. |
+| `dns.propagation_resolvers.<provider_type>.type` | No | enum | `system` | DNS resolver used for propagation checks for `cloudflare` or `arvancloud`. One of `system`, `dns`, `doh`, `dot`. |
+| `dns.propagation_resolvers.<provider_type>.endpoint` | Required for `dns`, `doh`, `dot` | string | None | Resolver endpoint. `dns` and `dot` use `host:port`; `doh` uses an HTTPS URL. Must be empty for `system`. |
+| `dns.propagation_resolvers.<provider_type>.tls_server_name` | No | DNS name | Endpoint host | Optional TLS server name for `dot`. Must be empty for other resolver types. |
+| `dns.propagation_resolvers.<provider_type>.proxy` | No | machine_name or empty string | Empty | Named proxy used for `doh` and `dot` propagation checks. Empty means direct. Must be empty for `system` and `dns`. |
 | `outbound_http.proxies` | No | map | Empty | Named outbound HTTP proxies. Each map key must be `machine_name`; each value must set exactly one of `url` or `url_env`. |
 | `outbound_http.proxies.<name>.url` | Required unless `url_env` is set | `outbound_proxy_url` | None | Proxy URL for a named outbound proxy. Supports `http://` and `https://` schemes. |
 | `outbound_http.proxies.<name>.url_env` | Required unless `url` is set | env var name | None | Name of an environment variable containing the proxy URL for a named outbound proxy. |
@@ -162,6 +166,13 @@ acme:
 dns:
   propagation_timeout_seconds: 120
   propagation_poll_seconds: 5
+  propagation_resolvers:
+    cloudflare:
+      type: system
+    arvancloud:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query"
+      proxy: "corp_proxy"
 outbound_http:
   proxies:
     corp_proxy:
@@ -418,6 +429,7 @@ Scope:
 - ACME/Lets Encrypt requests use `outbound_http.acme.proxy`.
 - Cloudflare DNS API requests use `outbound_http.dns_providers.cloudflare.proxy`.
 - ArvanCloud DNS API requests use `outbound_http.dns_providers.arvancloud.proxy`.
+- DNS propagation checks may use `dns.propagation_resolvers.<provider_type>.proxy` when the resolver type is `doh` or `dot`.
 - OIDC discovery, metadata, token exchange, and userinfo requests use `outbound_http.oidc.proxy`.
 - Database connections, inbound HTTP serving, local filesystem reads/writes, and CLI/operator client traffic do not use these outbound HTTP proxy settings.
 - Direct database management commands use these outbound HTTP proxy settings only when they call configured upstreams, such as DNS provider zone refresh; their direct PostgreSQL connection never uses an HTTP proxy.
@@ -434,6 +446,37 @@ Rules:
 - Logs, metrics, audit metadata, readiness details, and public errors may include the selected proxy name and upstream class, but must not include proxy credentials or full proxy URLs.
 - Proxy connection, authentication, DNS, TLS, and CONNECT failures must surface as sanitized upstream dependency errors and must not leak proxy credentials or upstream request bodies.
 - Different upstream classes may intentionally use different proxies or direct connections. For example, ACME and Cloudflare can use `corp_proxy` while ArvanCloud uses direct egress by setting `outbound_http.dns_providers.arvancloud.proxy` to an empty string.
+
+DNS propagation resolver examples:
+
+```yaml
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: system
+    arvancloud:
+      type: dns
+      endpoint: "1.1.1.1:53"
+```
+
+```yaml
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query"
+      proxy: "corp_proxy"
+```
+
+```yaml
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dot
+      endpoint: "1.1.1.1:853"
+      tls_server_name: "cloudflare-dns.com"
+      proxy: "corp_proxy"
+```
 
 ### Embedded Web UI Serving
 
@@ -3079,7 +3122,7 @@ Worker rules:
 13. One certificate order may use multiple DNS provider zones, provider accounts, or DNS provider implementations when SANs span zones. For example, a single Certificate may include one SAN whose authorization is presented through Cloudflare and another SAN whose authorization is presented through ArvanCloud. Every required authorization must have exactly one matching active zone, otherwise issuance fails with `dns_provider_not_found`.
 14. lego calls each selected DNS provider `Present` to create the required `_acme-challenge` TXT records through Cloudflare or ArvanCloud.
 15. Certhub must durably track each presented challenge record name, DNS provider, provider zone, and exact TXT value before validation is attempted.
-16. Issuer worker waits for DNS propagation and asks Let's Encrypt to validate.
+16. Issuer worker waits for DNS propagation with the resolver configured for the selected DNS provider type, records resolver metadata and sanitized lookup failures in CertificateVersion events, and then asks Let's Encrypt to validate.
 17. Issuer worker finalizes the order and stores certificate material, including `material_etag`, in a new CertificateVersion.
 18. Issuer worker deletes DNS challenge records through lego `CleanUp` for each provider/zone used. Cleanup must remove only the exact TXT values Certhub presented for this order and must preserve unrelated `_acme-challenge` values.
 19. Certificate status becomes `ready`.

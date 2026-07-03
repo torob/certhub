@@ -210,6 +210,136 @@ dns:
 	}
 }
 
+func TestLoadDNSPropagationResolverDefaults(t *testing.T) {
+	cfg, err := Load([]byte(validYAML()), "/safe/server.yaml", LoadOptions{Env: env(map[string]string{
+		"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
+		"CERTHUB_ENCRYPTION_KEY": validKey(),
+	})})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	for _, providerType := range []string{"cloudflare", "arvancloud"} {
+		if cfg.DNS.PropagationResolvers[providerType].Type != "system" {
+			t.Fatalf("%s resolver = %+v", providerType, cfg.DNS.PropagationResolvers[providerType])
+		}
+	}
+}
+
+func TestLoadDNSPropagationResolverExamples(t *testing.T) {
+	input := validYAML() + `
+outbound_http:
+  proxies:
+    corp_proxy:
+      url: "http://proxy.example.com:8080"
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query"
+      proxy: "corp_proxy"
+    arvancloud:
+      type: dot
+      endpoint: "1.1.1.1:853"
+      tls_server_name: "cloudflare-dns.com"
+      proxy: "corp_proxy"
+`
+	cfg, err := Load([]byte(input), "/safe/server.yaml", LoadOptions{Env: env(map[string]string{
+		"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
+		"CERTHUB_ENCRYPTION_KEY": validKey(),
+	})})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.DNS.PropagationResolvers["cloudflare"]; got.Type != "doh" || got.Endpoint != "https://cloudflare-dns.com/dns-query" || got.Proxy != "corp_proxy" {
+		t.Fatalf("cloudflare resolver = %+v", got)
+	}
+	if got := cfg.DNS.PropagationResolvers["arvancloud"]; got.Type != "dot" || got.Endpoint != "1.1.1.1:853" || got.TLSServerName != "cloudflare-dns.com" || got.Proxy != "corp_proxy" {
+		t.Fatalf("arvancloud resolver = %+v", got)
+	}
+
+	regularDNS := validYAML() + `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dns
+      endpoint: "1.1.1.1:53"
+`
+	cfg, err = Load([]byte(regularDNS), "/safe/server.yaml", LoadOptions{Env: env(map[string]string{
+		"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
+		"CERTHUB_ENCRYPTION_KEY": validKey(),
+	})})
+	if err != nil {
+		t.Fatalf("Load(regular dns) error = %v", err)
+	}
+	if got := cfg.DNS.PropagationResolvers["cloudflare"]; got.Type != "dns" || got.Endpoint != "1.1.1.1:53" {
+		t.Fatalf("regular dns resolver = %+v", got)
+	}
+}
+
+func TestLoadRejectsInvalidDNSPropagationResolvers(t *testing.T) {
+	tests := map[string]string{
+		"unknown_type": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: bogus
+`,
+		"unknown_provider": `
+dns:
+  propagation_resolvers:
+    route53:
+      type: system
+`,
+		"missing_endpoint": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+`,
+		"dns_proxy": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dns
+      endpoint: "1.1.1.1:53"
+      proxy: "corp_proxy"
+`,
+		"unknown_proxy": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query"
+      proxy: "corp_proxy"
+`,
+		"doh_query": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query?name=example.com"
+`,
+		"bad_port": `
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dot
+      endpoint: "1.1.1.1:0"
+`,
+	}
+	for name, extra := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load([]byte(validYAML()+extra), "/safe/server.yaml", LoadOptions{Env: env(map[string]string{
+				"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
+				"CERTHUB_ENCRYPTION_KEY": validKey(),
+			})})
+			if err == nil || !strings.Contains(err.Error(), "dns.propagation_resolvers") {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadValidatesHTTPSURLs(t *testing.T) {
 	tests := map[string]string{
 		"credentials": `

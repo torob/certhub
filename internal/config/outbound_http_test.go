@@ -47,6 +47,18 @@ func TestOutboundHTTPTransportUsesOnlyNamedProxy(t *testing.T) {
 	}
 }
 
+func TestOutboundProxyURLReturnsNamedProxy(t *testing.T) {
+	proxy, err := OutboundProxyURL(OutboundHTTPConfig{Proxies: map[string]ProxyConfig{
+		"corp_proxy": {URL: SecretString("http://proxy.example:8080")},
+	}}, "corp_proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.String() != "http://proxy.example:8080" {
+		t.Fatalf("proxy = %s", proxy)
+	}
+}
+
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

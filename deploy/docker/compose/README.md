@@ -129,6 +129,57 @@ docker compose --env-file .env run --rm server \
 For ArvanCloud, use `--type arvancloud` and credential JSON shaped like
 `{"api_key":"Apikey ..."}`.
 
+Certhub checks DNS-01 TXT propagation before asking the issuer to validate a
+challenge. By default, each provider type uses the system resolver:
+
+```yaml
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: system
+```
+
+To use a regular DNS resolver for all Cloudflare-backed challenges:
+
+```yaml
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dns
+      endpoint: "1.1.1.1:53"
+```
+
+To use DNS-over-HTTPS through a named proxy:
+
+```yaml
+outbound_http:
+  proxies:
+    corp_proxy:
+      url_env: "CERTHUB_CORP_PROXY_URL"
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: doh
+      endpoint: "https://cloudflare-dns.com/dns-query"
+      proxy: "corp_proxy"
+```
+
+To use DNS-over-TLS through a named proxy:
+
+```yaml
+outbound_http:
+  proxies:
+    corp_proxy:
+      url_env: "CERTHUB_CORP_PROXY_URL"
+dns:
+  propagation_resolvers:
+    cloudflare:
+      type: dot
+      endpoint: "1.1.1.1:853"
+      tls_server_name: "cloudflare-dns.com"
+      proxy: "corp_proxy"
+```
+
 Start the server in HTTPS mode:
 
 ```bash

@@ -99,6 +99,7 @@ type ACMEConfig struct {
 type DNSConfig struct {
 	PropagationTimeoutSeconds int
 	PropagationPollSeconds    int
+	PropagationResolvers      map[string]DNSPropagationResolverConfig
 }
 
 type OutboundHTTPConfig struct {
@@ -111,6 +112,13 @@ type OutboundHTTPConfig struct {
 
 type ProxyConfig struct {
 	URL SecretString
+}
+
+type DNSPropagationResolverConfig struct {
+	Type          string
+	Endpoint      string
+	TLSServerName string
+	Proxy         string
 }
 
 type AuthConfig struct {
@@ -211,8 +219,16 @@ type rawACME struct {
 }
 
 type rawDNS struct {
-	PropagationTimeoutSeconds *int `yaml:"propagation_timeout_seconds"`
-	PropagationPollSeconds    *int `yaml:"propagation_poll_seconds"`
+	PropagationTimeoutSeconds *int                                 `yaml:"propagation_timeout_seconds"`
+	PropagationPollSeconds    *int                                 `yaml:"propagation_poll_seconds"`
+	PropagationResolvers      map[string]rawDNSPropagationResolver `yaml:"propagation_resolvers"`
+}
+
+type rawDNSPropagationResolver struct {
+	Type          string `yaml:"type"`
+	Endpoint      string `yaml:"endpoint"`
+	TLSServerName string `yaml:"tls_server_name"`
+	Proxy         string `yaml:"proxy"`
 }
 
 type rawOutboundHTTP struct {
@@ -330,6 +346,10 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 		DNS: DNSConfig{
 			PropagationTimeoutSeconds: 120,
 			PropagationPollSeconds:    5,
+			PropagationResolvers: map[string]DNSPropagationResolverConfig{
+				"cloudflare": {Type: "system"},
+				"arvancloud": {Type: "system"},
+			},
 		},
 		OutboundHTTP: OutboundHTTPConfig{Proxies: map[string]ProxyConfig{}},
 		Auth: AuthConfig{
@@ -475,6 +495,19 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 			}
 		}
 	}
+	if raw.DNS.PropagationResolvers != nil {
+		for providerType, rawResolver := range raw.DNS.PropagationResolvers {
+			field := "dns.propagation_resolvers." + providerType
+			if !validDNSProviderType(providerType) {
+				return nil, fieldError(field, "must be one of cloudflare, arvancloud")
+			}
+			resolver, err := normalizeDNSPropagationResolver(field, rawResolver, cfg.OutboundHTTP.Proxies)
+			if err != nil {
+				return nil, err
+			}
+			cfg.DNS.PropagationResolvers[providerType] = resolver
+		}
+	}
 
 	if raw.Auth.Password.Enabled != nil {
 		cfg.Auth.Password.Enabled = *raw.Auth.Password.Enabled
@@ -596,6 +629,149 @@ func validateProxyURL(value string) error {
 		return errors.New("must not include a fragment")
 	}
 	return nil
+}
+
+func normalizeDNSPropagationResolver(field string, raw rawDNSPropagationResolver, proxies map[string]ProxyConfig) (DNSPropagationResolverConfig, error) {
+	resolverType := raw.Type
+	if resolverType == "" {
+		resolverType = "system"
+	}
+	out := DNSPropagationResolverConfig{
+		Type:          resolverType,
+		Endpoint:      strings.TrimSpace(raw.Endpoint),
+		TLSServerName: strings.TrimSpace(raw.TLSServerName),
+		Proxy:         raw.Proxy,
+	}
+	switch resolverType {
+	case "system":
+		if out.Endpoint != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".endpoint", "must be empty for system resolver")
+		}
+		if out.TLSServerName != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".tls_server_name", "must be empty for system resolver")
+		}
+		if out.Proxy != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".proxy", "must be empty for system resolver")
+		}
+	case "dns":
+		if err := validateDNSEndpoint(field+".endpoint", out.Endpoint); err != nil {
+			return DNSPropagationResolverConfig{}, err
+		}
+		if out.TLSServerName != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".tls_server_name", "must be empty for regular dns resolver")
+		}
+		if out.Proxy != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".proxy", "must be empty for regular dns resolver")
+		}
+	case "doh":
+		if err := validateDoHEndpoint(field+".endpoint", out.Endpoint); err != nil {
+			return DNSPropagationResolverConfig{}, err
+		}
+		if out.TLSServerName != "" {
+			return DNSPropagationResolverConfig{}, fieldError(field+".tls_server_name", "must be empty for doh resolver")
+		}
+		if err := validateOptionalProxyRef(field+".proxy", out.Proxy, proxies); err != nil {
+			return DNSPropagationResolverConfig{}, err
+		}
+	case "dot":
+		if err := validateDNSEndpoint(field+".endpoint", out.Endpoint); err != nil {
+			return DNSPropagationResolverConfig{}, err
+		}
+		if out.TLSServerName != "" {
+			if err := validateResolverTLSServerName(field+".tls_server_name", out.TLSServerName); err != nil {
+				return DNSPropagationResolverConfig{}, err
+			}
+		}
+		if err := validateOptionalProxyRef(field+".proxy", out.Proxy, proxies); err != nil {
+			return DNSPropagationResolverConfig{}, err
+		}
+	default:
+		return DNSPropagationResolverConfig{}, fieldError(field+".type", "must be one of system, dns, doh, dot")
+	}
+	return out, nil
+}
+
+func validateDNSEndpoint(field, value string) error {
+	if value == "" {
+		return fieldError(field, "is required")
+	}
+	if len(value) > 255 || strings.ContainsAny(value, " \t\r\n") {
+		return fieldError(field, "must be host:port")
+	}
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host == "" || port == "" {
+		return fieldError(field, "must be host:port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fieldError(field, "port must be numeric")
+	}
+	if err := validateResolverHost(field, host); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDoHEndpoint(field, value string) error {
+	if value == "" {
+		return fieldError(field, "is required")
+	}
+	if err := validateHTTPSURLField(field, value); err != nil {
+		return err
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.RawQuery != "" || u.ForceQuery {
+		return fieldError(field, "must not include a query")
+	}
+	return nil
+}
+
+func validateResolverTLSServerName(field, value string) error {
+	if value == "" || strings.ContainsAny(value, " \t\r\n") || len(value) > 253 {
+		return fieldError(field, "must be a DNS name")
+	}
+	if net.ParseIP(value) != nil {
+		return nil
+	}
+	if _, err := normalizeHostname(value); err != nil {
+		return fieldError(field, err.Error())
+	}
+	return nil
+}
+
+func validateResolverHost(field, value string) error {
+	if value == "" {
+		return fieldError(field, "host is required")
+	}
+	if net.ParseIP(value) != nil {
+		return nil
+	}
+	if _, err := normalizeHostname(value); err != nil {
+		return fieldError(field, err.Error())
+	}
+	return nil
+}
+
+func validateOptionalProxyRef(field, value string, proxies map[string]ProxyConfig) error {
+	if value == "" {
+		return nil
+	}
+	if !machineNameRE.MatchString(value) {
+		return fieldError(field, "must be a machine_name")
+	}
+	if _, ok := proxies[value]; !ok {
+		return fieldError(field, "references an unknown proxy")
+	}
+	return nil
+}
+
+func validDNSProviderType(value string) bool {
+	switch value {
+	case "cloudflare", "arvancloud":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateHTTPSURLField(field, value string) error {
@@ -834,6 +1010,9 @@ func inspectNode(node *yaml.Node, path string) error {
 
 func stringField(path string) bool {
 	if strings.HasPrefix(path, "outbound_http.proxies.") && (strings.HasSuffix(path, ".url") || strings.HasSuffix(path, ".url_env")) {
+		return true
+	}
+	if strings.HasPrefix(path, "dns.propagation_resolvers.") && (strings.HasSuffix(path, ".type") || strings.HasSuffix(path, ".endpoint") || strings.HasSuffix(path, ".tls_server_name") || strings.HasSuffix(path, ".proxy")) {
 		return true
 	}
 	switch path {

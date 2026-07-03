@@ -196,6 +196,10 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_record_created")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_presented")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_propagated")
+	propagationMetadata := recordedEventMetadata(t, fixture.store.events, "dns_challenge_propagated")
+	if propagationMetadata["dns_propagation_resolver_type"] != "system" {
+		t.Fatalf("propagation resolver metadata = %#v", propagationMetadata)
+	}
 	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_challenge_accepted")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_cleanup_pending")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_finalized")
@@ -1039,6 +1043,22 @@ func assertRecordedIssuanceEvent(t *testing.T, events []certificates.RecordEvent
 		}
 	}
 	t.Fatalf("missing success event %q in %#v", eventType, events)
+}
+
+func recordedEventMetadata(t *testing.T, events []certificates.RecordEventParams, eventType string) map[string]any {
+	t.Helper()
+	for _, event := range events {
+		if event.EventType != eventType {
+			continue
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
+			t.Fatalf("metadata: %v", err)
+		}
+		return metadata
+	}
+	t.Fatalf("missing event %q in %#v", eventType, events)
+	return nil
 }
 
 func assertVersionOverlapFailure(t *testing.T, fixture issuanceWorkerFixture) {

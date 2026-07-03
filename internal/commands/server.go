@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/torob/certhub/internal/certificates"
 	"github.com/torob/certhub/internal/config"
 	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/dnspropagation"
 	"github.com/torob/certhub/internal/dnsproviders"
 	"github.com/torob/certhub/internal/httpapi"
 	"github.com/torob/certhub/internal/issuers"
@@ -215,6 +217,11 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 	})
 	cloudflareClient := dnsproviders.NewCloudflareClient(cloudflareHTTP)
 	arvanCloudClient := dnsproviders.NewArvanCloudClient(arvanHTTP)
+	propagationResolvers, err := buildPropagationResolvers(cfg)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "dns propagation resolver validation failed: %s\n", security.RedactString(err.Error()))
+		return 1
+	}
 	dnsService := dnsproviders.NewService(dnsproviders.ServiceConfig{
 		Repository:      dnsRepo,
 		AuditRepository: auditRepo,
@@ -285,20 +292,21 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 	}()
 	issuanceWorkers, err := workers.StartCertificateIssuanceWorkers(ctx, workers.CertificateIssuanceConfig{
 		Service: &workers.CertificateIssuanceService{
-			Certificates:       certRepo,
-			Issuers:            issuerRepo,
-			DNSProviders:       dnsRepo,
-			OrderManager:       acmedomain.NewOrderClient(acmeHTTP),
-			Cloudflare:         cloudflareClient,
-			ArvanCloud:         arvanCloudClient,
-			KeySet:             resources.KeySet,
-			LeaseDuration:      time.Duration(cfg.ACME.OrderTimeoutSeconds+cfg.DNS.PropagationTimeoutSeconds+300) * time.Second,
-			OrderTimeout:       time.Duration(cfg.ACME.OrderTimeoutSeconds) * time.Second,
-			PropagationTimeout: time.Duration(cfg.DNS.PropagationTimeoutSeconds) * time.Second,
-			PropagationPoll:    time.Duration(cfg.DNS.PropagationPollSeconds) * time.Second,
-			DNSChallengeTTL:    120,
-			MaxAttempts:        5,
-			RetryBackoff:       30 * time.Second,
+			Certificates:         certRepo,
+			Issuers:              issuerRepo,
+			DNSProviders:         dnsRepo,
+			OrderManager:         acmedomain.NewOrderClient(acmeHTTP),
+			Cloudflare:           cloudflareClient,
+			ArvanCloud:           arvanCloudClient,
+			KeySet:               resources.KeySet,
+			LeaseDuration:        time.Duration(cfg.ACME.OrderTimeoutSeconds+cfg.DNS.PropagationTimeoutSeconds+300) * time.Second,
+			OrderTimeout:         time.Duration(cfg.ACME.OrderTimeoutSeconds) * time.Second,
+			PropagationTimeout:   time.Duration(cfg.DNS.PropagationTimeoutSeconds) * time.Second,
+			PropagationPoll:      time.Duration(cfg.DNS.PropagationPollSeconds) * time.Second,
+			PropagationResolvers: propagationResolvers,
+			DNSChallengeTTL:      120,
+			MaxAttempts:          5,
+			RetryBackoff:         30 * time.Second,
 		},
 		Concurrency:  cfg.Workers.Concurrency,
 		PollInterval: 2 * time.Second,
@@ -367,6 +375,40 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "server failed: %v\n", err)
 		return 1
 	}
+}
+
+func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderType]workers.TXTVisibilityChecker, error) {
+	out := make(map[dnsproviders.ProviderType]workers.TXTVisibilityChecker, len(cfg.DNS.PropagationResolvers))
+	for providerType, resolverCfg := range cfg.DNS.PropagationResolvers {
+		var proxyURL *url.URL
+		var httpClient *http.Client
+		var err error
+		if resolverCfg.Proxy != "" {
+			proxyURL, err = config.OutboundProxyURL(cfg.OutboundHTTP, resolverCfg.Proxy)
+			if err != nil {
+				return nil, fmt.Errorf("%s propagation proxy: %w", providerType, err)
+			}
+		}
+		if resolverCfg.Type == dnspropagation.TypeDoH {
+			httpClient, err = config.NewOutboundHTTPClient(cfg.OutboundHTTP, resolverCfg.Proxy)
+			if err != nil {
+				return nil, fmt.Errorf("%s doh propagation client: %w", providerType, err)
+			}
+		}
+		checker, err := dnspropagation.NewChecker(dnspropagation.Config{
+			Type:          resolverCfg.Type,
+			Endpoint:      resolverCfg.Endpoint,
+			TLSServerName: resolverCfg.TLSServerName,
+			ProxyName:     resolverCfg.Proxy,
+			ProxyURL:      proxyURL,
+			HTTPClient:    httpClient,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%s propagation resolver: %w", providerType, err)
+		}
+		out[dnsproviders.ProviderType(providerType)] = checker
+	}
+	return out, nil
 }
 
 func (r ServerRunner) migrate(args []string) int {

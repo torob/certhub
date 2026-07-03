@@ -25,6 +25,7 @@ import (
 	acmedomain "github.com/torob/certhub/internal/acme"
 	"github.com/torob/certhub/internal/certificates"
 	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/internal/dnspropagation"
 	dnsdomain "github.com/torob/certhub/internal/dnsproviders"
 	issuerdomain "github.com/torob/certhub/internal/issuers"
 	"github.com/torob/certhub/internal/storage"
@@ -74,21 +75,27 @@ type IssuanceDNSStore interface {
 }
 
 type CertificateIssuanceService struct {
-	Certificates       CertificateIssuanceStore
-	Issuers            IssuanceIssuerStore
-	DNSProviders       IssuanceDNSStore
-	OrderManager       acmedomain.OrderManager
-	Cloudflare         dnsdomain.CloudflareChallengeOperator
-	ArvanCloud         dnsdomain.ArvanCloudChallengeOperator
-	KeySet             *security.KeySet
-	LeaseDuration      time.Duration
-	OrderTimeout       time.Duration
-	PropagationTimeout time.Duration
-	PropagationPoll    time.Duration
-	DNSChallengeTTL    int
-	TXTVisible         func(context.Context, string, string) (bool, error)
-	MaxAttempts        int
-	RetryBackoff       time.Duration
+	Certificates         CertificateIssuanceStore
+	Issuers              IssuanceIssuerStore
+	DNSProviders         IssuanceDNSStore
+	OrderManager         acmedomain.OrderManager
+	Cloudflare           dnsdomain.CloudflareChallengeOperator
+	ArvanCloud           dnsdomain.ArvanCloudChallengeOperator
+	KeySet               *security.KeySet
+	LeaseDuration        time.Duration
+	OrderTimeout         time.Duration
+	PropagationTimeout   time.Duration
+	PropagationPoll      time.Duration
+	DNSChallengeTTL      int
+	TXTVisible           func(context.Context, string, string) (bool, error)
+	PropagationResolvers map[dnsdomain.ProviderType]TXTVisibilityChecker
+	MaxAttempts          int
+	RetryBackoff         time.Duration
+}
+
+type TXTVisibilityChecker interface {
+	TXTVisible(context.Context, string, string) (bool, error)
+	Metadata() map[string]any
 }
 
 type CertificateIssuanceConfig struct {
@@ -626,11 +633,12 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_presented", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenges[i]))
 	}
 	for _, challenge := range challenges {
-		if err := s.waitForPropagation(ctx, challenge.op.RecordName, challenge.op.TXTValue); err != nil {
-			_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagation_failed", certificates.EventResultFailure, dnsChallengeEventMetadata(challenge))
+		checker := s.propagationChecker(challenge.provider.Type)
+		if err := s.waitForPropagation(ctx, challenge, checker); err != nil {
+			_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagation_failed", certificates.EventResultFailure, dnsChallengePropagationEventMetadata(challenge, checker, err))
 			return err
 		}
-		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagated", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
+		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagated", certificates.EventResultSuccess, dnsChallengePropagationEventMetadata(challenge, checker, nil))
 	}
 	for _, challenge := range challenges {
 		if err := s.OrderManager.AcceptChallenge(ctx, acmedomain.AcceptChallengeParams{
@@ -923,6 +931,19 @@ func dnsChallengeEventMetadata(challenge dnsAuthorizationChallenge) map[string]a
 	}
 }
 
+func dnsChallengePropagationEventMetadata(challenge dnsAuthorizationChallenge, checker TXTVisibilityChecker, err error) map[string]any {
+	metadata := dnsChallengeEventMetadata(challenge)
+	if checker != nil {
+		for key, value := range checker.Metadata() {
+			metadata[key] = value
+		}
+	}
+	for key, value := range issuanceFailureMetadata(err) {
+		metadata[key] = value
+	}
+	return metadata
+}
+
 func (s *CertificateIssuanceService) providerCredentials(ctx context.Context, provider dnsdomain.Provider) ([]byte, error) {
 	encrypted, err := s.DNSProviders.GetCredentialsEncrypted(ctx, provider.ID)
 	if err != nil {
@@ -973,7 +994,7 @@ func (s *CertificateIssuanceService) orderContext(ctx context.Context) (context.
 	return context.WithTimeout(ctx, timeout)
 }
 
-func (s *CertificateIssuanceService) waitForPropagation(ctx context.Context, recordName, txtValue string) error {
+func (s *CertificateIssuanceService) waitForPropagation(ctx context.Context, challenge dnsAuthorizationChallenge, checker TXTVisibilityChecker) error {
 	poll := s.PropagationPoll
 	timeout := s.PropagationTimeout
 	if poll <= 0 {
@@ -989,23 +1010,63 @@ func (s *CertificateIssuanceService) waitForPropagation(ctx context.Context, rec
 	defer deadline.Stop()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	var lastErr error
 	for {
-		visible := s.TXTVisible
-		if visible == nil {
-			visible = dnsTXTVisible
-		}
-		ok, err := visible(ctx, recordName, txtValue)
+		ok, err := checker.TXTVisible(ctx, challenge.op.RecordName, challenge.op.TXTValue)
 		if err == nil && ok {
 			return nil
+		}
+		if err != nil {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return issuanceFailure{code: "dns_propagation_timeout", err: errors.New("dns challenge TXT record did not propagate before timeout")}
+			message := "dns challenge TXT record did not propagate before timeout"
+			failureErr := errors.New(message)
+			metadata := map[string]any{}
+			if checker != nil {
+				for key, value := range checker.Metadata() {
+					metadata[key] = value
+				}
+			}
+			if lastErr != nil {
+				failureErr = fmt.Errorf("%s: last lookup error: %w", message, lastErr)
+				metadata["last_lookup_error"] = security.RedactValues(lastErr.Error(), challenge.op.TXTValue)
+			}
+			return issuanceFailure{code: "dns_propagation_timeout", err: failureErr, redactions: []string{challenge.op.TXTValue}, metadata: metadata}
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *CertificateIssuanceService) propagationChecker(providerType dnsdomain.ProviderType) TXTVisibilityChecker {
+	if s.PropagationResolvers != nil {
+		if checker := s.PropagationResolvers[providerType]; checker != nil {
+			return checker
+		}
+	}
+	if s.TXTVisible != nil {
+		return txtVisibleFunc{s.TXTVisible}
+	}
+	checker, err := dnspropagation.NewChecker(dnspropagation.Config{Type: dnspropagation.TypeSystem})
+	if err != nil {
+		return txtVisibleFunc{dnsTXTVisible}
+	}
+	return checker
+}
+
+type txtVisibleFunc struct {
+	fn func(context.Context, string, string) (bool, error)
+}
+
+func (f txtVisibleFunc) TXTVisible(ctx context.Context, recordName, txtValue string) (bool, error) {
+	return f.fn(ctx, recordName, txtValue)
+}
+
+func (f txtVisibleFunc) Metadata() map[string]any {
+	return map[string]any{"dns_propagation_resolver_type": "system"}
 }
 
 func (s *CertificateIssuanceService) dnsChallengeTTL() int {

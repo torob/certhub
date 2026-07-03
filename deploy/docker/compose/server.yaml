@@ -10,6 +10,14 @@ server:
   public_hostname: ""
 self_certificate:
   sync_enabled: false
+dns:
+  propagation_timeout_seconds: 120
+  propagation_poll_seconds: 5
+  propagation_resolvers:
+    cloudflare:
+      type: system
+    arvancloud:
+      type: system
 auth:
   password:
     enabled: true

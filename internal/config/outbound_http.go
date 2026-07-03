@@ -21,6 +21,15 @@ func NewOutboundHTTPTransport(cfg OutboundHTTPConfig, proxyName string) (*http.T
 	if proxyName == "" {
 		return transport, nil
 	}
+	proxyURL, err := OutboundProxyURL(cfg, proxyName)
+	if err != nil {
+		return nil, err
+	}
+	transport.Proxy = http.ProxyURL(proxyURL)
+	return transport, nil
+}
+
+func OutboundProxyURL(cfg OutboundHTTPConfig, proxyName string) (*url.URL, error) {
 	proxy, ok := cfg.Proxies[proxyName]
 	if !ok {
 		return nil, errors.New("outbound proxy is not configured")
@@ -29,6 +38,5 @@ func NewOutboundHTTPTransport(cfg OutboundHTTPConfig, proxyName string) (*http.T
 	if err != nil {
 		return nil, errors.New("outbound proxy is invalid")
 	}
-	transport.Proxy = http.ProxyURL(proxyURL)
-	return transport, nil
+	return proxyURL, nil
 }
