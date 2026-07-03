@@ -37,14 +37,29 @@ After PostgreSQL and Certhub are ready, create the first admin user:
 
 ```bash
 cd deploy/docker/compose
-printf '%s\n' 'change-this-admin-password' | \
-  docker compose --env-file .env run --rm -T server \
+docker compose --env-file .env run --rm server \
+  bootstrap create-admin \
+  --config /etc/certhub/server.yaml \
+  --email admin@example.com \
+  --display-name "Admin"
+```
+
+The command prompts for the admin password and confirmation. For automation, pass
+a password source explicitly, for example:
+
+```bash
+CERTHUB_BOOTSTRAP_ADMIN_PASSWORD='change-this-admin-password' \
+  docker compose --env-file .env run --rm -e CERTHUB_BOOTSTRAP_ADMIN_PASSWORD server \
     bootstrap create-admin \
     --config /etc/certhub/server.yaml \
     --email admin@example.com \
     --display-name "Admin" \
-    --password-stdin
+    --password-env CERTHUB_BOOTSTRAP_ADMIN_PASSWORD
 ```
+
+`--password-file`, `--password-stdin`, and `--password <value>` are also
+supported. Prefer env, file, or stdin for automation because command-line
+arguments can be visible through process listings and shell history.
 
 When `auth.password.2fa_required` is `true`, the command prints a terminal QR
 code and one-time TOTP provisioning URI for the admin account.

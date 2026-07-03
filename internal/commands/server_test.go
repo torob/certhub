@@ -212,6 +212,99 @@ func TestBootstrapCreateAdminIsNotScaffolded(t *testing.T) {
 	}
 }
 
+func TestBootstrapCreateAdminAcceptsPasswordSources(t *testing.T) {
+	dir := newCommandTempDir(t)
+	passwordPath := filepath.Join(dir, "admin-password")
+	if err := os.WriteFile(passwordPath, []byte("correct horse battery staple\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CERTHUB_BOOTSTRAP_ADMIN_PASSWORD", "correct horse battery staple")
+
+	tests := map[string][]string{
+		"flag": {"--password", "correct horse battery staple"},
+		"env":  {"--password-env", "CERTHUB_BOOTSTRAP_ADMIN_PASSWORD"},
+		"file": {"--password-file", passwordPath},
+	}
+	for name, passwordArgs := range tests {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			missingPath := filepath.Join(t.TempDir(), "missing.yaml")
+			args := []string{
+				"bootstrap", "create-admin",
+				"--config", missingPath,
+				"--email", "admin@example.com",
+				"--display-name", "Admin User",
+			}
+			args = append(args, passwordArgs...)
+			code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), args)
+			if code == 0 {
+				t.Fatalf("bootstrap unexpectedly succeeded")
+			}
+			if strings.Contains(stderr.String(), "flag provided but not defined") {
+				t.Fatalf("password source flag was rejected: %q", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "bootstrap failed") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestBootstrapCreateAdminRejectsMultiplePasswordSources(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdin: strings.NewReader("correct horse battery staple\n"), Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
+		"bootstrap", "create-admin",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--email", "admin@example.com",
+		"--display-name", "Admin User",
+		"--password", "correct horse battery staple",
+		"--password-stdin",
+	})
+	if code == 0 {
+		t.Fatalf("bootstrap unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "at most one password source") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "stat failed") {
+		t.Fatalf("command tried to open config before rejecting password sources: %q", stderr.String())
+	}
+}
+
+func TestBootstrapPasswordFileRequiresPrivateRegularFile(t *testing.T) {
+	dir := newCommandTempDir(t)
+	secretPath := filepath.Join(dir, "admin-password")
+	const canary = "ADMIN-PASSWORD-CANARY"
+	if err := os.WriteFile(secretPath, []byte(canary+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	password, err := (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", secretPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password == nil || *password != canary {
+		t.Fatalf("password was not read and trimmed: %v", password)
+	}
+	if err := os.Chmod(secretPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", secretPath, false)
+	if err == nil || !strings.Contains(err.Error(), "password file: unsafe permissions") {
+		t.Fatalf("broad password file error = %v", err)
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Fatalf("password error leaked secret: %v", err)
+	}
+	linkPath := filepath.Join(dir, "admin-password-link")
+	if err := os.Symlink(secretPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err = (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", linkPath, false)
+	if err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("symlink password file error = %v", err)
+	}
+}
+
 func TestBootstrapCreateAdminRejectsOIDCLinkFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{

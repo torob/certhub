@@ -517,27 +517,31 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
 	email := fs.String("email", "", "admin email")
 	displayName := fs.String("display-name", "", "admin display name")
+	passwordValue := fs.String("password", "", "admin password")
 	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
+	passwordEnv := fs.String("password-env", "", "environment variable containing admin password")
+	passwordFile := fs.String("password-file", "", "file containing admin password")
 	allowExistingAdmin := fs.Bool("allow-existing-admin", false, "allow creation when an active admin already exists")
 	interactive := fs.Bool("interactive", false, "run guided admin creation")
 	jsonOut := fs.Bool("json", false, "print JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	passwordFlagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "password" {
+			passwordFlagSet = true
+		}
+	})
 	if *interactive {
 		return r.bootstrapCreateAdminInteractive(*configPath, *allowExistingAdmin, *jsonOut)
 	}
 	if fs.NArg() != 0 || *email == "" || *displayName == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("email and display-name are required"))
 	}
-	var password *string
-	if *passwordStdin {
-		raw, err := io.ReadAll(r.Stdin)
-		if err != nil {
-			return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
-		}
-		value := strings.TrimRight(string(raw), "\r\n")
-		password = &value
+	password, err := r.readBootstrapAdminPassword(passwordFlagSet, *passwordValue, *passwordStdin, *passwordEnv, *passwordFile, *jsonOut)
+	if err != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), *configPath)
 	if err != nil {
@@ -563,6 +567,69 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 			r.writeTOTPProvisioning(result.Password2FA.ProvisioningURI)
 		}
 	})
+}
+
+func (r ServerRunner) readBootstrapAdminPassword(flagSet bool, flagValue string, stdin bool, envName, filePath string, jsonOut bool) (*string, error) {
+	selected := 0
+	if flagSet {
+		selected++
+	}
+	if stdin {
+		selected++
+	}
+	if envName != "" {
+		selected++
+	}
+	if filePath != "" {
+		selected++
+	}
+	if selected > 1 {
+		return nil, errors.New("at most one password source may be selected")
+	}
+	switch {
+	case flagSet:
+		return &flagValue, nil
+	case stdin:
+		raw, err := io.ReadAll(r.Stdin)
+		if err != nil {
+			return nil, err
+		}
+		value := strings.TrimRight(string(raw), "\r\n")
+		return &value, nil
+	case envName != "":
+		value, ok := os.LookupEnv(envName)
+		if !ok {
+			return nil, errors.New("password environment variable is unset")
+		}
+		value = strings.TrimRight(value, "\r\n")
+		return &value, nil
+	case filePath != "":
+		raw, err := readProtectedSecretFile("password file", filePath)
+		if err != nil {
+			return nil, err
+		}
+		value := strings.TrimRight(string(raw), "\r\n")
+		return &value, nil
+	default:
+		if jsonOut || !r.canPromptSecret() {
+			return nil, nil
+		}
+		password, err := r.promptSecret("Admin password [optional when OIDC is enabled]: ")
+		if err != nil {
+			return nil, err
+		}
+		confirm, err := r.promptSecret("Confirm admin password: ")
+		if err != nil {
+			return nil, err
+		}
+		if password != confirm {
+			return nil, errors.New("password confirmation does not match")
+		}
+		if password == "" {
+			return nil, nil
+		}
+		return &password, nil
+	}
 }
 
 func (r ServerRunner) bootstrapInteractive(args []string) int {
@@ -822,8 +889,17 @@ func (r ServerRunner) readBootstrapCredentials(stdin bool, envName, filePath str
 		}
 		return []byte(value), nil
 	default:
-		return readProtectedSecretFile(filePath)
+		return readProtectedSecretFile("credential file", filePath)
 	}
+}
+
+func (r ServerRunner) canPromptSecret() bool {
+	in, ok := r.Stdin.(*os.File)
+	if !ok || !isTerminal(in) {
+		return false
+	}
+	out, ok := r.Stdout.(*os.File)
+	return ok && isTerminal(out)
 }
 
 func (r ServerRunner) requireInteractiveTerminal() error {
@@ -929,37 +1005,37 @@ func setTerminalEcho(file *os.File, enabled bool) (func() error, error) {
 	}, nil
 }
 
-func readProtectedSecretFile(filePath string) ([]byte, error) {
+func readProtectedSecretFile(label, filePath string) ([]byte, error) {
 	abs, err := filepath.Abs(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("credential file: invalid path")
+		return nil, fmt.Errorf("%s: invalid path", label)
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
-		return nil, fmt.Errorf("credential file: stat failed")
+		return nil, fmt.Errorf("%s: stat failed", label)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("credential file: must be a regular non-symlink file")
+		return nil, fmt.Errorf("%s: must be a regular non-symlink file", label)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("credential file: unsafe permissions")
+		return nil, fmt.Errorf("%s: unsafe permissions", label)
 	}
-	if err := checkCommandFileOwner("credential file", info); err != nil {
+	if err := checkCommandFileOwner(label, info); err != nil {
 		return nil, err
 	}
 	dir := filepath.Dir(abs)
 	for {
 		dinfo, err := os.Lstat(dir)
 		if err != nil {
-			return nil, fmt.Errorf("credential file: parent directory stat failed")
+			return nil, fmt.Errorf("%s: parent directory stat failed", label)
 		}
 		if dinfo.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("credential file: parent directories must not be symlinks")
+			return nil, fmt.Errorf("%s: parent directories must not be symlinks", label)
 		}
 		if dinfo.Mode().Perm()&0o002 != 0 {
-			return nil, fmt.Errorf("credential file: parent directory is world-writable")
+			return nil, fmt.Errorf("%s: parent directory is world-writable", label)
 		}
-		if err := checkCommandFileOwner("credential file", dinfo); err != nil {
+		if err := checkCommandFileOwner(label, dinfo); err != nil {
 			return nil, err
 		}
 		parent := filepath.Dir(dir)
@@ -970,7 +1046,7 @@ func readProtectedSecretFile(filePath string) ([]byte, error) {
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		return nil, fmt.Errorf("credential file: read failed")
+		return nil, fmt.Errorf("%s: read failed", label)
 	}
 	return data, nil
 }

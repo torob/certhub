@@ -277,7 +277,7 @@ Description and notes:
 - They must use the same service-layer functions as HTTP handlers. Commands must not duplicate business rules, validation, authorization-sensitive invariants, audit construction, encryption, password hashing, ACME/DNS credential handling, or model persistence logic.
 - Commands run with internal system authority and must write audit events with `identity_type=system`, `identity_id=null`, and command metadata that identifies the command name without including secrets.
 - Commands must validate input with the same validators used by API handlers.
-- Secret inputs must not be accepted as positional arguments or ordinary command-line flags because process arguments are commonly visible through process listings and shell history. Secret inputs must come from stdin, an environment variable explicitly named by a flag, or a protected file whose safety checks match config-file secret handling.
+- Secret inputs must not be accepted as positional arguments or ordinary command-line flags because process arguments are commonly visible through process listings and shell history, except that `bootstrap create-admin --password <value>` is supported as an explicitly documented convenience path. Prefer stdin, an environment variable explicitly named by a flag, or a protected file whose safety checks match config-file secret handling.
 - Command output must be machine-readable when `--json` is set and human-readable otherwise. In both modes, output must not include secrets except for one-time bootstrap TOTP provisioning material explicitly documented below.
 
 Common flags:
@@ -292,7 +292,7 @@ Required bootstrap and management commands:
 ```text
 certhub-server migrate --config <path>
 certhub-server bootstrap --interactive --config <path>
-certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password-stdin] [--allow-existing-admin]
+certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password <value>|--password-stdin|--password-env <env>|--password-file <path>] [--allow-existing-admin]
 certhub-server bootstrap create-admin --interactive --config <path> [--allow-existing-admin]
 certhub-server bootstrap create-issuer --config <path> --name <machine_name> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
 certhub-server bootstrap create-dns-provider --config <path> --name <machine_name> --type <cloudflare|arvancloud> --zone-mode <auto|manual> [--credentials-stdin|--credentials-env <env>|--credentials-file <path>]
@@ -304,7 +304,7 @@ Command-specific rules:
 
 - `migrate` applies pending PostgreSQL migrations and exits. It is safe to run before other bootstrap commands. Other direct database commands may run migrations automatically before their own service call, but must use the same migration runner and locking.
 - `bootstrap create-admin` creates a global `admin` User. It must fail if any active global admin already exists unless `--allow-existing-admin` is set for explicit emergency recovery. Successful creation must write a `bootstrap_admin_created` audit event with `identity_type=system`.
-- `bootstrap create-admin` must support password auth or passwordless OIDC provisioning by verified email when OIDC is enabled. It must not accept OIDC issuer or subject from a human. If password is provided while `auth.password.2fa_required=true`, the command must generate and enable TOTP and print the provisioning URI exactly once.
+- `bootstrap create-admin` must support password auth or passwordless OIDC provisioning by verified email when OIDC is enabled. It must not accept OIDC issuer or subject from a human. It accepts at most one explicit password source from `--password`, `--password-stdin`, `--password-env`, or `--password-file`; when no explicit source is provided on a TTY human-output run, it prompts for password and confirmation. If password is provided while `auth.password.2fa_required=true`, the command must generate and enable TOTP and print the provisioning URI exactly once.
 - `bootstrap create-issuer` must call the same issuer creation/update service rules as the User-authenticated issuer management API, except that the actor is system command authority.
 - `bootstrap create-dns-provider` must call the same DNS provider creation service rules as the User-authenticated DNS provider management API. Provider credentials are write-only, validated against the provider-specific typed schema, encrypted before storage, and never printed.
 - `bootstrap add-dns-provider-zone` is for manual-zone bootstrap. It must call the same service rules as the DNS provider zone management API.
