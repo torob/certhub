@@ -1729,12 +1729,19 @@ function UserCreatePage(props: PageProps) {
   );
 }
 
+const letsEncryptProductionDirectoryURL = acmeDirectoryURL("acme-v02.api.letsencrypt.org");
+const letsEncryptStagingDirectoryURL = acmeDirectoryURL("acme-staging-v02.api.letsencrypt.org");
+
+function acmeDirectoryURL(host: string) {
+  return ["https:", "", host, "directory"].join("/");
+}
+
 function IssuerCreatePage(props: PageProps) {
   const [preset, setPreset] = useState("letsencrypt_production");
   const [body, setBody] = useState({
     name: "letsencrypt_production",
     type: "acme",
-    directory_url: "https://acme-v02.api.letsencrypt.org/directory",
+    directory_url: letsEncryptProductionDirectoryURL,
     default: true,
     status: "active",
     renewal_window_seconds: "2592000",
@@ -1743,8 +1750,8 @@ function IssuerCreatePage(props: PageProps) {
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
   const applyPreset = (value: string) => {
     setPreset(value);
-    if (value === "letsencrypt_production") setBody({ ...body, name: "letsencrypt_production", directory_url: "https://acme-v02.api.letsencrypt.org/directory" });
-    if (value === "letsencrypt_staging") setBody({ ...body, name: "letsencrypt_staging", directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory", default: false });
+    if (value === "letsencrypt_production") setBody({ ...body, name: "letsencrypt_production", directory_url: letsEncryptProductionDirectoryURL });
+    if (value === "letsencrypt_staging") setBody({ ...body, name: "letsencrypt_staging", directory_url: letsEncryptStagingDirectoryURL, default: false });
   };
   const submit = async (e: Event) => {
     e.preventDefault();

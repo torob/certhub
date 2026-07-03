@@ -11,12 +11,13 @@ const approvedRuntime = new Set([
   "@tanstack/react-query",
   "lucide-react",
   "openapi-fetch",
+  "qrcode",
   "react",
   "react-dom",
   "react-router",
   "zod"
 ]);
-const approvedBuild = new Set(["openapi-typescript", "typescript", "vite"]);
+const approvedBuild = new Set(["@types/qrcode", "openapi-typescript", "typescript", "vite"]);
 const reviewedNativeAllowlist = [
   {
     pattern: /^@rolldown\/binding-/,
