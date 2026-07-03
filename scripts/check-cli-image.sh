@@ -80,6 +80,12 @@ check_image() {
   done
 
   if [ "$name" = "server" ]; then
+    local env
+    env="$(docker image inspect --format '{{json .Config.Env}}' "$image")"
+    if ! grep -F '"CERTHUB_SERVER_CONFIG=/etc/certhub/server.yaml"' <<<"$env" >/dev/null; then
+      echo "$name image missing CERTHUB_SERVER_CONFIG default, got: $env" >&2
+      exit 1
+    fi
     if ! grep -Ex "var/lib/certhub/tls/?" "$files" >/dev/null; then
       echo "$name image missing required directory: var/lib/certhub/tls" >&2
       exit 1
@@ -105,7 +111,7 @@ check_image() {
   fi
 }
 
-check_image "server" "server.Dockerfile" "certhub-server" '["run","--config","/etc/certhub/server.yaml"]'
+check_image "server" "server.Dockerfile" "certhub-server" '["run"]'
 check_image "cli" "cli.Dockerfile" "certhub-cli" '["run","--config","/etc/certhub/cli.yaml"]'
 check_image "operator" "operator.Dockerfile" "certhub-operator" '["run"]'
 

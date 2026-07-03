@@ -56,12 +56,12 @@ while read -r module version; do
         failures+=("$module $version: MIT license evidence not found")
       fi
       ;;
-    github.com/sethvargo/go-retry)
+    github.com/sethvargo/go-retry|github.com/spf13/cobra)
       if ! grep -Rqs "Apache License" "$module_dir/LICENSE" "$module_dir/LICENSE"* 2>/dev/null; then
         failures+=("$module $version: Apache-2.0 license evidence not found")
       fi
       ;;
-    golang.org/x/crypto|golang.org/x/net|golang.org/x/sync|golang.org/x/sys|golang.org/x/term|golang.org/x/text)
+    github.com/spf13/pflag|golang.org/x/crypto|golang.org/x/net|golang.org/x/sync|golang.org/x/sys|golang.org/x/term|golang.org/x/text)
       if ! grep -Rqs "Redistribution and use in source and binary forms" "$module_dir/LICENSE" "$module_dir/LICENSE"* 2>/dev/null; then
         failures+=("$module $version: BSD-style license evidence not found")
       fi
