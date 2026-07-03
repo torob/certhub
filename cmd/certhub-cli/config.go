@@ -38,11 +38,12 @@ type Config struct {
 }
 
 type SyncConfig struct {
-	Wait         bool          `yaml:"wait"`
-	Timeout      time.Duration `yaml:"timeout"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	Force        bool          `yaml:"force"`
-	FailFast     bool          `yaml:"fail_fast"`
+	Wait                  bool          `yaml:"wait"`
+	PerCertificateTimeout time.Duration `yaml:"per_certificate_timeout"`
+	PollInterval          time.Duration `yaml:"poll_interval"`
+	RequestTimeout        time.Duration `yaml:"request_timeout"`
+	Force                 bool          `yaml:"force"`
+	FailFast              bool          `yaml:"fail_fast"`
 }
 
 type SchedulerConfig struct {
@@ -52,14 +53,14 @@ type SchedulerConfig struct {
 }
 
 type CertificateConfig struct {
-	Domains      []string      `yaml:"domains"`
-	KeyType      string        `yaml:"key_type"`
-	Issuer       string        `yaml:"issuer"`
-	OutDir       string        `yaml:"out_dir"`
-	Wait         *bool         `yaml:"wait"`
-	Timeout      time.Duration `yaml:"timeout"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	Force        *bool         `yaml:"force"`
+	Domains               []string      `yaml:"domains"`
+	KeyType               string        `yaml:"key_type"`
+	Issuer                string        `yaml:"issuer"`
+	OutDir                string        `yaml:"out_dir"`
+	Wait                  *bool         `yaml:"wait"`
+	PerCertificateTimeout time.Duration `yaml:"per_certificate_timeout"`
+	PollInterval          time.Duration `yaml:"poll_interval"`
+	Force                 *bool         `yaml:"force"`
 }
 
 type PlanItem struct {
@@ -159,11 +160,14 @@ func decodeConfig(data []byte) (Config, error) {
 }
 
 func defaultSync(cfg *Config) {
-	if cfg.Sync.Timeout == 0 {
-		cfg.Sync.Timeout = 5 * time.Minute
+	if cfg.Sync.PerCertificateTimeout == 0 {
+		cfg.Sync.PerCertificateTimeout = 5 * time.Minute
 	}
 	if cfg.Sync.PollInterval == 0 {
 		cfg.Sync.PollInterval = 10 * time.Second
+	}
+	if cfg.Sync.RequestTimeout == 0 {
+		cfg.Sync.RequestTimeout = 30 * time.Second
 	}
 }
 
@@ -205,16 +209,16 @@ func BuildPlan(cfg Config) ([]PlanItem, error) {
 		if entry.Force != nil {
 			force = *entry.Force
 		}
-		timeout := cfg.Sync.Timeout
-		if entry.Timeout > 0 {
-			timeout = entry.Timeout
+		timeout := cfg.Sync.PerCertificateTimeout
+		if entry.PerCertificateTimeout > 0 {
+			timeout = entry.PerCertificateTimeout
 		}
 		poll := cfg.Sync.PollInterval
 		if entry.PollInterval > 0 {
 			poll = entry.PollInterval
 		}
 		if timeout <= 0 || poll <= 0 {
-			return nil, fmt.Errorf("certificates[%d]: timeout and poll_interval must be positive", i)
+			return nil, fmt.Errorf("certificates[%d]: per_certificate_timeout and poll_interval must be positive", i)
 		}
 		plan = append(plan, PlanItem{
 			Criteria:     certhubclient.CertificateCriteria{Domains: normalized.Domains, KeyType: normalized.KeyType, Issuer: normalized.Issuer},

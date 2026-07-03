@@ -57,7 +57,7 @@ func TestRunOnceCreatesThenPollsAndWritesMaterial(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{URL: server.URL, Token: testAppToken, AllowPlainHTTPForLocalDev: true, Sync: SyncConfig{Timeout: 5 * time.Second, PollInterval: time.Millisecond}}
+	cfg := Config{URL: server.URL, Token: testAppToken, AllowPlainHTTPForLocalDev: true, Sync: SyncConfig{PerCertificateTimeout: 5 * time.Second, PollInterval: time.Millisecond}}
 	plan := []PlanItem{{Criteria: testCriteria(), OutDir: outDir, Wait: true, Timeout: 5 * time.Second, PollInterval: time.Millisecond}}
 	runner, err := NewSyncRunner(cfg, plan)
 	if err != nil {
@@ -112,7 +112,7 @@ func TestRunOnceNoContentLeavesCurrentUnchanged(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	cfg := Config{URL: server.URL, Token: testAppToken, AllowPlainHTTPForLocalDev: true, Sync: SyncConfig{Timeout: time.Second, PollInterval: time.Millisecond}}
+	cfg := Config{URL: server.URL, Token: testAppToken, AllowPlainHTTPForLocalDev: true, Sync: SyncConfig{PerCertificateTimeout: time.Second, PollInterval: time.Millisecond}}
 	runner, err := NewSyncRunner(cfg, []PlanItem{{Criteria: testCriteria(), OutDir: outDir, Timeout: time.Second, PollInterval: time.Millisecond}})
 	if err != nil {
 		t.Fatal(err)

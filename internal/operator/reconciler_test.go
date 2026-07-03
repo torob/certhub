@@ -403,6 +403,52 @@ func TestDeletePolicyRetainsUnownedSecret(t *testing.T) {
 	}
 }
 
+func TestBackendTransportOutagePreservesSecretThenRecovers(t *testing.T) {
+	kube := newFakeKube()
+	cert := testCertificate()
+	old := ownedSecret(cert, "old-etag")
+	old.Data["tls.crt"] = []byte("OLD-CERT")
+	kube.secrets["ns/gateway-tls"] = old
+	backend := &fakeBackend{
+		materials: []materialResponse{
+			{err: stderrors.New("dial tcp 127.0.0.1:443: connect: connection refused")},
+			{value: testMaterial("new-etag"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+		},
+	}
+	reconciler := testReconciler(kube, backend)
+
+	result, err := reconciler.Reconcile(context.Background(), cert)
+	if err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != reconciler.Backoff || result.Result != "backend_unavailable" || result.BackendCode != "transport" {
+		t.Fatalf("unexpected outage result: %#v", result)
+	}
+	if string(kube.secrets["ns/gateway-tls"].Data["tls.crt"]) != "OLD-CERT" {
+		t.Fatalf("existing secret changed during backend outage")
+	}
+	if cert.Status.Phase != PhasePending || !hasCondition(cert.Status, ConditionReady, ConditionFalse) {
+		t.Fatalf("unexpected transient status: %#v", cert.Status)
+	}
+
+	result, err = reconciler.Reconcile(context.Background(), cert)
+	if err != nil {
+		t.Fatalf("recovery reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != reconciler.ResyncInterval || result.Result != "synced" {
+		t.Fatalf("unexpected recovery result: %#v", result)
+	}
+	if string(kube.secrets["ns/gateway-tls"].Data["tls.crt"]) != "FULLCHAIN" {
+		t.Fatalf("secret was not updated after backend recovery")
+	}
+	if kube.secrets["ns/gateway-tls"].Metadata.Annotations[AnnotationMaterialETag] != "new-etag" {
+		t.Fatalf("new etag not stored: %#v", kube.secrets["ns/gateway-tls"].Metadata.Annotations)
+	}
+	if cert.Status.Phase != PhaseReady || !hasCondition(cert.Status, ConditionReady, ConditionTrue) {
+		t.Fatalf("unexpected recovered status: %#v", cert.Status)
+	}
+}
+
 func TestRetryAfterFromBackendError(t *testing.T) {
 	kube := newFakeKube()
 	backend := &fakeBackend{

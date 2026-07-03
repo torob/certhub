@@ -1,17 +1,25 @@
 package e2e
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const appToken = "cth_app_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+const cliExitTimeout = 8
 
 func TestCLISyncAgainstPublicHTTPBackendWritesMaterialAndRedactsOutput(t *testing.T) {
 	repoRoot := findRepoRoot(t)
@@ -71,7 +79,7 @@ func TestCLISyncAgainstPublicHTTPBackendWritesMaterialAndRedactsOutput(t *testin
 		"allow_plain_http_for_local_development: true\n" +
 		"sync:\n" +
 		"  wait: true\n" +
-		"  timeout: 2s\n" +
+		"  per_certificate_timeout: 2s\n" +
 		"  poll_interval: 10ms\n" +
 		"certificates:\n" +
 		"  - domains:\n" +
@@ -143,6 +151,245 @@ func TestCLISyncAgainstPublicHTTPBackendWritesMaterialAndRedactsOutput(t *testin
 	}
 	if secondSummary.Changed || secondSummary.Failed != 0 {
 		t.Fatalf("second summary = %+v", secondSummary)
+	}
+}
+
+func TestCLISchedulerSurvivesTemporaryBackendOutageAndRecovers(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	cliPath := filepath.Join(repoRoot, "dist", "bin", "certhub-cli")
+	if info, err := os.Stat(cliPath); err != nil || info.IsDir() {
+		t.Skipf("built CLI binary is required for scheduler outage E2E: %s", cliPath)
+	}
+
+	outDir := t.TempDir()
+	if err := os.Chmod(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var materialRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sync/certificates/tls-material" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+appToken {
+			t.Fatalf("unexpected Authorization header %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-ID", "req-scheduler-outage")
+		switch materialRequests.Add(1) {
+		case 1:
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","message":"backend upgrading","retryable":true,"retry_after_seconds":1,"details":{}}}`))
+		case 2:
+			_, _ = w.Write([]byte(materialResponseJSON()))
+		default:
+			w.Header().Set("ETag", `"cth-mat-v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	config := "url: " + server.URL + "\n" +
+		"allow_plain_http_for_local_development: true\n" +
+		"sync:\n" +
+		"  per_certificate_timeout: 1s\n" +
+		"  poll_interval: 10ms\n" +
+		"  request_timeout: 200ms\n" +
+		"scheduler:\n" +
+		"  interval: 50ms\n" +
+		"  jitter: 0s\n" +
+		"  run_on_start: true\n" +
+		"certificates:\n" +
+		"  - domains:\n" +
+		"      - api.example.com\n" +
+		"    out_dir: " + outDir + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(cliPath, "run", "--config", configPath, "--json")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "CERTHUB_TOKEN="+appToken)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+
+	lines := make(chan string, 8)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	var sawTransientFailure bool
+	var sawRecovery bool
+	for !sawRecovery {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatalf("CLI exited before recovery; stderr=%s", stderr.String())
+			}
+			if strings.Contains(line, `"failed":1`) && strings.Contains(line, `"exit_code":8`) {
+				sawTransientFailure = true
+			}
+			if strings.Contains(line, `"succeeded":1`) && strings.Contains(line, `"changed":true`) {
+				sawRecovery = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for scheduler recovery; requests=%d stderr=%s", materialRequests.Load(), stderr.String())
+		}
+	}
+	if !sawTransientFailure {
+		t.Fatalf("scheduler recovered without first reporting transient outage")
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("CLI did not stop cleanly after interrupt: %v stderr=%s", err, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for CLI interrupt shutdown")
+	}
+	key, err := os.ReadFile(filepath.Join(outDir, "current", "privkey.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(key), "M10_PRIVATE_KEY_CANARY") {
+		t.Fatalf("private key material was not written after recovery")
+	}
+}
+
+func TestCLIOnceTreatsConnectionRefusedAsTransientOutage(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	cliPath := filepath.Join(repoRoot, "dist", "bin", "certhub-cli")
+	if info, err := os.Stat(cliPath); err != nil || info.IsDir() {
+		t.Skipf("built CLI binary is required for connection-refused E2E: %s", cliPath)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runCLIOnceTransientOutageCase(t, cliPath, repoRoot, url, "200ms", cliExitTimeout)
+}
+
+func TestCLIOnceTreatsConnectionTimeoutAsTransientOutage(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	cliPath := filepath.Join(repoRoot, "dist", "bin", "certhub-cli")
+	if info, err := os.Stat(cliPath); err != nil || info.IsDir() {
+		t.Skipf("built CLI binary is required for timeout E2E: %s", cliPath)
+	}
+	url, cleanup := startBlackholeHTTPListener(t)
+	defer cleanup()
+
+	runCLIOnceTransientOutageCase(t, cliPath, repoRoot, url, "100ms", cliExitTimeout)
+}
+
+func startBlackholeHTTPListener(t *testing.T) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			close(done)
+			_ = listener.Close()
+		})
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				<-done
+			}(conn)
+		}
+	}()
+	return "http://" + listener.Addr().String(), cleanup
+}
+
+func runCLIOnceTransientOutageCase(t *testing.T, cliPath, repoRoot, url, requestTimeout string, wantExit int) {
+	t.Helper()
+	outDir := t.TempDir()
+	if err := os.Chmod(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "cli.yaml")
+	config := "url: " + url + "\n" +
+		"allow_plain_http_for_local_development: true\n" +
+		"sync:\n" +
+		"  per_certificate_timeout: 1s\n" +
+		"  poll_interval: 10ms\n" +
+		"  request_timeout: " + requestTimeout + "\n" +
+		"certificates:\n" +
+		"  - domains:\n" +
+		"      - api.example.com\n" +
+		"    out_dir: " + outDir + "\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(cliPath, "run", "--config", configPath, "--once", "--json")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "CERTHUB_TOKEN="+appToken)
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("certhub-cli error = %v, want exit error\n%s", err, output)
+	}
+	if exitErr.ExitCode() != wantExit {
+		t.Fatalf("exit code = %d, want %d\n%s", exitErr.ExitCode(), wantExit, output)
+	}
+	for _, canary := range []string{appToken, "M10_PRIVATE_KEY_CANARY", "-----BEGIN PRIVATE KEY-----"} {
+		if strings.Contains(string(output), canary) {
+			t.Fatalf("CLI output leaked canary %q: %s", canary, output)
+		}
+	}
+	var summary struct {
+		Failed  int `json:"failed"`
+		Results []struct {
+			ExitCode int    `json:"exit_code"`
+			Code     string `json:"error_code"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(output, &summary); err != nil {
+		t.Fatalf("decode CLI JSON summary: %v\n%s", err, output)
+	}
+	if summary.Failed != 1 || len(summary.Results) != 1 || summary.Results[0].ExitCode != wantExit || summary.Results[0].Code != "request_failed" {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "current")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("current material path exists after outage or unexpected stat error: %v", err)
 	}
 }
 

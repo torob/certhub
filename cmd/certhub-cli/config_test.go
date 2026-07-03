@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testAppToken = "cth_app_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -83,6 +84,9 @@ out_dir: /tmp/out
 	if cfg.Token != testAppToken {
 		t.Fatalf("token = %q; want env override", cfg.Token)
 	}
+	if cfg.Sync.RequestTimeout != 30*time.Second {
+		t.Fatalf("default request timeout = %s; want 30s", cfg.Sync.RequestTimeout)
+	}
 }
 
 func TestLoadConfigRejectsTokenBearingSymlink(t *testing.T) {
@@ -135,6 +139,29 @@ func TestBuildPlanRejectsMixedShapesAndNormalizes(t *testing.T) {
 	cfg.Domains = []string{"api.example.com"}
 	if _, err := BuildPlan(cfg); err == nil {
 		t.Fatalf("BuildPlan accepted mixed shorthand and certificates")
+	}
+}
+
+func TestLoadConfigAcceptsCustomRequestTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+url: https://certhub.example.com
+sync:
+  request_timeout: 2s
+domains:
+  - api.example.com
+out_dir: /tmp/out
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CERTHUB_TOKEN", testAppToken)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Sync.RequestTimeout != 2*time.Second {
+		t.Fatalf("request timeout = %s; want 2s", cfg.Sync.RequestTimeout)
 	}
 }
 

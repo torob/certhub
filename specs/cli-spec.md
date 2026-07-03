@@ -67,8 +67,9 @@ token: cth_app_v1_example_redacted
 allow_plain_http_for_local_development: false
 sync:
   wait: true
-  timeout: 5m
+  per_certificate_timeout: 5m
   poll_interval: 10s
+  request_timeout: 30s
   force: false
   fail_fast: false
 scheduler:
@@ -97,20 +98,22 @@ Rules:
 - Only `url` and `token` may be overridden by environment variables, using `CERTHUB_URL` and `CERTHUB_TOKEN`.
 - The config file does not support environment-variable interpolation. A literal value such as `${CERTHUB_TOKEN}` must be treated as an invalid token string, not expanded.
 - If `CERTHUB_TOKEN` is set, the config file may omit `token` or may contain a token that is overridden for that process. File-mode checks for stored tokens apply only when a raw token value is present in the file.
-- Domains, key type, issuer, output directories, wait behavior, timeout, poll interval, force behavior, fail-fast behavior, scheduler timing behavior, and `allow_plain_http_for_local_development` must come only from the config file.
+- Domains, key type, issuer, output directories, wait behavior, per-certificate timeout, poll interval, request timeout, force behavior, fail-fast behavior, scheduler timing behavior, and `allow_plain_http_for_local_development` must come only from the config file.
 - Command-line flags may only choose the config path, output format, quiet mode, and whether `run` executes one sync cycle with `--once`.
-- Command-line flags must not set or override certificate criteria, output directories, key type, issuer, wait behavior, timeout, poll interval, force behavior, fail-fast behavior, scheduler interval, scheduler jitter, scheduler run-on-start behavior, `allow_plain_http_for_local_development`, or which certificates are synced.
+- Command-line flags must not set or override certificate criteria, output directories, key type, issuer, wait behavior, per-certificate timeout, poll interval, request timeout, force behavior, fail-fast behavior, scheduler interval, scheduler jitter, scheduler run-on-start behavior, `allow_plain_http_for_local_development`, or which certificates are synced.
 - `allow_plain_http_for_local_development` defaults to `false`. When `false`, `url` must use `https://`. When `true`, `http://` is allowed only for local development.
 - `certificates` is the preferred config shape for multi-certificate sync.
 - Each configured certificate entry must have non-empty `domains` and `out_dir`.
 - Configured certificate entries do not have names in v1. `certhub-cli run` syncs every configured certificate entry during each sync cycle.
 - `key_type` and `issuer` are optional per certificate entry.
 - Top-level `sync` contains default sync behavior for every configured certificate.
+- `sync.per_certificate_timeout` defaults to `5m` and bounds each configured certificate entry's full sync workflow within a cycle.
+- `sync.request_timeout` defaults to `30s` and bounds each individual backend HTTP request attempt, including connection setup and response header wait.
 - Top-level `scheduler` contains scheduler behavior for `certhub-cli run` when `--once` is not set.
 - `scheduler.interval` is required for scheduler mode and must be positive. One-shot mode does not require a `scheduler` block.
 - `scheduler.jitter` is optional, defaults to `0`, and adds a random delay up to the configured duration before each scheduled cycle to avoid synchronized fleet traffic.
 - `scheduler.run_on_start` defaults to `true`. When `true`, the first sync cycle starts immediately after startup validation. When `false`, the first sync cycle starts after `scheduler.interval` plus optional jitter.
-- A certificate entry may override `wait`, `timeout`, `poll_interval`, and `force` for that entry.
+- A certificate entry may override `wait`, `per_certificate_timeout`, `poll_interval`, and `force` for that entry.
 - Top-level `domains`, `key_type`, `issuer`, and `out_dir` may be supported as a config-file-only single-certificate shorthand, but must not be mixed with `certificates`.
 
 ## Input Validation
@@ -179,7 +182,8 @@ Rules:
 - If the backend returns `409 certificate_no_active_version`, that item fails with code `7` and should tell the operator that User reissue is required.
 - If the backend returns `409 issuer_not_configured`, that item fails with code `1` and should tell the operator that issuer configuration is required.
 - The CLI must use backend `Retry-After` or `error.retry_after_seconds` before the configured `poll_interval`.
-- If timeout occurs, that item fails with code `8`.
+- If polling timeout or backend HTTP request timeout occurs, that item fails with code `8`.
+- Connection refused, connection timeout, DNS failure, connection reset, and other HTTP transport failures are treated as transient request failures and fail that item with code `8`.
 - By default, multi-certificate sync continues after an item fails so unrelated certificates can still update.
 - Configured `fail_fast=true` stops the run after the first item failure.
 - The process exit code is `0` only when every configured certificate entry succeeds. If any item fails, the process exits with the highest item exit code.
@@ -313,7 +317,7 @@ Mapping:
 - `certificate_not_ready`: `6` when not waiting.
 - `certificate_issuance_failed` and `certificate_no_active_version`: `7`. If present, include nested `failure_code` or no-active-version metadata in error output.
 - `issuer_not_configured`: `1`.
-- `service_unavailable`, `issuer_unavailable`, `dns_provider_unavailable`, `dns_zone_discovery_failed`, `rate_limited`, and polling timeout: `8`.
+- `service_unavailable`, `issuer_unavailable`, `dns_provider_unavailable`, `dns_zone_discovery_failed`, `rate_limited`, polling timeout, backend HTTP request timeout, and HTTP transport failures: `8`.
 - Local file write, permission, atomic rename, or metadata write failure: `9`.
 
 ## Polling Behavior
@@ -323,7 +327,8 @@ Polling is used only for configured certificate entries whose config has `wait=t
 Default:
 
 - Poll interval: backend `Retry-After` or `retry_after_seconds`, otherwise configured `poll_interval`.
-- Timeout: configured `timeout`, applied independently to each configured certificate entry.
+- Per-certificate timeout: configured `per_certificate_timeout`, applied independently to each configured certificate entry.
+- Request timeout: configured `sync.request_timeout`, applied independently to each backend HTTP request attempt.
 
 Per-certificate flow:
 
@@ -391,7 +396,7 @@ Required CLI scenarios:
 - CLI refuses to read a config file containing `token` when the file mode is broader than `0600`.
 - CLI refuses token-bearing config files reached through unsafe symlinks, owned by another user, or located under group/world-writable parent directories.
 - CLI rejects duplicate YAML keys that could shadow `token`, `out_dir`, `domains`, or sync behavior.
-- CLI rejects unsupported command-line flags that try to set certificate criteria, output directories, key type, issuer, wait behavior, timeout, poll interval, force behavior, fail-fast behavior, scheduler timing behavior, or `allow_plain_http_for_local_development`.
+- CLI rejects unsupported command-line flags that try to set certificate criteria, output directories, key type, issuer, wait behavior, per-certificate timeout, poll interval, request timeout, force behavior, fail-fast behavior, scheduler timing behavior, or `allow_plain_http_for_local_development`.
 - CLI accepts a config with multiple `certificates` entries and syncs all of them.
 - CLI does not support certificate selection flags; every configured certificate entry is synced.
 - CLI rejects configured certificate entries without `domains` or `out_dir`.
@@ -425,6 +430,8 @@ Required CLI scenarios:
 - `certificate_no_active_version` exits `7` and displays reissue guidance.
 - Retryable backend dependency errors and rate limits use backend retry hints.
 - Polling timeout exits `8`.
+- Backend HTTP request timeout and transport failures such as connection refused exit `8`.
+- Scheduler mode keeps running after transient backend HTTP failures and can sync successfully after the backend recovers.
 - In multi-certificate sync, one item failure does not prevent later items from syncing unless configured `fail_fast=true`.
 - In multi-certificate sync, any item failure makes the process exit non-zero with the highest item exit code.
 - Configured `fail_fast=true` stops after the first item failure.

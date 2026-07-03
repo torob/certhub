@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/torob/certhub/pkg/certhubclient"
@@ -53,7 +54,12 @@ type ItemResult struct {
 }
 
 func NewSyncRunner(cfg Config, plan []PlanItem) (*SyncRunner, error) {
-	client, err := certhubclient.New(cfg.URL, cfg.Token, certhubclient.WithUserAgent("certhub-cli"))
+	client, err := certhubclient.New(
+		cfg.URL,
+		cfg.Token,
+		certhubclient.WithUserAgent("certhub-cli"),
+		certhubclient.WithHTTPClient(&http.Client{Timeout: cfg.Sync.RequestTimeout}),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +122,7 @@ func (r *SyncRunner) syncOne(ctx context.Context, item PlanItem) ItemResult {
 		}
 		var apiErr *certerrors.APIError
 		if !stderrors.As(err, &apiErr) {
-			result.ExitCode = ExitGeneral
+			result.ExitCode = exitCodeForRequestError(err)
 			result.ErrorCode = "request_failed"
 			result.ErrorMessage = err.Error()
 			return result
@@ -176,6 +182,27 @@ func resultFromError(item PlanItem, err error, requestID string) ItemResult {
 	return result
 }
 
+func exitCodeForRequestError(err error) int {
+	if isTransientRequestError(err) {
+		return ExitTimeout
+	}
+	return ExitGeneral
+}
+
+func isTransientRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var urlErr *url.Error
+	if stderrors.As(err, &urlErr) {
+		return true
+	}
+	return false
+}
+
 func sleepForRetry(ctx context.Context, item PlanItem, apiErr *certerrors.APIError, deadline time.Time) bool {
 	delay := item.PollInterval
 	if seconds, ok := apiErr.RetryAfterSeconds(); ok {
@@ -208,7 +235,7 @@ func sleepUntilRetry(ctx context.Context, item PlanItem, delay time.Duration, de
 func exitCodeForError(err error) int {
 	var apiErr *certerrors.APIError
 	if !stderrors.As(err, &apiErr) {
-		return ExitGeneral
+		return exitCodeForRequestError(err)
 	}
 	switch apiErr.Envelope.Code {
 	case certerrors.CodeInvalidRequest, "invalid_domain", "not_acceptable":
