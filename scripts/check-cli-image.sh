@@ -79,6 +79,19 @@ check_image() {
     fi
   done
 
+  if [ "$name" = "server" ]; then
+    if ! grep -Ex "var/lib/certhub/tls/?" "$files" >/dev/null; then
+      echo "$name image missing required directory: var/lib/certhub/tls" >&2
+      exit 1
+    fi
+    local tls_meta
+    tls_meta="$(tar --numeric-owner -tvf "$rootfs" var/lib/certhub/tls 2>/dev/null | awk '{print $1 " " $2; exit}')"
+    if [ "$tls_meta" != "drwx------ 65532/65532" ]; then
+      echo "$name image TLS directory must be 65532:65532 mode 0700, got: $tls_meta" >&2
+      exit 1
+    fi
+  fi
+
   if grep -E '(^|/)(\.git|node_modules|coverage|\.cache|src|web|test)(/|$)|\.map$|(^|/)\.env$' "$files" >/dev/null; then
     echo "$name image contains forbidden source, cache, or development paths" >&2
     grep -E '(^|/)(\.git|node_modules|coverage|\.cache|src|web|test)(/|$)|\.map$|(^|/)\.env$' "$files" >&2 || true

@@ -439,7 +439,10 @@ func TestLoadFileSafety(t *testing.T) {
 	}
 
 	validPath := filepath.Join(privateRoot, "server.yaml")
-	if err := os.WriteFile(validPath, []byte(validYAML()), 0o600); err != nil {
+	if err := os.WriteFile(validPath, []byte(validYAML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(validPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadFile(validPath, LoadOptions{Env: env(map[string]string{
@@ -449,69 +452,26 @@ func TestLoadFileSafety(t *testing.T) {
 		t.Fatalf("LoadFile(valid) error = %v", err)
 	}
 
-	worldReadable := filepath.Join(privateRoot, "world.yaml")
-	if err := os.WriteFile(worldReadable, []byte(validYAML()), 0o604); err != nil {
+	groupWritable := filepath.Join(privateRoot, "group-writable.yaml")
+	if err := os.WriteFile(groupWritable, []byte(validYAML()), 0o660); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFile(worldReadable, LoadOptions{}); err == nil {
-		t.Fatalf("LoadFile(world-readable) succeeded")
+	if err := os.Chmod(groupWritable, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(groupWritable, LoadOptions{}); err == nil {
+		t.Fatalf("LoadFile(group-writable) succeeded")
 	}
 
-	groupReadableEnvOnly := filepath.Join(privateRoot, "group-env.yaml")
-	if err := os.WriteFile(groupReadableEnvOnly, []byte(validYAML()), 0o640); err != nil {
+	worldWritable := filepath.Join(privateRoot, "world-writable.yaml")
+	if err := os.WriteFile(worldWritable, []byte(validYAML()), 0o622); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(groupReadableEnvOnly, 0o640); err != nil {
+	if err := os.Chmod(worldWritable, 0o622); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFile(groupReadableEnvOnly, LoadOptions{Env: env(map[string]string{
-		"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
-		"CERTHUB_ENCRYPTION_KEY": validKey(),
-	})}); err != nil {
-		t.Fatalf("LoadFile(group-readable env-only) error = %v", err)
-	}
-
-	inlineSecretCases := map[string]string{
-		"database_url": `
-database:
-  url: "postgres://certhub:secret@db.example/certhub"
-encryption:
-  key_env: "CERTHUB_ENCRYPTION_KEY"
-http:
-  require_https: false
-`,
-		"encryption_key": `
-database:
-  url_env: "CERTHUB_DATABASE_URL"
-encryption:
-  key: "` + validKey() + `"
-http:
-  require_https: false
-`,
-		"proxy_url": validYAML() + `
-outbound_http:
-  proxies:
-    corp_proxy:
-      url: "http://user:password@proxy.example.com:8080"
-`,
-	}
-	for name, input := range inlineSecretCases {
-		t.Run("group_readable_inline_"+name, func(t *testing.T) {
-			path := filepath.Join(privateRoot, name+".yaml")
-			if err := os.WriteFile(path, []byte(input), 0o640); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path, 0o640); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadFile(path, LoadOptions{Env: env(map[string]string{
-				"CERTHUB_DATABASE_URL":   "postgres://certhub:secret@db.example/certhub",
-				"CERTHUB_ENCRYPTION_KEY": validKey(),
-			})})
-			if err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
-				t.Fatalf("LoadFile(group-readable inline secret) error = %v", err)
-			}
-		})
+	if _, err := LoadFile(worldWritable, LoadOptions{}); err == nil {
+		t.Fatalf("LoadFile(world-writable) succeeded")
 	}
 
 	target := filepath.Join(dir, "target.yaml")

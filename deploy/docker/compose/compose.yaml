@@ -16,34 +16,17 @@ services:
       retries: 12
     restart: unless-stopped
 
-  config-init:
-    image: docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
-    command:
-      - sh
-      - -ceu
-      - |
-        install -d -m 0755 /out
-        install -o 65532 -g 65532 -m 0600 /in/server.yaml /out/server.yaml
-        install -d -o 65532 -g 65532 -m 0700 /self-certificate
-    volumes:
-      - ./server.yaml:/in/server.yaml:ro
-      - server-config:/out
-      - self-certificate-data:/self-certificate
-    restart: "no"
-
   migrate:
     image: ghcr.io/torob/certhub-server:${CERTHUB_IMAGE_TAG:-0.1.0}
     command: ["migrate", "--config", "/etc/certhub/server.yaml"]
     depends_on:
       postgres:
         condition: service_healthy
-      config-init:
-        condition: service_completed_successfully
     environment:
       CERTHUB_DATABASE_URL: postgres://certhub:${CERTHUB_POSTGRES_PASSWORD:?set CERTHUB_POSTGRES_PASSWORD in your env file}@postgres:5432/certhub?sslmode=disable
       CERTHUB_ENCRYPTION_KEY: ${CERTHUB_ENCRYPTION_KEY:?set CERTHUB_ENCRYPTION_KEY in your env file}
     volumes:
-      - server-config:/etc/certhub:ro
+      - ./server.yaml:/etc/certhub/server.yaml:ro
     restart: "no"
 
   server:
@@ -51,8 +34,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      config-init:
-        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     environment:
@@ -66,11 +47,10 @@ services:
     cap_drop:
       - ALL
     volumes:
-      - server-config:/etc/certhub:ro
-      - self-certificate-data:/var/lib/certhub/self-certificate
+      - ./server.yaml:/etc/certhub/server.yaml:ro
+      - server-data:/var/lib/certhub
     restart: unless-stopped
 
 volumes:
   postgres-data:
-  server-config:
-  self-certificate-data:
+  server-data:

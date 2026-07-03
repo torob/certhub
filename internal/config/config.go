@@ -10,10 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 
 	security "github.com/torob/certhub/internal/crypto"
 	"go.yaml.in/yaml/v4"
@@ -287,19 +285,12 @@ func LoadFile(path string, opts LoadOptions) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config path: %w", err)
 	}
-	safety, err := checkConfigFileSafety(abs)
-	if err != nil {
+	if err := checkConfigFileSafety(abs); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("config file: read failed")
-	}
-	if safety.groupReadable() {
-		inlineSecrets, err := configContainsInlineSecrets(data)
-		if err == nil && inlineSecrets {
-			return nil, fmt.Errorf("config file: unsafe permissions")
-		}
 	}
 	cfg, err := Load(data, abs, opts)
 	if err != nil {
@@ -871,101 +862,32 @@ func validKeyType(value string) bool {
 	}
 }
 
-type configFileSafety struct {
-	mode os.FileMode
-}
-
-func (s configFileSafety) groupReadable() bool {
-	return s.mode.Perm()&0040 != 0
-}
-
-func checkConfigFileSafety(path string) (configFileSafety, error) {
+func checkConfigFileSafety(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return configFileSafety{}, fmt.Errorf("config file: stat failed")
+		return fmt.Errorf("config file: stat failed")
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return configFileSafety{}, fmt.Errorf("config file: must be a regular non-symlink file")
+		return fmt.Errorf("config file: must be a regular non-symlink file")
 	}
-	if info.Mode().Perm()&0004 != 0 || info.Mode().Perm()&0022 != 0 {
-		return configFileSafety{}, fmt.Errorf("config file: unsafe permissions")
-	}
-	if err := checkOwner(info); err != nil {
-		return configFileSafety{}, err
+	if info.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("config file: unsafe permissions")
 	}
 	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
 		dinfo, err := os.Lstat(dir)
 		if err != nil {
-			return configFileSafety{}, fmt.Errorf("config file: parent directory stat failed")
+			return fmt.Errorf("config file: parent directory stat failed")
 		}
 		if dinfo.Mode()&os.ModeSymlink != 0 {
-			return configFileSafety{}, fmt.Errorf("config file: parent directories must not be symlinks")
+			return fmt.Errorf("config file: parent directories must not be symlinks")
 		}
 		if dinfo.Mode().Perm()&0002 != 0 {
-			return configFileSafety{}, fmt.Errorf("config file: parent directory is world-writable")
+			return fmt.Errorf("config file: parent directory is world-writable")
 		}
 		next := filepath.Dir(dir)
 		if next == dir {
 			break
 		}
-	}
-	return configFileSafety{mode: info.Mode()}, nil
-}
-
-func configContainsInlineSecrets(data []byte) (bool, error) {
-	var node yaml.Node
-	if err := yaml.Load(data, &node, yaml.WithUniqueKeys(), yaml.WithSingleDocument()); err != nil {
-		return false, err
-	}
-	if node.Kind != yaml.DocumentNode || len(node.Content) != 1 {
-		return false, nil
-	}
-	root := node.Content[0]
-	if mappingValuePresent(mappingChild(root, "database"), "url") {
-		return true, nil
-	}
-	if mappingValuePresent(mappingChild(root, "encryption"), "key") {
-		return true, nil
-	}
-	proxies := mappingChild(mappingChild(root, "outbound_http"), "proxies")
-	if proxies != nil && proxies.Kind == yaml.MappingNode {
-		for i := 1; i < len(proxies.Content); i += 2 {
-			if mappingValuePresent(proxies.Content[i], "url") {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
-func mappingChild(node *yaml.Node, key string) *yaml.Node {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i+1]
-		}
-	}
-	return nil
-}
-
-func mappingValuePresent(node *yaml.Node, key string) bool {
-	value := mappingChild(node, key)
-	return value != nil && strings.TrimSpace(value.Value) != ""
-}
-
-func checkOwner(info os.FileInfo) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("config file: owner check unavailable")
-	}
-	uid := uint32(os.Geteuid())
-	if stat.Uid != 0 && stat.Uid != uid {
-		return fmt.Errorf("config file: unexpected owner")
 	}
 	return nil
 }

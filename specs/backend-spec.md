@@ -71,10 +71,10 @@ Config file requirements:
 
 - The file format is YAML.
 - The config file path must be absolute after resolution.
-- The config file must be a regular file. Certhub must reject symlinks, device files, directories, and files owned by an unexpected user.
-- The config file must be owned by the Certhub process user or root.
-- The config file must not be world-readable, group-writable, or world-writable. Group-readable files are allowed only when the group is trusted by the deployment.
+- The config file must be a regular file. Certhub must reject symlinks, device files, and directories.
+- The config file must not be group-writable or world-writable.
 - Parent directories must not be world-writable and must not be symlinks.
+- Operators are responsible for keeping secrets out of the server config file and using documented `*_env` keys for secret values. Certhub must not scan the server config file to infer whether it contains secrets.
 - YAML parsing must reject unknown keys, duplicate keys, type mismatches, and implicit type surprises that would change a string such as `yes`, `on`, or `0123` into another type.
 - The YAML file must be self-contained for all non-secret values in v1. Certhub must not support environment-variable interpolation, include directives, remote config references, or secondary secret-file references for server process configuration.
 - Secret process-config values may optionally be provided through environment variables only when the YAML file explicitly names the environment variable with a documented `*_env` key.
@@ -4058,7 +4058,7 @@ Required backend scenarios:
 - `certhub-server run` loads server process configuration only from the YAML config file selected by `certhub-server run --config <path>` or the default `/etc/certhub/server.yaml`; environment variables do not override server config values except for explicitly configured `database.url_env`, `encryption.key_env`, and `outbound_http.proxies.<name>.url_env`.
 - Bare `certhub-server` without a subcommand prints help and does not start HTTP listeners, workers, metrics, web UI, migrations, or database-mutating jobs.
 - `certhub-server run` is the only command that starts the long-running backend serving process.
-- Backend startup rejects missing, unreadable, non-regular, symlinked, world-readable, group/world-writable, or unexpectedly owned config files, and rejects config files under unsafe parent directories.
+- Backend startup rejects missing, unreadable, non-regular, symlinked, group/world-writable config files, and rejects config files under unsafe parent directories.
 - Backend startup rejects YAML config files with unknown keys, duplicate keys, type mismatches, invalid scalar coercions, malformed YAML, and secret values included in startup error output.
 - Backend startup accepts secret values from environment variables only when `database.url_env`, `encryption.key_env`, or `outbound_http.proxies.<name>.url_env` names the environment variable in YAML.
 - Backend startup rejects secret env references when both inline and env fields are set, neither is set, the env var name is malformed, the env var is missing or empty, or the env var value fails the same validation as the inline secret.

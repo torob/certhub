@@ -4,11 +4,10 @@ This example starts PostgreSQL, runs Certhub migrations, and starts the
 Certhub server image. It can run in local HTTP mode or direct HTTPS mode with a
 server-managed Let's Encrypt certificate.
 
-The server validates config file ownership and permissions at startup. The
-`config-init` service copies the checked-in `server.yaml` template into a named
-volume owned by uid `65532` with mode `0600`, which matches the scratch-based
-server image. It also prepares the writable self-certificate volume used by
-direct HTTPS mode.
+The Compose file bind-mounts `server.yaml` directly into the scratch-based
+server image. Keep secrets in `.env` and reference them from `server.yaml` with
+the documented `*_env` fields; operators are responsible for not placing
+secrets directly in the server config file.
 
 ## First run
 
@@ -70,20 +69,19 @@ http:
 server:
   public_hostname: "certhub.example.com"
 tls:
-  cert_file: "/var/lib/certhub/self-certificate/current/fullchain.pem"
-  key_file: "/var/lib/certhub/self-certificate/current/privkey.pem"
+  cert_file: "/var/lib/certhub/tls/current/fullchain.pem"
+  key_file: "/var/lib/certhub/tls/current/privkey.pem"
 self_certificate:
   sync_enabled: true
-  output_dir: "/var/lib/certhub/self-certificate"
+  output_dir: "/var/lib/certhub/tls"
   issuer: "letsencrypt_prod"
   key_type: "ecdsa-p256"
 ```
 
-Refresh the secure config copy and run migrations:
+Run migrations:
 
 ```bash
 cd deploy/docker/compose
-docker compose --env-file .env run --rm config-init
 docker compose --env-file .env run --rm migrate
 ```
 
@@ -188,11 +186,11 @@ docker compose --env-file .env logs -f server
 ```
 
 The first start is allowed even though
-`/var/lib/certhub/self-certificate/current/fullchain.pem` and `privkey.pem` do
+`/var/lib/certhub/tls/current/fullchain.pem` and `privkey.pem` do
 not exist yet. Certhub creates the reserved server certificate, completes the
 ACME DNS-01 flow through the configured DNS provider, writes the certificate
-material into the self-certificate volume, and begins serving HTTPS on the
-configured host port.
+material into the TLS data directory, and begins serving HTTPS on the configured
+host port.
 
 If issuance has completed but `/readyz` still reports pending TLS material,
 wait for `self_certificate.sync_interval_seconds` or restart the server to
@@ -202,6 +200,10 @@ trigger a startup sync immediately:
 docker compose --env-file .env restart server
 ```
 
+For an operator-provided certificate, place the certificate and private key in
+the `server-data` volume under `/var/lib/certhub/tls`, set `tls.cert_file` and
+`tls.key_file` to those paths, and leave `self_certificate.sync_enabled: false`.
+
 After issuance succeeds:
 
 ```bash
@@ -210,16 +212,14 @@ curl https://certhub.example.com/readyz
 
 If you used the Let's Encrypt staging directory, the certificate will not be
 browser-trusted. Create a production issuer, set `self_certificate.issuer` to
-that issuer name, refresh config, and recreate the server.
+that issuer name, and recreate the server.
 
 ## Updating config
 
-Edit `deploy/docker/compose/server.yaml`, refresh the secure copy in the named
-volume, then recreate the server:
+Edit `deploy/docker/compose/server.yaml`, then recreate the server:
 
 ```bash
 cd deploy/docker/compose
-docker compose --env-file .env run --rm config-init
 docker compose --env-file .env up -d --force-recreate server
 ```
 
