@@ -7,21 +7,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	migrationfs "github.com/torob/certhub/migrations/postgres"
 )
 
-func TestLatestVersionFindsFoundationalMigration(t *testing.T) {
+func TestLatestVersionFindsInitialSchemaBaseline(t *testing.T) {
 	latest, err := NewRunner(DefaultDir).LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest < 1 {
+	if latest != 1 {
 		t.Fatalf("latest version = %d", latest)
+	}
+}
+
+func TestEmbeddedPostgresMigrationsContainSingleBaseline(t *testing.T) {
+	matches, err := fs.Glob(migrationfs.FS, "*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0] != "00001_initial_schema.sql" {
+		t.Fatalf("embedded migrations = %#v", matches)
 	}
 }
 
