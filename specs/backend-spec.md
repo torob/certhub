@@ -228,6 +228,9 @@ Description and notes:
 - `run` is the only `certhub-server` command that starts the long-running backend serving process.
 - Operators must start the server with `certhub-server run`, not bare `certhub-server`.
 - Bare `certhub-server` without a subcommand must not start listeners, workers, metrics, the web UI, or any database-mutating job. It should print command help and exit non-zero unless the user explicitly requested help with `--help` or `help`.
+- `certhub-server --help`, `certhub-server help`, and `certhub-server help <command...>` must print command-specific help to stdout and exit `0` without loading config, connecting to PostgreSQL, reading secrets, starting listeners/workers, or mutating state.
+- Every command group and leaf command must support `--help` and `-h`. Examples include `certhub-server run --help`, `certhub-server bootstrap --help`, and `certhub-server bootstrap create-admin --help`.
+- Unknown commands should fail with exit code `2` and include a helpful error. The misspelled `boostrap` form must not be accepted as an alias for `bootstrap`.
 - `run` loads and validates the YAML server config, opens PostgreSQL, starts required workers, serves backend APIs, serves embedded web UI assets, exposes health/readiness/metrics, and handles graceful shutdown.
 - `run --migrate` must run required migrations before serving API traffic. Plain `run` must check migration status and fail closed before serving API traffic when migrations are pending or the database schema is incompatible with the binary.
 - `run` must acquire any process-level locks needed to prevent unsafe duplicate workers when multiple server replicas are not supported by a specific worker type.
@@ -4129,6 +4132,8 @@ Required backend scenarios:
 - `token_hash_key` is derived with `HKDF-SHA256(encryption.key, info="certhub-token-hash-v1")`.
 - Token hashing includes the full prefixed token value and does not use Argon2id, bcrypt, or another password hash.
 - Public HTTP routing tests prove no `/v1/bootstrap/...` endpoints exist on any listener.
+- Command-surface tests prove `certhub-server --help`, `help <command...>`, command-group `--help`, and leaf-command `--help` exit `0`, write help to stdout, leave stderr empty, and do not perform config, database, secret, listener, worker, migration, or mutation side effects.
+- Command-surface tests prove the misspelled `certhub-server boostrap` is rejected and suggests `bootstrap` without executing bootstrap behavior.
 - Direct database command tests prove `certhub-server migrate` and every `certhub-server bootstrap ...` command runs without starting HTTP listeners, workers, metrics, web UI, TLS, User login, Application token authentication, or an already-running server process.
 - Direct database command tests prove commands load the same YAML config rules as the server process, connect directly to PostgreSQL, run migrations or fail closed, and acquire the same migration/service locks as the server.
 - Direct database command tests prove commands call the same service-layer functions as HTTP handlers by sharing validation failures, uniqueness conflicts, audit event construction, encryption behavior, password hashing behavior, DNS provider credential handling, and immutable-record behavior.

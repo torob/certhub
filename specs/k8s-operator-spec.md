@@ -161,6 +161,21 @@ CERTHUB_TOKEN_SECRET_NAME
 CERTHUB_TOKEN_SECRET_KEY
 ```
 
+## Command
+
+The operator binary runs the controller with:
+
+```bash
+certhub-operator run
+```
+
+Help behavior:
+
+- `certhub-operator --help`, `certhub-operator help`, `certhub-operator run --help`, and `certhub-operator help run` must print command-specific help to stdout and exit `0`.
+- Help output must include the deployment environment variables needed to configure the operator.
+- Help paths must not load Kubernetes in-cluster config, read Kubernetes Secrets, validate required environment variables, contact Certhub, or start controller loops.
+- Unknown commands or unexpected positional arguments must exit with invalid-arguments code `2`.
+
 The Certhub Application used by the operator must have domain scopes for every DNS name that Kubernetes users are allowed to create through that operator instance. The Application token has no separate Certhub roles or permissions.
 
 Application trusted source CIDRs do not replace the Application token. The operator always sends the token and never attempts to spoof `Forwarded` or `X-Forwarded-For` headers.

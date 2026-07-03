@@ -25,6 +25,30 @@ func TestCommandHelpAndKeyGenerationPublicSurfaces(t *testing.T) {
 			t.Fatalf("%s help did not include usage: %s", name, out)
 		}
 	}
+	helpCases := []struct {
+		name     string
+		args     []string
+		contains []string
+	}{
+		{"server bootstrap help", []string{"certhub-server", "bootstrap", "--help"}, []string{"create-admin", "--config"}},
+		{"server bootstrap leaf help", []string{"certhub-server", "bootstrap", "create-admin", "--help"}, []string{"--email", "--password-stdin"}},
+		{"cli run help", []string{"certhub-cli", "run", "--help"}, []string{"--config", "--once"}},
+		{"operator run help", []string{"certhub-operator", "run", "--help"}, []string{"CERTHUB_URL", "CERTHUB_TOKEN_SECRET_NAME"}},
+	}
+	for _, tt := range helpCases {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{}, tt.args...)
+			out, err := exec.Command(filepath.Join(binDir, args[0]), args[1:]...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", tt.name, err, out)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("%s missing %q: %s", tt.name, want, out)
+				}
+			}
+		})
+	}
 
 	out, err := exec.Command(filepath.Join(binDir, "certhub-server"), "generate-encryption-key").CombinedOutput()
 	if err != nil {

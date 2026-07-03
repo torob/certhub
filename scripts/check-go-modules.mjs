@@ -25,6 +25,7 @@ const approvedDirectRequires = versionMap({
   "github.com/jackc/pgx/v5": "v5.10.0",
   "github.com/pressly/goose/v3": "v3.27.1",
   "github.com/skip2/go-qrcode": "v0.0.0-20200617195104-da1b6568686e",
+  "github.com/spf13/cobra": "v1.10.2",
   "go.yaml.in/yaml/v4": "v4.0.0-rc.6",
   "golang.org/x/crypto": "v0.53.0",
   "golang.org/x/net": "v0.55.0"
@@ -40,6 +41,8 @@ const approvedCompiledModules = versionMap({
   "github.com/pressly/goose/v3": "v3.27.1",
   "github.com/sethvargo/go-retry": "v0.3.0",
   "github.com/skip2/go-qrcode": "v0.0.0-20200617195104-da1b6568686e",
+  "github.com/spf13/cobra": "v1.10.2",
+  "github.com/spf13/pflag": "v1.0.9",
   "go.uber.org/multierr": "v1.11.0",
   "go.yaml.in/yaml/v4": "v4.0.0-rc.6",
   "golang.org/x/crypto": "v0.53.0",
@@ -49,9 +52,9 @@ const approvedCompiledModules = versionMap({
   "golang.org/x/text": "v0.38.0"
 });
 
-// Reviewed unused modules retained by github.com/pressly/goose/v3's optional
-// database-driver/test dependency graph. They are allowed only while absent
-// from the compiled Certhub package graph.
+// Reviewed unused modules retained by optional dependency graphs, such as
+// goose database-driver/test dependencies and cobra documentation helpers. They
+// are allowed only while absent from the compiled Certhub package graph.
 const reviewedUnusedGooseModules = versionMap({
   "filippo.io/edwards25519": "v1.2.0",
   "github.com/ClickHouse/ch-go": "v0.71.0",
@@ -63,6 +66,7 @@ const reviewedUnusedGooseModules = versionMap({
   "github.com/coder/websocket": "v1.8.14",
   "github.com/containerd/errdefs": "v1.0.0",
   "github.com/containerd/errdefs/pkg": "v0.3.0",
+  "github.com/cpuguy83/go-md2man/v2": "v2.0.6",
   "github.com/davecgh/go-spew": "v1.1.1",
   "github.com/distribution/reference": "v0.6.0",
   "github.com/docker/go-connections": "v0.7.0",
@@ -80,6 +84,7 @@ const reviewedUnusedGooseModules = versionMap({
   "github.com/golang-sql/civil": "v0.0.0-20220223132316-b832511892a9",
   "github.com/golang-sql/sqlexp": "v0.1.0",
   "github.com/google/uuid": "v1.6.0",
+  "github.com/inconshreveable/mousetrap": "v1.1.0",
   "github.com/joho/godotenv": "v1.5.1",
   "github.com/jonboulle/clockwork": "v0.5.0",
   "github.com/klauspost/compress": "v1.18.5",
@@ -98,6 +103,7 @@ const reviewedUnusedGooseModules = versionMap({
   "github.com/pmezard/go-difflib": "v1.0.0",
   "github.com/prometheus/procfs": "v0.20.1",
   "github.com/remyoudompheng/bigfft": "v0.0.0-20230129092748-24d4a6f8daec",
+  "github.com/russross/blackfriday/v2": "v2.1.0",
   "github.com/segmentio/asm": "v1.2.1",
   "github.com/shopspring/decimal": "v1.4.0",
   "github.com/stretchr/objx": "v0.1.0",
@@ -154,7 +160,7 @@ if (failures.length > 0) {
 
 console.log(`Go direct require policy passed: ${directRequires().length} direct require(s).`);
 console.log(`Go compiled package graph policy passed: ${compiledModules.length} module(s).`);
-console.log(`Go unused module graph policy passed: ${reviewedUnusedGraphModules().length} reviewed goose optional exception(s).`);
+console.log(`Go unused module graph policy passed: ${reviewedUnusedGraphModules().length} reviewed optional exception(s).`);
 console.log(`Go checksum policy passed: ${goSumEntries.length} go.sum entr${goSumEntries.length === 1 ? "y" : "ies"}, ${reviewedChecksumOnlyGoModSums.size} reviewed checksum-only exception(s).`);
 
 function checkGoModDirectRequires() {

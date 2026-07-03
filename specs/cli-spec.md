@@ -143,6 +143,12 @@ Flags:
 --quiet                          suppress non-error human output
 ```
 
+Help behavior:
+
+- `certhub-cli --help`, `certhub-cli help`, `certhub-cli run --help`, and `certhub-cli help run` must print command-specific help to stdout and exit `0`.
+- Help paths must not load the config file, read tokens, contact the backend, create output directories, acquire locks, write certificate material, or start scheduler mode.
+- Unknown commands or unexpected positional arguments must exit with invalid-arguments code `2`.
+
 Backend calls:
 
 ```http

@@ -8,17 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/spf13/cobra"
 	"github.com/torob/certhub/internal/operator"
 )
 
-const operatorHelp = `certhub-operator is the Certhub Kubernetes operator command.
-
-Usage:
-  certhub-operator help
-  certhub-operator --help
-  certhub-operator run
-
-Configuration:
+const operatorConfigHelp = `Configuration:
   CERTHUB_URL                         required absolute https URL
   CERTHUB_TOKEN_SECRET_NAME           required Kubernetes Secret name
   CERTHUB_TOKEN_SECRET_KEY            optional Secret data key, default token
@@ -36,36 +30,52 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stdout, operatorHelp)
-		return 0
+	exitCode := 0
+	root := &cobra.Command{
+		Use:           "certhub-operator",
+		Short:         "Certhub Kubernetes operator command",
+		Long:          "Certhub Kubernetes operator command.\n\n" + operatorConfigHelp,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+		},
 	}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.AddCommand(&cobra.Command{
+		Use:   "run",
+		Short: "Start the Kubernetes operator",
+		Long:  "Start the Kubernetes operator.\n\n" + operatorConfigHelp,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err := operator.LoadConfigFromEnv()
+			if err != nil {
+				fmt.Fprintf(stderr, "invalid operator configuration: %s\n", err)
+				exitCode = 2
+				return
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			runtime, err := operator.NewInClusterRuntime(ctx, cfg)
+			if err != nil {
+				fmt.Fprintf(stderr, "operator startup failed: %s\n", operator.Sanitize(err.Error()))
+				exitCode = 1
+				return
+			}
+			if err := runtime.Run(ctx, stderr); err != nil {
+				fmt.Fprintf(stderr, "operator runtime failed: %s\n", operator.Sanitize(err.Error()))
+				exitCode = 1
+				return
+			}
+		},
+	})
 
-	switch args[0] {
-	case "help", "--help", "-h":
-		fmt.Fprint(stdout, operatorHelp)
-		return 0
-	case "run":
-		cfg, err := operator.LoadConfigFromEnv()
-		if err != nil {
-			fmt.Fprintf(stderr, "invalid operator configuration: %s\n", err)
-			return 2
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		runtime, err := operator.NewInClusterRuntime(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "operator startup failed: %s\n", operator.Sanitize(err.Error()))
-			return 1
-		}
-		if err := runtime.Run(ctx, stderr); err != nil {
-			fmt.Fprintf(stderr, "operator runtime failed: %s\n", operator.Sanitize(err.Error()))
-			return 1
-		}
-		return 0
-	default:
-		fmt.Fprintf(stderr, "unknown certhub-operator command %q\n\n", args[0])
-		fmt.Fprint(stderr, operatorHelp)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
+	return exitCode
 }

@@ -44,6 +44,7 @@ The implementation should prefer standard library functionality where it is suff
 
 | Dependency | Purpose |
 | --- | --- |
+| `github.com/spf13/cobra` | Command tree, nested subcommands, generated help, and command suggestions for Certhub binaries. |
 | `go.yaml.in/yaml/v4` | YAML configuration file parsing. |
 
 The CLI should otherwise use the Go standard library and shared local packages under `pkg/`.
@@ -112,6 +113,5 @@ Required dependency and supply-chain checks:
 
 - No Go web framework dependency such as `gin`, `echo`, or `fiber` in v1 unless the API implementation proves the standard `net/http` approach is insufficient.
 - No ORM such as `gorm`; database access uses SQL, `pgx`, and generated code from `sqlc`.
-- No CLI framework such as `cobra` in v1; the CLI is intentionally limited to `certhub-cli run` with default scheduler mode and `--once` one-shot mode, and should use the standard Go flag package unless the command surface grows further.
 - No cgo-based dependency without explicit review.
 - No `gopkg.in/yaml.v3`; its upstream repository is archived/unmaintained. Use `go.yaml.in/yaml/v4` for new code.

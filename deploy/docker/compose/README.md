@@ -33,6 +33,14 @@ docker compose --env-file .env up -d
 
 The web UI and API listen on `http://localhost:8080` by default.
 
+To inspect command options inside the released image, use command-specific help:
+
+```bash
+docker compose --env-file .env run --rm server --help
+docker compose --env-file .env run --rm server bootstrap --help
+docker compose --env-file .env run --rm server bootstrap create-admin --help
+```
+
 ## Bootstrap an admin
 
 After PostgreSQL and Certhub are ready, create the first admin user:
@@ -109,7 +117,6 @@ production directory shown here for a trusted certificate:
 docker compose --env-file .env run --rm server \
   bootstrap create-issuer \
   --name letsencrypt_prod \
-  --environment production \
   --directory-url https://acme-v02.api.letsencrypt.org/directory \
   --contact-email admin@example.com \
   --default

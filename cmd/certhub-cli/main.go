@@ -2,22 +2,15 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"os/signal"
 	"time"
+
+	"github.com/spf13/cobra"
 )
-
-const cliHelp = `certhub-cli is the Certhub local certificate material sync command.
-
-Usage:
-  certhub-cli help
-  certhub-cli --help
-  certhub-cli run [--config <path>] [--once] [--json] [--quiet]
-`
 
 type commandOptions struct {
 	configPath string
@@ -31,45 +24,43 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stdout, cliHelp)
-		return 0
+	exitCode := ExitSuccess
+	root := &cobra.Command{
+		Use:           "certhub-cli",
+		Short:         "Certhub local certificate material sync command",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+		},
 	}
-	switch args[0] {
-	case "help", "--help", "-h":
-		fmt.Fprint(stdout, cliHelp)
-		return 0
-	case "run":
-		opts, code := parseRunFlags(args[1:], stderr)
-		if code != 0 {
-			return code
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-		defer stop()
-		return runCommand(ctx, opts, stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "unknown certhub-cli command %q\n\n", args[0])
-		fmt.Fprint(stderr, cliHelp)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.CompletionOptions.DisableDefaultCmd = true
+
+	opts := commandOptions{}
+	runCmd := &cobra.Command{
+		Use:   "run",
+		Short: "Sync configured certificate material",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+			exitCode = runCommand(ctx, opts, stdout, stderr)
+		},
+	}
+	runCmd.Flags().StringVar(&opts.configPath, "config", "", "config file path")
+	runCmd.Flags().BoolVar(&opts.once, "once", false, "run one sync cycle and exit")
+	runCmd.Flags().BoolVar(&opts.json, "json", false, "print JSON summary")
+	runCmd.Flags().BoolVar(&opts.quiet, "quiet", false, "suppress non-error human output")
+	root.AddCommand(runCmd)
+
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(stderr, err)
 		return ExitInvalidArguments
 	}
-}
-
-func parseRunFlags(args []string, stderr io.Writer) (commandOptions, int) {
-	opts := commandOptions{}
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.StringVar(&opts.configPath, "config", "", "config file path")
-	fs.BoolVar(&opts.once, "once", false, "run one sync cycle and exit")
-	fs.BoolVar(&opts.json, "json", false, "print JSON summary")
-	fs.BoolVar(&opts.quiet, "quiet", false, "suppress non-error human output")
-	if err := fs.Parse(args); err != nil {
-		return opts, ExitInvalidArguments
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "unexpected positional arguments: %v\n", fs.Args())
-		return opts, ExitInvalidArguments
-	}
-	return opts, 0
+	return exitCode
 }
 
 func runCommand(ctx context.Context, opts commandOptions, stdout, stderr io.Writer) int {

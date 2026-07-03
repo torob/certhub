@@ -40,6 +40,100 @@ func TestBareServerPrintsHelpAndDoesNotRun(t *testing.T) {
 	}
 }
 
+func TestServerHelpSurfaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		contains []string
+	}{
+		{
+			name:     "top level",
+			args:     []string{"--help"},
+			contains: []string{"Usage:", "certhub-server [flags]", "bootstrap", "generate-encryption-key", "migrate", "run"},
+		},
+		{
+			name:     "help bootstrap",
+			args:     []string{"help", "bootstrap"},
+			contains: []string{"Usage:", "certhub-server bootstrap", "create-admin", "create-issuer", "--config"},
+		},
+		{
+			name:     "bootstrap help",
+			args:     []string{"bootstrap", "--help"},
+			contains: []string{"Usage:", "certhub-server bootstrap", "create-dns-provider", "refresh-dns-provider-zones", "--interactive"},
+		},
+		{
+			name:     "help bootstrap create-admin",
+			args:     []string{"help", "bootstrap", "create-admin"},
+			contains: []string{"Usage:", "certhub-server bootstrap create-admin", "--email", "--display-name", "--password-stdin"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), tt.args)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout missing %q: %s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestServerBootstrapLeafHelpSurfaces(t *testing.T) {
+	tests := map[string][]string{
+		"create-admin":               {"--email", "--display-name", "--allow-existing-admin"},
+		"create-issuer":              {"--name", "--directory-url", "--contact-email"},
+		"create-dns-provider":        {"--name", "--type", "--zone-mode", "--credentials-file"},
+		"add-dns-provider-zone":      {"--dns-provider", "--zone"},
+		"refresh-dns-provider-zones": {"--dns-provider"},
+		"generate-encryption-key":    {"Generate a base64 Certhub encryption key"},
+		"migrate":                    {"--config", "--json"},
+		"run":                        {"--config", "--migrate"},
+	}
+	for command, contains := range tests {
+		t.Run(command, func(t *testing.T) {
+			args := []string{command, "--help"}
+			if strings.HasPrefix(command, "create-") || strings.Contains(command, "dns-provider") {
+				args = []string{"bootstrap", command, "--help"}
+			}
+			var stdout, stderr bytes.Buffer
+			code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), args)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage:") {
+				t.Fatalf("stdout missing Usage: %s", stdout.String())
+			}
+			for _, want := range contains {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout missing %q: %s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestServerSuggestsBootstrapForTypo(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"boostrap", "--help"})
+	if code != 2 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown command") || !strings.Contains(stderr.String(), "bootstrap") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestGenerateEncryptionKey(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"generate-encryption-key"})
@@ -162,7 +256,7 @@ func TestRunHelpIncludesMigrateFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "run [--migrate] [--config <path>]") || !strings.Contains(stdout.String(), serverConfigPathEnv) {
+	if !strings.Contains(stdout.String(), "certhub-server run [flags]") || !strings.Contains(stdout.String(), "--migrate") || !strings.Contains(stdout.String(), serverConfigPathEnv) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -364,7 +458,7 @@ func TestBootstrapCreateAdminRejectsOIDCLinkFlags(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+	if !strings.Contains(stderr.String(), "unknown flag") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 	"unsafe"
 
 	qrcode "github.com/skip2/go-qrcode"
+	"github.com/spf13/cobra"
 	acmedomain "github.com/torob/certhub/internal/acme"
 	"github.com/torob/certhub/internal/applications"
 	"github.com/torob/certhub/internal/audit"
@@ -43,19 +43,6 @@ import (
 const bootstrapActorID = "00000000-0000-4000-8000-000000000001"
 const serverConfigPathEnv = "CERTHUB_SERVER_CONFIG"
 
-const ServerHelp = `certhub-server is the Certhub backend server command.
-
-Usage:
-  certhub-server help
-  certhub-server --help
-  certhub-server run [--migrate] [--config <path>]
-  certhub-server migrate [--config <path>]
-  certhub-server generate-encryption-key
-  certhub-server bootstrap ...
-
-Server config path must be provided by --config or CERTHUB_SERVER_CONFIG.
-`
-
 type ServerRunner struct {
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -72,45 +59,56 @@ func (r ServerRunner) Execute(ctx context.Context, args []string) int {
 	if r.Stdin == nil {
 		r.Stdin = os.Stdin
 	}
+	cmd, exitCode := r.command(ctx)
 	if len(args) == 0 {
-		fmt.Fprint(r.Stderr, ServerHelp)
+		cmd.SetOut(r.Stderr)
+		_ = cmd.Help()
 		return 2
 	}
-
-	switch args[0] {
-	case "help", "--help", "-h":
-		fmt.Fprint(r.Stdout, ServerHelp)
-		return 0
-	case "generate-encryption-key":
-		return r.generateEncryptionKey(args[1:])
-	case "run":
-		return r.run(ctx, args[1:])
-	case "migrate":
-		return r.migrate(args[1:])
-	case "bootstrap":
-		return r.bootstrap(args[1:])
-	default:
-		fmt.Fprintf(r.Stderr, "unknown certhub-server command %q\n\n", args[0])
-		fmt.Fprint(r.Stderr, ServerHelp)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(r.Stderr, err)
 		return 2
+	}
+	return *exitCode
+}
+
+func (r ServerRunner) command(ctx context.Context) (*cobra.Command, *int) {
+	exitCode := 0
+	root := &cobra.Command{
+		Use:           "certhub-server",
+		Short:         "Certhub backend server command",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+			exitCode = 2
+		},
+	}
+	root.SetOut(r.Stdout)
+	root.SetErr(r.Stderr)
+	root.SuggestionsMinimumDistance = 2
+	root.CompletionOptions.DisableDefaultCmd = true
+
+	root.AddCommand(r.generateEncryptionKeyCommand(&exitCode))
+	root.AddCommand(r.runCommand(ctx, &exitCode))
+	root.AddCommand(r.migrateCommand(&exitCode))
+	root.AddCommand(r.bootstrapCommand(&exitCode))
+	return root, &exitCode
+}
+
+func (r ServerRunner) generateEncryptionKeyCommand(exitCode *int) *cobra.Command {
+	return &cobra.Command{
+		Use:   "generate-encryption-key",
+		Short: "Generate a base64 Certhub encryption key",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.generateEncryptionKey()
+		},
 	}
 }
 
-func (r ServerRunner) generateEncryptionKey(args []string) int {
-	fs := flag.NewFlagSet("generate-encryption-key", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	help := fs.Bool("help", false, "show help")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server generate-encryption-key")
-		return 0
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(r.Stderr, "generate-encryption-key accepts no positional arguments")
-		return 2
-	}
+func (r ServerRunner) generateEncryptionKey() int {
 	var key [32]byte
 	if _, err := rand.Read(key[:]); err != nil {
 		fmt.Fprintln(r.Stderr, "secure randomness unavailable")
@@ -132,24 +130,25 @@ func resolveServerConfigPath(flagValue string) (string, error) {
 	return "", fmt.Errorf("config path is required; pass --config <path> or set %s", serverConfigPathEnv)
 }
 
-func (r ServerRunner) run(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	applyMigrations := fs.Bool("migrate", false, "apply pending database migrations before starting")
-	help := fs.Bool("help", false, "show help")
-	if err := fs.Parse(args); err != nil {
-		return 2
+func (r ServerRunner) runCommand(ctx context.Context, exitCode *int) *cobra.Command {
+	var configPath string
+	var applyMigrations bool
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Start the Certhub server",
+		Long:  "Start the Certhub server.\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.run(ctx, configPath, applyMigrations)
+		},
 	}
-	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server run [--migrate] [--config <path>]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
-		return 0
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(r.Stderr, "run accepts no positional arguments")
-		return 2
-	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	cmd.Flags().StringVar(&configPath, "config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
+	cmd.Flags().BoolVar(&applyMigrations, "migrate", false, "apply pending database migrations before starting")
+	return cmd
+}
+
+func (r ServerRunner) run(ctx context.Context, configPath string, applyMigrations bool) int {
+	resolvedConfigPath, err := resolveServerConfigPath(configPath)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "config validation failed: %v\n", err)
 		return 1
@@ -165,7 +164,7 @@ func (r ServerRunner) run(ctx context.Context, args []string) int {
 		return 1
 	}
 	migrationMode := runtimeMigrationsCheckOnly
-	if *applyMigrations {
+	if applyMigrations {
 		migrationMode = runtimeMigrationsApply
 	}
 	resources, err := openRuntimeResources(ctx, cfg, tlsLoader, migrationMode)
@@ -434,44 +433,45 @@ func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderTyp
 	return out, nil
 }
 
-func (r ServerRunner) migrate(args []string) int {
-	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	help := fs.Bool("help", false, "show help")
-	if err := fs.Parse(args); err != nil {
-		return 2
+func (r ServerRunner) migrateCommand(exitCode *int) *cobra.Command {
+	var configPath string
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Apply pending database migrations",
+		Long:  "Apply pending database migrations and exit.\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.migrate(configPath, jsonOut)
+		},
 	}
-	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server migrate [--config <path>] [--json]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
-		return 0
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(r.Stderr, "migrate accepts no positional arguments")
-		return 2
-	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	cmd.Flags().StringVar(&configPath, "config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) migrate(configPath string, jsonOut bool) int {
+	resolvedConfigPath, err := resolveServerConfigPath(configPath)
 	if err != nil {
-		return r.reportMigrationFailure(*jsonOut, "config validation failed", "config_invalid", err)
+		return r.reportMigrationFailure(jsonOut, "config validation failed", "config_invalid", err)
 	}
 	cfg, err := config.LoadFile(resolvedConfigPath, config.LoadOptions{})
 	if err != nil {
-		return r.reportMigrationFailure(*jsonOut, "config validation failed", "config_invalid", err)
+		return r.reportMigrationFailure(jsonOut, "config validation failed", "config_invalid", err)
 	}
 	resources, err := openRuntimeResources(context.Background(), cfg, nil, runtimeMigrationsApply)
 	if err != nil {
-		return r.reportMigrationFailure(*jsonOut, "migration failed", "migration_failed", err)
+		return r.reportMigrationFailure(jsonOut, "migration failed", "migration_failed", err)
 	}
 	defer resources.Close()
 	status, err := resources.Migrations.Status(context.Background(), resources.MigrationDB)
 	if err != nil {
-		return r.reportMigrationFailure(*jsonOut, "migration status failed", "migration_status_failed", err)
+		return r.reportMigrationFailure(jsonOut, "migration status failed", "migration_status_failed", err)
 	}
 	if !status.Compatible {
-		return r.reportMigrationFailure(*jsonOut, "migration failed", "migration_incompatible", migrations.IncompatibleError{Status: status})
+		return r.reportMigrationFailure(jsonOut, "migration failed", "migration_incompatible", migrations.IncompatibleError{Status: status})
 	}
-	if *jsonOut {
+	if jsonOut {
 		_ = json.NewEncoder(r.Stdout).Encode(map[string]any{
 			"status":          "ok",
 			"current_version": status.CurrentVersion,
@@ -508,86 +508,104 @@ func (r ServerRunner) reportMigrationFailure(jsonOut bool, prefix, code string, 
 	return 1
 }
 
-func (r ServerRunner) bootstrap(args []string) int {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server bootstrap [--interactive|create-admin|create-issuer|create-dns-provider|add-dns-provider-zone|refresh-dns-provider-zones] [--config <path>]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
-		return 0
+func (r ServerRunner) bootstrapCommand(exitCode *int) *cobra.Command {
+	var configPath string
+	var interactive bool
+	cmd := &cobra.Command{
+		Use:   "bootstrap",
+		Short: "Run first-bootstrap and emergency management jobs",
+		Long:  "Run first-bootstrap and emergency management jobs directly against PostgreSQL.\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) != 0 {
+				*exitCode = 2
+				return
+			}
+			if interactive {
+				*exitCode = r.bootstrapInteractive(configPath)
+				return
+			}
+			_ = cmd.Help()
+		},
 	}
-	if args[0] == "--interactive" {
-		return r.bootstrapInteractive(args[1:])
-	}
-	switch args[0] {
-	case "create-admin":
-		return r.bootstrapCreateAdmin(args[1:])
-	case "create-issuer":
-		return r.bootstrapCreateIssuer(args[1:])
-	case "create-dns-provider":
-		return r.bootstrapCreateDNSProvider(args[1:])
-	case "add-dns-provider-zone":
-		return r.bootstrapAddDNSProviderZone(args[1:])
-	case "refresh-dns-provider-zones":
-		return r.bootstrapRefreshDNSProviderZones(args[1:])
-	default:
-		fmt.Fprintf(r.Stderr, "unknown bootstrap command %q\n", args[0])
-		return 2
-	}
+	cmd.PersistentFlags().StringVar(&configPath, "config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
+	cmd.Flags().BoolVar(&interactive, "interactive", false, "run guided bootstrap")
+	cmd.AddCommand(r.bootstrapCreateAdminCommand(exitCode, &configPath))
+	cmd.AddCommand(r.bootstrapCreateIssuerCommand(exitCode, &configPath))
+	cmd.AddCommand(r.bootstrapCreateDNSProviderCommand(exitCode, &configPath))
+	cmd.AddCommand(r.bootstrapAddDNSProviderZoneCommand(exitCode, &configPath))
+	cmd.AddCommand(r.bootstrapRefreshDNSProviderZonesCommand(exitCode, &configPath))
+	return cmd
 }
 
-func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
-	fs := flag.NewFlagSet("bootstrap create-admin", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	email := fs.String("email", "", "admin email")
-	displayName := fs.String("display-name", "", "admin display name")
-	passwordValue := fs.String("password", "", "admin password")
-	passwordStdin := fs.Bool("password-stdin", false, "read password from stdin")
-	passwordEnv := fs.String("password-env", "", "environment variable containing admin password")
-	passwordFile := fs.String("password-file", "", "file containing admin password")
-	allowExistingAdmin := fs.Bool("allow-existing-admin", false, "allow creation when an active admin already exists")
-	interactive := fs.Bool("interactive", false, "run guided admin creation")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	if err := fs.Parse(args); err != nil {
-		return 2
+type bootstrapCreateAdminOptions struct {
+	configPath         *string
+	email              string
+	displayName        string
+	passwordValue      string
+	passwordStdin      bool
+	passwordEnv        string
+	passwordFile       string
+	allowExistingAdmin bool
+	interactive        bool
+	jsonOut            bool
+}
+
+func (r ServerRunner) bootstrapCreateAdminCommand(exitCode *int, configPath *string) *cobra.Command {
+	opts := bootstrapCreateAdminOptions{configPath: configPath}
+	cmd := &cobra.Command{
+		Use:   "create-admin",
+		Short: "Create a global admin user",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.bootstrapCreateAdmin(opts, cmd.Flags().Changed("password"))
+		},
 	}
-	passwordFlagSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "password" {
-			passwordFlagSet = true
-		}
-	})
-	if *interactive {
-		return r.bootstrapCreateAdminInteractive(*configPath, *allowExistingAdmin, *jsonOut)
+	cmd.Flags().StringVar(&opts.email, "email", "", "admin email")
+	cmd.Flags().StringVar(&opts.displayName, "display-name", "", "admin display name")
+	cmd.Flags().StringVar(&opts.passwordValue, "password", "", "admin password")
+	cmd.Flags().BoolVar(&opts.passwordStdin, "password-stdin", false, "read password from stdin")
+	cmd.Flags().StringVar(&opts.passwordEnv, "password-env", "", "environment variable containing admin password")
+	cmd.Flags().StringVar(&opts.passwordFile, "password-file", "", "file containing admin password")
+	cmd.Flags().BoolVar(&opts.allowExistingAdmin, "allow-existing-admin", false, "allow creation when an active admin already exists")
+	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided admin creation")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) bootstrapCreateAdmin(opts bootstrapCreateAdminOptions, passwordFlagSet bool) int {
+	if opts.interactive {
+		return r.bootstrapCreateAdminInteractive(*opts.configPath, opts.allowExistingAdmin, opts.jsonOut)
 	}
-	if fs.NArg() != 0 || *email == "" || *displayName == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("email and display-name are required"))
+	if opts.email == "" || opts.displayName == "" {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("email and display-name are required"))
 	}
-	resolvedConfigPath, configErr := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, configErr := resolveServerConfigPath(*opts.configPath)
 	if configErr != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", configErr)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", configErr)
 	}
-	password, err := r.readBootstrapAdminPassword(passwordFlagSet, *passwordValue, *passwordStdin, *passwordEnv, *passwordFile, *jsonOut)
+	password, err := r.readBootstrapAdminPassword(passwordFlagSet, opts.passwordValue, opts.passwordStdin, opts.passwordEnv, opts.passwordFile, opts.jsonOut)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
 	defer boot.Close()
 	result, err := boot.users.BootstrapCreateAdmin(context.Background(), users.BootstrapCreateAdminParams{
-		Email:              *email,
-		DisplayName:        *displayName,
+		Email:              opts.email,
+		DisplayName:        opts.displayName,
 		Password:           password,
-		AllowExistingAdmin: *allowExistingAdmin,
+		AllowExistingAdmin: opts.allowExistingAdmin,
 	}, users.AuditContext{CorrelationID: "bootstrap-create-admin", Command: "certhub-server bootstrap create-admin"})
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_admin_failed", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_admin_failed", err)
 	}
 	body := map[string]any{"status": "ok", "user_id": result.User.ID, "email": result.User.Email, "password_2fa_enabled": result.User.Password2FAEnabled}
 	if result.Password2FA != nil {
 		body["totp_provisioning_uri"] = result.Password2FA.ProvisioningURI
 	}
-	return r.reportBootstrapSuccess(*jsonOut, body, func() {
+	return r.reportBootstrapSuccess(opts.jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "created admin user %s (%s)\n", result.User.Email, result.User.ID)
 		if result.Password2FA != nil {
 			r.writeTOTPProvisioning(result.Password2FA.ProvisioningURI)
@@ -658,20 +676,11 @@ func (r ServerRunner) readBootstrapAdminPassword(flagSet bool, flagValue string,
 	}
 }
 
-func (r ServerRunner) bootstrapInteractive(args []string) int {
-	fs := flag.NewFlagSet("bootstrap --interactive", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() != 0 {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap accepts only --config"))
-	}
+func (r ServerRunner) bootstrapInteractive(configPath string) int {
 	if err := r.requireInteractiveTerminal(); err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(configPath)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
 	}
@@ -750,167 +759,229 @@ func (r ServerRunner) writeTOTPProvisioning(uri string) {
 	fmt.Fprintf(r.Stdout, "totp_provisioning_uri: %s\n", uri)
 }
 
-func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
-	fs := flag.NewFlagSet("bootstrap create-issuer", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	name := fs.String("name", "", "issuer machine name")
-	directoryURL := fs.String("directory-url", "", "ACME directory URL")
-	contactEmail := fs.String("contact-email", "", "ACME contact email")
-	isDefault := fs.Bool("default", false, "make issuer default")
-	renewalWindow := fs.Int("renewal-window-seconds", 0, "renewal window in seconds")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	if err := fs.Parse(args); err != nil {
-		return 2
+type bootstrapCreateIssuerOptions struct {
+	configPath    *string
+	name          string
+	directoryURL  string
+	contactEmail  string
+	isDefault     bool
+	renewalWindow int
+	jsonOut       bool
+}
+
+func (r ServerRunner) bootstrapCreateIssuerCommand(exitCode *int, configPath *string) *cobra.Command {
+	opts := bootstrapCreateIssuerOptions{configPath: configPath}
+	cmd := &cobra.Command{
+		Use:   "create-issuer",
+		Short: "Create an ACME issuer",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.bootstrapCreateIssuer(opts)
+		},
 	}
-	if fs.NArg() != 0 || *name == "" || *directoryURL == "" || *contactEmail == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, directory-url, and contact-email are required"))
+	cmd.Flags().StringVar(&opts.name, "name", "", "issuer machine name")
+	cmd.Flags().StringVar(&opts.directoryURL, "directory-url", "", "ACME directory URL")
+	cmd.Flags().StringVar(&opts.contactEmail, "contact-email", "", "ACME contact email")
+	cmd.Flags().BoolVar(&opts.isDefault, "default", false, "make issuer default")
+	cmd.Flags().IntVar(&opts.renewalWindow, "renewal-window-seconds", 0, "renewal window in seconds")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) bootstrapCreateIssuer(opts bootstrapCreateIssuerOptions) int {
+	if opts.name == "" || opts.directoryURL == "" || opts.contactEmail == "" {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("name, directory-url, and contact-email are required"))
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
 	defer boot.Close()
 	issuer, err := boot.issuers.CreateIssuer(context.Background(), issuers.Actor{ID: bootstrapActorID, GlobalRole: users.GlobalRoleAdmin, System: true}, issuers.CreateIssuerParams{
-		Name:                 *name,
+		Name:                 opts.name,
 		Type:                 issuers.TypeACME,
-		DirectoryURL:         *directoryURL,
-		IsDefault:            *isDefault,
-		RenewalWindowSeconds: *renewalWindow,
-		ContactEmail:         *contactEmail,
+		DirectoryURL:         opts.directoryURL,
+		IsDefault:            opts.isDefault,
+		RenewalWindowSeconds: opts.renewalWindow,
+		ContactEmail:         opts.contactEmail,
 	}, issuers.AuditContext{CorrelationID: "bootstrap-create-issuer", Command: "certhub-server bootstrap create-issuer"})
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_issuer_failed", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_issuer_failed", err)
 	}
 	body := map[string]any{"status": "ok", "issuer_id": issuer.ID, "name": issuer.Name, "default": issuer.IsDefault}
-	return r.reportBootstrapSuccess(*jsonOut, body, func() {
+	return r.reportBootstrapSuccess(opts.jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "created issuer %s (%s)\n", issuer.Name, issuer.ID)
 	})
 }
 
-func (r ServerRunner) bootstrapCreateDNSProvider(args []string) int {
-	fs := flag.NewFlagSet("bootstrap create-dns-provider", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	name := fs.String("name", "", "DNS provider machine name")
-	providerType := fs.String("type", "", "provider type")
-	zoneMode := fs.String("zone-mode", "", "zone mode")
-	credentialsStdin := fs.Bool("credentials-stdin", false, "read credential JSON from stdin")
-	credentialsEnv := fs.String("credentials-env", "", "environment variable containing credential JSON")
-	credentialsFile := fs.String("credentials-file", "", "file containing credential JSON")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	if err := fs.Parse(args); err != nil {
-		return 2
+type bootstrapCreateDNSProviderOptions struct {
+	configPath       *string
+	name             string
+	providerType     string
+	zoneMode         string
+	credentialsStdin bool
+	credentialsEnv   string
+	credentialsFile  string
+	jsonOut          bool
+}
+
+func (r ServerRunner) bootstrapCreateDNSProviderCommand(exitCode *int, configPath *string) *cobra.Command {
+	opts := bootstrapCreateDNSProviderOptions{configPath: configPath}
+	cmd := &cobra.Command{
+		Use:   "create-dns-provider",
+		Short: "Create a DNS provider",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.bootstrapCreateDNSProvider(opts)
+		},
 	}
-	if fs.NArg() != 0 || *name == "" || *providerType == "" || *zoneMode == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, type, and zone-mode are required"))
+	cmd.Flags().StringVar(&opts.name, "name", "", "DNS provider machine name")
+	cmd.Flags().StringVar(&opts.providerType, "type", "", "provider type")
+	cmd.Flags().StringVar(&opts.zoneMode, "zone-mode", "", "zone mode")
+	cmd.Flags().BoolVar(&opts.credentialsStdin, "credentials-stdin", false, "read credential JSON from stdin")
+	cmd.Flags().StringVar(&opts.credentialsEnv, "credentials-env", "", "environment variable containing credential JSON")
+	cmd.Flags().StringVar(&opts.credentialsFile, "credentials-file", "", "file containing credential JSON")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) bootstrapCreateDNSProvider(opts bootstrapCreateDNSProviderOptions) int {
+	if opts.name == "" || opts.providerType == "" || opts.zoneMode == "" {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("name, type, and zone-mode are required"))
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
-	credentials, err := r.readBootstrapCredentials(*credentialsStdin, *credentialsEnv, *credentialsFile)
+	credentials, err := r.readBootstrapCredentials(opts.credentialsStdin, opts.credentialsEnv, opts.credentialsFile)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
 	defer boot.Close()
 	provider, err := boot.dns.CreateProvider(context.Background(), dnsproviders.Actor{ID: bootstrapActorID, GlobalRole: users.GlobalRoleAdmin, System: true}, dnsproviders.CreateProviderServiceParams{
-		Name:        *name,
-		Type:        dnsproviders.ProviderType(*providerType),
+		Name:        opts.name,
+		Type:        dnsproviders.ProviderType(opts.providerType),
 		Credentials: json.RawMessage(credentials),
-		ZoneMode:    dnsproviders.ZoneMode(*zoneMode),
+		ZoneMode:    dnsproviders.ZoneMode(opts.zoneMode),
 		Status:      dnsproviders.StatusActive,
 	}, dnsproviders.AuditContext{CorrelationID: "bootstrap-create-dns-provider", Command: "certhub-server bootstrap create-dns-provider"})
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_dns_provider_failed", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_dns_provider_failed", err)
 	}
 	body := map[string]any{"status": "ok", "dns_provider_id": provider.ID, "name": provider.Name, "type": provider.Type, "zone_mode": provider.ZoneMode}
-	return r.reportBootstrapSuccess(*jsonOut, body, func() {
+	return r.reportBootstrapSuccess(opts.jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "created dns provider %s (%s)\n", provider.Name, provider.ID)
 	})
 }
 
-func (r ServerRunner) bootstrapAddDNSProviderZone(args []string) int {
-	fs := flag.NewFlagSet("bootstrap add-dns-provider-zone", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	providerRef := fs.String("dns-provider", "", "DNS provider name or ID")
-	zoneName := fs.String("zone", "", "DNS zone name")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	if err := fs.Parse(args); err != nil {
-		return 2
+type bootstrapAddDNSProviderZoneOptions struct {
+	configPath  *string
+	providerRef string
+	zoneName    string
+	jsonOut     bool
+}
+
+func (r ServerRunner) bootstrapAddDNSProviderZoneCommand(exitCode *int, configPath *string) *cobra.Command {
+	opts := bootstrapAddDNSProviderZoneOptions{configPath: configPath}
+	cmd := &cobra.Command{
+		Use:   "add-dns-provider-zone",
+		Short: "Add a DNS provider zone",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.bootstrapAddDNSProviderZone(opts)
+		},
 	}
-	if fs.NArg() != 0 || *providerRef == "" || *zoneName == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider and zone are required"))
+	cmd.Flags().StringVar(&opts.providerRef, "dns-provider", "", "DNS provider name or ID")
+	cmd.Flags().StringVar(&opts.zoneName, "zone", "", "DNS zone name")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) bootstrapAddDNSProviderZone(opts bootstrapAddDNSProviderZoneOptions) int {
+	if opts.providerRef == "" || opts.zoneName == "" {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider and zone are required"))
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
 	defer boot.Close()
-	provider, err := boot.dnsRepo.GetByName(context.Background(), *providerRef)
+	provider, err := boot.dnsRepo.GetByName(context.Background(), opts.providerRef)
 	if err != nil {
-		provider, err = boot.dnsRepo.Get(context.Background(), *providerRef)
+		provider, err = boot.dnsRepo.Get(context.Background(), opts.providerRef)
 	}
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "dns_provider_not_found", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "dns_provider_not_found", err)
 	}
-	zone, err := boot.dns.AddZone(context.Background(), dnsproviders.Actor{ID: bootstrapActorID, GlobalRole: users.GlobalRoleAdmin, System: true}, provider.ID, *zoneName, dnsproviders.AuditContext{CorrelationID: "bootstrap-add-dns-provider-zone", Command: "certhub-server bootstrap add-dns-provider-zone"})
+	zone, err := boot.dns.AddZone(context.Background(), dnsproviders.Actor{ID: bootstrapActorID, GlobalRole: users.GlobalRoleAdmin, System: true}, provider.ID, opts.zoneName, dnsproviders.AuditContext{CorrelationID: "bootstrap-add-dns-provider-zone", Command: "certhub-server bootstrap add-dns-provider-zone"})
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_dns_zone_failed", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_dns_zone_failed", err)
 	}
 	body := map[string]any{"status": "ok", "zone_id": zone.ID, "dns_provider_id": zone.DNSProviderID, "zone": zone.ZoneName}
-	return r.reportBootstrapSuccess(*jsonOut, body, func() {
+	return r.reportBootstrapSuccess(opts.jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "added dns provider zone %s (%s)\n", zone.ZoneName, zone.ID)
 	})
 }
 
-func (r ServerRunner) bootstrapRefreshDNSProviderZones(args []string) int {
-	fs := flag.NewFlagSet("bootstrap refresh-dns-provider-zones", flag.ContinueOnError)
-	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	providerRef := fs.String("dns-provider", "", "DNS provider name or ID")
-	jsonOut := fs.Bool("json", false, "print JSON output")
-	if err := fs.Parse(args); err != nil {
-		return 2
+type bootstrapRefreshDNSProviderZonesOptions struct {
+	configPath  *string
+	providerRef string
+	jsonOut     bool
+}
+
+func (r ServerRunner) bootstrapRefreshDNSProviderZonesCommand(exitCode *int, configPath *string) *cobra.Command {
+	opts := bootstrapRefreshDNSProviderZonesOptions{configPath: configPath}
+	cmd := &cobra.Command{
+		Use:   "refresh-dns-provider-zones",
+		Short: "Refresh DNS provider zones",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			*exitCode = r.bootstrapRefreshDNSProviderZones(opts)
+		},
 	}
-	if fs.NArg() != 0 || *providerRef == "" {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider is required"))
+	cmd.Flags().StringVar(&opts.providerRef, "dns-provider", "", "DNS provider name or ID")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
+	return cmd
+}
+
+func (r ServerRunner) bootstrapRefreshDNSProviderZones(opts bootstrapRefreshDNSProviderZonesOptions) int {
+	if opts.providerRef == "" {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider is required"))
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
 	defer boot.Close()
-	provider, err := boot.dnsRepo.GetByName(context.Background(), *providerRef)
+	provider, err := boot.dnsRepo.GetByName(context.Background(), opts.providerRef)
 	if err != nil {
-		provider, err = boot.dnsRepo.Get(context.Background(), *providerRef)
+		provider, err = boot.dnsRepo.Get(context.Background(), opts.providerRef)
 	}
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "dns_provider_not_found", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "dns_provider_not_found", err)
 	}
 	job, err := boot.dns.RefreshZones(context.Background(), dnsproviders.Actor{ID: bootstrapActorID, GlobalRole: users.GlobalRoleAdmin, System: true}, provider.ID, dnsproviders.AuditContext{CorrelationID: "bootstrap-refresh-dns-provider-zones", Command: "certhub-server bootstrap refresh-dns-provider-zones"})
 	if err != nil {
-		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_dns_zone_refresh_failed", err)
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "bootstrap_dns_zone_refresh_failed", err)
 	}
 	body := map[string]any{"status": "ok", "refresh_job_id": job.ID, "dns_provider_id": job.DNSProviderID}
-	return r.reportBootstrapSuccess(*jsonOut, body, func() {
+	return r.reportBootstrapSuccess(opts.jsonOut, body, func() {
 		fmt.Fprintf(r.Stdout, "queued dns provider zone refresh %s\n", job.ID)
 	})
 }
