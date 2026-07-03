@@ -44,6 +44,8 @@ type Store interface {
 	ListVersions(context.Context, ListVersionsParams) ([]CertificateVersion, error)
 	CountVersions(context.Context, string) (int64, error)
 	GetVersion(context.Context, string) (CertificateVersion, error)
+	ListEvents(context.Context, ListEventsParams) ([]Event, error)
+	CountEvents(context.Context, ListEventsParams) (int64, error)
 	GetLatestValidMaterial(context.Context, string) (CertificateVersion, error)
 	CreateIssuingVersion(context.Context, CreateIssuingVersionParams) (CertificateVersion, error)
 	EnsureIssuanceJob(context.Context, EnsureIssuanceJobParams) (IssuanceJob, error)
@@ -137,6 +139,13 @@ type VersionListResult struct {
 	Limit    int
 	Offset   int
 	Total    int64
+}
+
+type EventListResult struct {
+	Events []Event
+	Limit  int
+	Offset int
+	Total  int64
 }
 
 type MaterialResult struct {
@@ -309,6 +318,34 @@ func (s *Service) ListVersions(ctx context.Context, actor Actor, certificateID s
 		return VersionListResult{}, classifyReadError(err)
 	}
 	return VersionListResult{Versions: versions, Limit: normalized.Limit, Offset: normalized.Offset, Total: total}, nil
+}
+
+func (s *Service) ListVersionEvents(ctx context.Context, actor Actor, certificateID, versionID string, opts storage.ListOptions) (EventListResult, error) {
+	cert, err := s.visibleCertificate(ctx, actor, certificateID, roleViewer, true)
+	if err != nil {
+		return EventListResult{}, err
+	}
+	version, err := s.repo.GetVersion(ctx, versionID)
+	if err != nil {
+		return EventListResult{}, classifyReadError(err)
+	}
+	if version.CertificateID != cert.ID {
+		return EventListResult{}, ErrNotFound
+	}
+	normalized, err := storage.NormalizeListOptions(opts)
+	if err != nil {
+		return EventListResult{}, ErrInvalidRequest
+	}
+	params := ListEventsParams{ListOptions: normalized, CertificateID: cert.ID, CertificateVersionID: &version.ID}
+	events, err := s.repo.ListEvents(ctx, params)
+	if err != nil {
+		return EventListResult{}, classifyReadError(err)
+	}
+	total, err := s.repo.CountEvents(ctx, params)
+	if err != nil {
+		return EventListResult{}, classifyReadError(err)
+	}
+	return EventListResult{Events: events, Limit: normalized.Limit, Offset: normalized.Offset, Total: total}, nil
 }
 
 func (s *Service) MaterialForCriteria(ctx context.Context, actor ApplicationActor, criteria Criteria, _ AuditContext) (MaterialResult, error) {

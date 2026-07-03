@@ -33,6 +33,7 @@ const expectedOperations = new Set([
   'GET /v1/certificates/{certificate_id}',
   'GET /v1/certificates/{certificate_id}/versions',
   'GET /v1/certificates/{certificate_id}/tls-archive',
+  'GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events',
   'GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive',
   'POST /v1/certificates/{certificate_id}/renew',
   'POST /v1/certificates/{certificate_id}/rotate-key',

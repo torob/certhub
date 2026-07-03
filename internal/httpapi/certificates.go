@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -71,6 +72,19 @@ type apiCertificateVersion struct {
 	IssuedAt                     *time.Time `json:"issued_at,omitempty"`
 	FailureCode                  *string    `json:"failure_code,omitempty"`
 	FailureMessage               *string    `json:"failure_message,omitempty"`
+}
+
+type apiCertificateEvent struct {
+	ID                   string          `json:"id"`
+	CertificateID        string          `json:"certificate_id"`
+	CertificateVersionID *string         `json:"certificate_version_id,omitempty"`
+	IssuanceJobID        *string         `json:"issuance_job_id,omitempty"`
+	EventType            string          `json:"event_type"`
+	Result               string          `json:"result"`
+	CorrelationID        *string         `json:"correlation_id,omitempty"`
+	Message              *string         `json:"message,omitempty"`
+	Metadata             json.RawMessage `json:"metadata"`
+	CreatedAt            time.Time       `json:"created_at"`
 }
 
 func isCertificateEndpoint(p string) bool {
@@ -223,6 +237,8 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 	actor := certificateActor(current)
 	if certID, versionID, tail, ok := certificateVersionPath(r.URL.Path); ok {
 		switch {
+		case r.Method == http.MethodGet && tail == "events":
+			return s.handleCertificateVersionEvents(w, r, actor, certID, versionID)
 		case r.Method == http.MethodGet && tail == "tls-archive":
 			return s.handleIDVersionArchive(w, r, reqctx, actor, certID, versionID)
 		case r.Method == http.MethodPost && tail == "revoke":
@@ -380,6 +396,24 @@ func (s *Server) handleCertificateEvents(w http.ResponseWriter, r *http.Request,
 	}
 	noStoreHeaders(w.Header())
 	writeJSON(w, http.StatusOK, map[string]any{"audit_events": events, "pagination": pageMeta(result.Limit, result.Offset, result.Total)})
+	return http.StatusOK, ""
+}
+
+func (s *Server) handleCertificateVersionEvents(w http.ResponseWriter, r *http.Request, actor certdomain.Actor, certificateID, versionID string) (int, string) {
+	opts, err := parseListOptions(r)
+	if err != nil {
+		return writeCertificateError(w, certdomain.ErrInvalidRequest)
+	}
+	result, err := s.certs.ListVersionEvents(r.Context(), actor, certificateID, versionID, opts)
+	if err != nil {
+		return writeCertificateError(w, err)
+	}
+	events := make([]apiCertificateEvent, 0, len(result.Events))
+	for _, event := range result.Events {
+		events = append(events, serializeCertificateEvent(event))
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{"certificate_events": events, "pagination": pageMeta(result.Limit, result.Offset, result.Total)})
 	return http.StatusOK, ""
 }
 
@@ -674,6 +708,25 @@ func serializeCertificateVersion(version certdomain.CertificateVersion) apiCerti
 		out.RevocationReason = &raw
 	}
 	return out
+}
+
+func serializeCertificateEvent(event certdomain.Event) apiCertificateEvent {
+	metadata := event.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	return apiCertificateEvent{
+		ID:                   event.ID,
+		CertificateID:        event.CertificateID,
+		CertificateVersionID: event.CertificateVersionID,
+		IssuanceJobID:        event.IssuanceJobID,
+		EventType:            event.EventType,
+		Result:               string(event.Result),
+		CorrelationID:        event.CorrelationID,
+		Message:              event.Message,
+		Metadata:             metadata,
+		CreatedAt:            event.CreatedAt,
+	}
 }
 
 func acceptsGzip(header string) bool {

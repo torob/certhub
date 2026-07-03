@@ -994,6 +994,7 @@ Rules:
 | `GET` | `/v1/certificates` | List certificate metadata with optional filters such as domain, Application, status, and expiry. |
 | `GET` | `/v1/certificates/{certificate_id}` | Return certificate metadata by ID for human/web-console workflows. |
 | `GET` | `/v1/certificates/{certificate_id}/versions` | List CertificateVersion metadata for one certificate. |
+| `GET` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/events` | List operational issuance events for one CertificateVersion. |
 | `GET` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` | Return TLS material for a specific downloadable CertificateVersion as a tar.gz archive. |
 | `POST` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke` | Revoke one specific CertificateVersion. |
 | `GET` | `/v1/certificates/{certificate_id}/tls-archive` | Return current TLS material as a tar.gz archive for a certificate selected by ID. |
@@ -1740,6 +1741,37 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: token is not a User access token.
 - `404 Not Found`: certificate does not exist, is deleted, or is not visible to the User.
+
+#### GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events
+
+Summary: List operational issuance events for one CertificateVersion.
+
+Description and notes:
+
+- User/web-console endpoint for troubleshooting exactly what the issuance worker did for a CertificateVersion.
+- User visibility follows the Certificate ID-based access rules from `Certificate Identity and Reuse`.
+- Returns `certificate_events`, not `audit_events`; these are worker and lifecycle operational events scoped to the CertificateVersion.
+- Events are sorted oldest first by `created_at` and stable ID so the response can be rendered as a timeline.
+- Event metadata must be structured JSON and must not contain private keys, raw ACME account keys, DNS provider credentials, raw DNS TXT values, raw tokens, or TOTP/password material.
+- Failure events must include a sanitized actionable `message` and `metadata.failure_code`/`metadata.failure_message` when a worker knows the root cause. Opaque storage messages such as bare `SQLSTATE P0001` must be converted to an operator-actionable reason when the failing worker phase is known.
+- Previewing or reading these events is not a private-key access operation.
+
+```http
+GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events
+Authorization: Bearer <user-access-token>
+```
+
+Query params: Optional pagination.
+
+Request body: None.
+
+Expected responses:
+
+- `200 OK`: list of operational CertificateVersion events.
+- `400 Bad Request`: invalid pagination parameter.
+- `401 Unauthorized`: token is missing or invalid.
+- `403 Forbidden`: token is not a User access token.
+- `404 Not Found`: certificate or CertificateVersion does not exist, is deleted, or is not visible to the User.
 
 #### GET /v1/certificates/{certificate_id}/tls-archive
 
@@ -3030,6 +3062,7 @@ Worker rules:
 - Completed issuance steps must be idempotent when retried after a worker crash.
 - DNS challenge cleanup must use the recorded TXT record names and exact TXT values from the database, not recompute or guess them from current order state.
 - There must be at most one active issuance job for one CertificateVersion, and at most one CertificateVersion with `status=issuing` per Certificate.
+- Workers must append operational `certificate_events` as significant issuance steps occur, including CertificateVersion load/create/attach, private-key readiness, ACME order create/fetch/finalize, authorization fetch, DNS challenge record create/reuse, DNS presentation, DNS propagation, ACME challenge accept, DNS cleanup queueing, material storage, and failure points. These events must include non-secret structured metadata sufficient for operators to identify the failing provider, zone, authorization, job attempt, and root-cause phase. Failures caused by the active-valid-CertificateVersion limit must be recorded as an actionable version-overlap failure, including active/max version counts.
 
 1. Application client calls `POST /v1/sync/certificates/tls-material` or `POST /v1/sync/certificates/tls-archive` with the complete certificate criteria.
 2. Backend derives the Application from the token, normalizes domains, checks Application domain-scope coverage, and computes the certificate identity.
@@ -3052,6 +3085,8 @@ Worker rules:
 19. Certificate status becomes `ready`.
 20. The next material/archive retry returns the latest valid material or `204 No Content` if `If-None-Match` already matches.
 21. If issuance fails, material/archive retries return `409 certificate_issuance_failed` with failure metadata; clients should stop after their own timeout or failure policy.
+
+Every step from CertificateVersion creation or reuse through material storage or failure must be visible through `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`. This timeline is operational state, not an audit log. It must be safe for managers to inspect when troubleshooting DNS propagation, issuer, provider, or ACME failures.
 
 Web-console Certificate creation uses the same issuance and reconciliation path:
 
@@ -3748,6 +3783,25 @@ Certhub creates and manages these rows when an admin creates or activates an ACM
 | `updated_at` | timestamptz | Required | Last metadata update. |
 
 Constraint: one active ACME account per issuer is the v1 default. An issuer cannot be `active` unless Certhub has a usable active ACME account for it.
+
+### `certificate_events`
+
+Operational Certificate and CertificateVersion timeline events.
+
+| Field | Type | Constraints | Description |
+| --- | --- | --- | --- |
+| `id` | UUID | Primary key | Stable event ID. |
+| `certificate_id` | UUID | Required, foreign key to `certificates.id`, indexed | Certificate being issued, renewed, reissued, rotated, revoked, or cleaned up. |
+| `certificate_version_id` | UUID | Nullable, foreign key to `certificate_versions.id`, indexed | CertificateVersion affected by this event when known. |
+| `issuance_job_id` | UUID | Nullable, foreign key to `issuance_jobs.id`, indexed | Worker job that produced this event when applicable. |
+| `event_type` | string | Required, indexed | Stable operational event name such as `dns_challenge_propagated`. |
+| `result` | enum | Required, one of `success`, `failure` | Event result. |
+| `correlation_id` | string | Nullable, format `correlation_id` | HTTP or worker correlation ID when available. |
+| `message` | string | Nullable | Sanitized human-readable detail. |
+| `metadata` | JSON object | Required, default `{}` | Non-secret structured details for troubleshooting. |
+| `created_at` | timestamptz | Required, indexed | Event time. |
+
+Certificate events are append-only operational telemetry. `metadata` and `message` must not contain private keys, raw tokens, ACME account private keys, DNS provider credentials, raw DNS TXT values, passwords, TOTP secrets, or TOTP codes.
 
 ### `audit_events`
 

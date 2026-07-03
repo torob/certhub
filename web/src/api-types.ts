@@ -454,6 +454,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/certificates/{certificate_id}/versions/{certificate_version_id}/events": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        /** List operational issuance events for one CertificateVersion. */
+        get: operations["listCertificateVersionEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke": {
         parameters: {
             query?: never;
@@ -1719,6 +1742,10 @@ export interface components {
         CertificateVersionResponse: {
             version: components["schemas"]["CertificateVersionMetadata"];
         };
+        CertificateEventListResponse: {
+            certificate_events: components["schemas"]["CertificateEvent"][];
+            pagination: components["schemas"]["PageMeta"];
+        };
         CertificateVersionMetadata: {
             /** Format: uuid */
             id: string;
@@ -1758,6 +1785,26 @@ export interface components {
             issued_at?: string | null;
             failure_code?: string | null;
             failure_message?: string | null;
+        };
+        CertificateEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            certificate_id: string;
+            /** Format: uuid */
+            certificate_version_id?: string | null;
+            /** Format: uuid */
+            issuance_job_id?: string | null;
+            event_type: string;
+            /** @enum {string} */
+            result: "success" | "failure";
+            correlation_id?: components["schemas"]["CorrelationID"];
+            message?: string | null;
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
         };
         TLSMaterialResponse: {
             /** Format: uuid */
@@ -2882,6 +2929,42 @@ export interface operations {
             404: components["responses"]["NotFound"];
             406: components["responses"]["NotAcceptable"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    listCertificateVersionEvents: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+                offset?: components["parameters"]["Offset"];
+            };
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+                certificate_version_id: components["parameters"]["CertificateVersionID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Operational events sorted oldest first. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificateEventListResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     revokeCertificateVersion: {

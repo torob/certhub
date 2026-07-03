@@ -116,6 +116,8 @@ type RouteState = {
   create?: "certificate" | "application" | "user" | "issuer" | "dns";
   detail?: ResourceType;
   id?: string;
+  versionID?: string;
+  versionEvents?: boolean;
   profile?: boolean;
   signup?: boolean;
   resetPassword?: boolean;
@@ -155,6 +157,7 @@ function parseRoute(): RouteState {
   if (path === "/reset-password") return { page: "home", resetPassword: true, path, query };
   if (path === "/profile") return { page: "home", profile: true, path, query };
   if (parts.length === 3 && ["applications", "users", "issuers", "dns-providers"].includes(parts[0]) && parts[2] === "edit") return { page: "home", invalid: true, path, query };
+  if (parts.length === 5 && parts[0] === "certificates" && parts[2] === "versions" && parts[4] === "events") return { page: "certificates", id: parts[1], versionID: parts[3], versionEvents: true, path, query };
   if (parts.length === 2 && parts[0] === "certificates" && parts[1] !== "new") return { page: "certificates", detail: "certificate", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "applications" && parts[1] !== "new") return { page: "applications", detail: "application", id: parts[1], path, query };
   if (parts.length === 2 && parts[0] === "users" && parts[1] !== "new") return { page: "users", detail: "user", id: parts[1], path, query };
@@ -546,6 +549,7 @@ function AppShell() {
 
   const Page = route.invalid ? NotFoundPage :
     route.profile ? ProfilePage :
+    route.versionEvents ? CertificateVersionEventsPage :
     route.detail === "certificate" ? CertificateDetailPage :
     route.detail === "application" ? ApplicationDetailPage :
     route.detail === "user" ? UserDetailPage :
@@ -1085,13 +1089,53 @@ function CertificateDetailPage(props: PageProps) {
     table(versions, ["version", "status", "reason", "not_after", "revocation_reason", "failure_code",
       { key: "failure_message", label: "Failure message", render: (version) => version.failure_message ? rowAction("View", () => setFailureMessage(String(version.failure_message)), { label: `View failure message for version ${version.version}` }) : "" },
       actionsColumn((version) => [
+        rowAction("Events", () => props.navigate(`/certificates/${id}/versions/${version.id}/events`), { icon: Activity, label: `View events for version ${version.version}` }),
         canDownloadArchive && versionDownloadable(version) ? rowAction("Download", () => downloadArchive(props.session, cert.id, props.setNotice, version.id), { icon: Download, label: `Download version ${version.version}` }) : null,
         canLifecycle && version.status === "valid" ? rowAction("Revoke", () => versionAction(version, "/revoke", { reason: "cessation_of_operation" }), { icon: X, danger: true, label: `Revoke version ${version.version}` }) : null
       ])
     ]),
-    createElement("h2", null, "Events"),
+    createElement("h2", null, "Audit events"),
     table(events, auditColumns()),
     failureMessage ? createElement(FailureMessageDialog, { message: failureMessage, onClose: () => setFailureMessage("") }) : null
+  );
+}
+
+function CertificateVersionEventsPage(props: PageProps) {
+  const certificateID = props.route.id || "";
+  const versionID = props.route.versionID || "";
+  const [refresh, setRefresh] = useState(0);
+  const detail = useAsync<{ certificate: any }>(props.session, certificateID ? `/v1/certificates/${certificateID}` : "", [certificateID, refresh]);
+  const versions = useAsync<{ versions: any[] }>(props.session, certificateID ? `/v1/certificates/${certificateID}/versions?limit=100` : "", [certificateID, refresh]);
+  const events = useAsync<{ certificate_events: any[] }>(props.session, certificateID && versionID ? `/v1/certificates/${certificateID}/versions/${versionID}/events?limit=100` : "", [certificateID, versionID, refresh]);
+  const cert = detail.data?.certificate || {};
+  const version = rowsOf(versions).find((row) => row.id === versionID);
+  const eventRows = rowsOf(events);
+  const failureSummary = certificateEventFailureSummary(version, eventRows);
+  const refreshing = loadingAny(detail, versions, events);
+  return pageFrame(
+    "Certificate Events",
+    createElement("div", { className: "header-actions" },
+      createElement("button", { onClick: () => props.navigate(`/certificates/${certificateID}`) }, "Back"),
+      refreshButton(refreshing, () => setRefresh((value) => value + 1))
+    ),
+    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
+      createElement("h2", null, certificateLabel(cert)),
+      kv("Certificate ID", cert.id || certificateID),
+      kv("Domains", (cert.normalized_sans || []).join(", ")),
+      kv("Status", cert.status || ""),
+      kv("Version", version ? String(version.version) : versionID),
+      version ? kv("Version status", version.status) : null,
+      version ? kv("Reason", version.reason) : null,
+      version?.failure_code ? kv("Failure code", version.failure_code) : null,
+      version?.failure_message ? kv("Failure message", version.failure_message) : null
+    ),
+    createElement("section", { className: "detail events-detail" },
+      createElement("h2", null, "Issuance events"),
+      failureSummary ? createElement(CertificateEventFailureSummary, { summary: failureSummary }) : null,
+      blockingError(events) ? createElement("div", { className: "error" }, events.error?.code, ": ", events.error?.message) :
+        initialLoading(events) ? createElement("div", { className: "empty" }, "Loading") :
+          createElement(CertificateEventTimeline, { events: eventRows })
+    )
   );
 }
 
@@ -2048,6 +2092,82 @@ function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, col
   );
 }
 
+function CertificateEventTimeline(props: { events: any[] }) {
+  if (!props.events.length) return createElement("div", { className: "empty" }, "No issuance events recorded");
+  return createElement("ol", { className: "event-timeline" },
+    props.events.map((event) => {
+      const metadata = certificateEventMetadata(event);
+      const failureCode = event.result === "failure" ? metadata.failure_code : "";
+      const failureMessage = event.result === "failure" ? event.message || metadata.failure_message : "";
+      return createElement("li", { key: event.id || `${event.event_type}-${event.created_at}`, className: event.result === "failure" ? "event-item failure" : "event-item" },
+        createElement("div", { className: "event-marker", "aria-hidden": "true" }),
+        createElement("div", { className: "event-body" },
+          createElement("div", { className: "event-head" },
+            createElement("strong", null, labelForColumn(event.event_type || "event")),
+            createElement("span", { className: event.result === "failure" ? "event-result failure" : "event-result" }, event.result || "success")
+          ),
+          createElement("div", { className: "event-meta" },
+            event.created_at ? createElement("span", null, event.created_at) : null,
+            event.issuance_job_id ? createElement("span", null, `job ${event.issuance_job_id}`) : null,
+            event.correlation_id ? createElement("span", null, event.correlation_id) : null
+          ),
+          failureCode || failureMessage ? createElement("div", { className: "event-failure-fields" },
+            failureCode ? kv("Failure code", failureCode) : null,
+            failureMessage ? kv("Failure message", failureMessage) : null
+          ) : event.message ? createElement("p", { className: "event-message" }, event.message) : null,
+          createElement("pre", { className: "event-metadata" }, createElement("code", null, jsonBlock(event.metadata || {})))
+        )
+      );
+    })
+  );
+}
+
+function CertificateEventFailureSummary(props: { summary: { code?: string; message?: string; hint?: string } }) {
+  return createElement("div", { className: "failure-summary" },
+    createElement("strong", null, "Latest failure"),
+    props.summary.code ? kv("Failure code", props.summary.code) : null,
+    props.summary.message ? kv("Failure message", props.summary.message) : null,
+    props.summary.hint ? createElement("p", null, props.summary.hint) : null
+  );
+}
+
+function certificateEventFailureSummary(version: any, events: any[]) {
+  const failedEvents = events.filter((event) => event.result === "failure");
+  const latestFailure = failedEvents.length ? failedEvents[failedEvents.length - 1] : undefined;
+  const metadata = certificateEventMetadata(latestFailure);
+  const code = metadata.failure_code || version?.failure_code || "";
+  const message = latestFailure?.message || metadata.failure_message || version?.failure_message || "";
+  if (!code && !message && version?.status !== "failed") return undefined;
+  return {
+    code,
+    message,
+    hint: certificateFailureHint(code, message)
+  };
+}
+
+function certificateFailureHint(code?: string, message?: string) {
+  const text = `${code || ""} ${message || ""}`.toLowerCase();
+  if (text.includes("certificate_version_overlap") || text.includes("too many active valid certificate versions")) {
+    return "This certificate already has the maximum number of active valid versions. Revoke an older valid version, or wait for one to expire, then retry renewal or key rotation.";
+  }
+  if (text.includes("certificate_material_store_failed") && text.includes("sqlstate p0001")) {
+    return "This material-store failure was raised by a database rule. In this phase, SQLSTATE P0001 commonly means the certificate already has too many active valid versions. Revoke an older valid version, or wait for one to expire, then retry renewal or key rotation.";
+  }
+  return "";
+}
+
+function certificateEventMetadata(event: any): Record<string, any> {
+  if (!event?.metadata) return {};
+  if (typeof event.metadata === "string") {
+    try {
+      return JSON.parse(event.metadata);
+    } catch {
+      return {};
+    }
+  }
+  return event.metadata;
+}
+
 function rowsOf(result: { data?: any }): any[] {
   const key = Object.keys(result.data || {}).find((k) => Array.isArray(result.data[k]));
   return key ? result.data[key] : [];
@@ -2579,6 +2699,17 @@ function cell(value: unknown): string {
   if (Array.isArray(value)) return value.join(", ");
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function jsonBlock(value: unknown): string {
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value || {}, null, 2);
 }
 
 function errorText(result: APIResult<unknown>) {

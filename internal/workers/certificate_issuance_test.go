@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -187,6 +188,29 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 			t.Fatalf("unexpected inline cleanup event %q in %#v", event, fixture.recorder.events)
 		}
 	}
+	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_version_loaded")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_private_key_ready")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_ready")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_version_prepared")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_authorization_fetched")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_record_created")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_presented")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_propagated")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_challenge_accepted")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "dns_challenge_cleanup_pending")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_finalized")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_material_stored")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_dns_cleanup_queued")
+	for _, event := range fixture.store.events {
+		if event.CertificateVersionID == nil || *event.CertificateVersionID != fixture.version.ID {
+			t.Fatalf("event %s missing certificate version id: %#v", event.EventType, event)
+		}
+		for _, leaked := range []string{"txt-cf", "txt-arvan", "token-cf", "token-arvan"} {
+			if strings.Contains(string(event.Metadata), leaked) {
+				t.Fatalf("event %s metadata leaked %s in %s", event.EventType, leaked, string(event.Metadata))
+			}
+		}
+	}
 }
 
 func TestIssuanceFailureStoresSanitizedRootCauseInJobAndAuditEvent(t *testing.T) {
@@ -257,6 +281,53 @@ func TestIssuanceFailureStoresSanitizedRootCauseInJobAndAuditEvent(t *testing.T)
 			t.Fatalf("metadata leaked %s in %s", leaked, string(failureEvent.Metadata))
 		}
 	}
+}
+
+func TestIssuanceFailsBeforeStoreMaterialWhenActiveVersionLimitReached(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	notAfter := time.Now().UTC().Add(time.Hour)
+	fixture.store.listVersions = []certificates.CertificateVersion{
+		{ID: "52345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+		{ID: "62345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+		fixture.version,
+	}
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
+	}
+	if job.Status != certificates.JobStatusFailed {
+		t.Fatalf("job status = %s", job.Status)
+	}
+	if len(fixture.store.storeMaterialCalls) != 0 {
+		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
+	}
+	assertVersionOverlapFailure(t, fixture)
+}
+
+func TestIssuanceClassifiesMaterialStoreP0001AsVersionOverlap(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.store.storeMaterialErr = errors.New("store certificate material: postgresql error: SQLSTATE P0001")
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
+	}
+	if job.Status != certificates.JobStatusFailed {
+		t.Fatalf("job status = %s", job.Status)
+	}
+	if len(fixture.store.storeMaterialCalls) != 1 {
+		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
+	}
+	assertVersionOverlapFailure(t, fixture)
 }
 
 func TestRenewalGeneratesFreshPrivateKeyForNewVersion(t *testing.T) {
@@ -698,9 +769,11 @@ type fakeIssuanceStore struct {
 	claimJob           certificates.IssuanceJob
 	cert               certificates.Certificate
 	version            certificates.CertificateVersion
+	listVersions       []certificates.CertificateVersion
 	records            []certificates.DNSChallengeRecord
 	cleanupMarks       []string
 	storeMaterialCalls []certificates.StoreMaterialParams
+	storeMaterialErr   error
 	ensureJobCalls     []certificates.EnsureIssuanceJobParams
 	succeedJobCalls    []certificates.SucceedIssuanceJobParams
 	failJobCalls       []certificates.FailIssuanceJobParams
@@ -736,7 +809,10 @@ func (s *fakeIssuanceStore) GetVersion(_ context.Context, id string) (certificat
 }
 
 func (s *fakeIssuanceStore) ListVersions(context.Context, certificates.ListVersionsParams) ([]certificates.CertificateVersion, error) {
-	return nil, nil
+	if s.listVersions != nil {
+		return append([]certificates.CertificateVersion(nil), s.listVersions...), nil
+	}
+	return []certificates.CertificateVersion{s.version}, nil
 }
 
 func (s *fakeIssuanceStore) CreateIssuingVersion(context.Context, certificates.CreateIssuingVersionParams) (certificates.CertificateVersion, error) {
@@ -770,6 +846,9 @@ func (s *fakeIssuanceStore) StoreMaterial(_ context.Context, params certificates
 		return certificates.CertificateVersion{}, storage.ErrNoRows
 	}
 	s.storeMaterialCalls = append(s.storeMaterialCalls, params)
+	if s.storeMaterialErr != nil {
+		return certificates.CertificateVersion{}, s.storeMaterialErr
+	}
 	s.version.Status = certificates.VersionStatusValid
 	s.version.CertPEM = &params.CertPEM
 	s.version.ChainPEM = &params.ChainPEM
@@ -950,4 +1029,54 @@ func assertEventBefore(t *testing.T, events []string, before, after string) {
 	if beforeIndex == -1 || afterIndex == -1 || beforeIndex >= afterIndex {
 		t.Fatalf("events order missing %q before %q: %#v", before, after, events)
 	}
+}
+
+func assertRecordedIssuanceEvent(t *testing.T, events []certificates.RecordEventParams, eventType string) {
+	t.Helper()
+	for _, event := range events {
+		if event.EventType == eventType && event.Result == certificates.EventResultSuccess {
+			return
+		}
+	}
+	t.Fatalf("missing success event %q in %#v", eventType, events)
+}
+
+func assertVersionOverlapFailure(t *testing.T, fixture issuanceWorkerFixture) {
+	t.Helper()
+	if len(fixture.store.failJobCalls) != 1 {
+		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
+	}
+	failure := fixture.store.failJobCalls[0]
+	if failure.FailureCode != "certificate_version_overlap" {
+		t.Fatalf("failure code = %s", failure.FailureCode)
+	}
+	if failure.FailureMessage == nil || !strings.Contains(*failure.FailureMessage, "too many active valid certificate versions") {
+		t.Fatalf("failure message = %#v", failure.FailureMessage)
+	}
+	for _, event := range fixture.store.events {
+		if event.EventType != "certificate_issuance_failed" {
+			continue
+		}
+		if event.Message == nil || *event.Message != *failure.FailureMessage {
+			t.Fatalf("event message = %#v want %q", event.Message, *failure.FailureMessage)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
+			t.Fatalf("metadata: %v", err)
+		}
+		if metadata["failure_code"] != "certificate_version_overlap" {
+			t.Fatalf("metadata failure_code = %#v", metadata["failure_code"])
+		}
+		if metadata["phase"] != "certificate_material_store" {
+			t.Fatalf("metadata phase = %#v", metadata["phase"])
+		}
+		if metadata["max_active_valid_versions"] != float64(maxActiveValidVersions) {
+			t.Fatalf("metadata max_active_valid_versions = %#v", metadata["max_active_valid_versions"])
+		}
+		if strings.Contains(string(event.Metadata), "SQLSTATE P0001") {
+			t.Fatalf("event metadata kept opaque SQLSTATE: %s", string(event.Metadata))
+		}
+		return
+	}
+	t.Fatalf("missing certificate_issuance_failed event in %#v", fixture.store.events)
 }

@@ -887,6 +887,46 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/XRequestID'
+      - $ref: '#/components/parameters/CertificateID'
+      - $ref: '#/components/parameters/CertificateVersionID'
+    get:
+      tags: [Certificates]
+      operationId: listCertificateVersionEvents
+      summary: List operational issuance events for one CertificateVersion.
+      security:
+        - UserBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Operational events sorted oldest first.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateEventListResponse'
+              examples:
+                events:
+                  $ref: '#/components/examples/CertificateEventListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
@@ -4443,6 +4483,17 @@ components:
       properties:
         version:
           $ref: '#/components/schemas/CertificateVersionMetadata'
+    CertificateEventListResponse:
+      type: object
+      additionalProperties: false
+      required: [certificate_events, pagination]
+      properties:
+        certificate_events:
+          type: array
+          items:
+            $ref: '#/components/schemas/CertificateEvent'
+        pagination:
+          $ref: '#/components/schemas/PageMeta'
     CertificateVersionMetadata:
       type: object
       additionalProperties: false
@@ -4534,6 +4585,44 @@ components:
           type: string
           maxLength: 2048
           nullable: true
+    CertificateEvent:
+      type: object
+      additionalProperties: false
+      required: [id, certificate_id, event_type, result, metadata, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        certificate_id:
+          type: string
+          format: uuid
+        certificate_version_id:
+          type: string
+          format: uuid
+          nullable: true
+        issuance_job_id:
+          type: string
+          format: uuid
+          nullable: true
+        event_type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        result:
+          type: string
+          enum: [success, failure]
+        correlation_id:
+          $ref: '#/components/schemas/CorrelationID'
+        message:
+          type: string
+          maxLength: 2048
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
     TLSMaterialResponse:
       type: object
       additionalProperties: false
@@ -5195,6 +5284,26 @@ components:
           reason: reissue
           created_at: '2026-06-24T12:00:00Z'
           updated_at: '2026-06-24T12:00:00Z'
+    CertificateEventListResponse:
+      value:
+        certificate_events:
+          - id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d91
+            certificate_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
+            certificate_version_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d44
+            issuance_job_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d92
+            event_type: dns_challenge_propagated
+            result: success
+            correlation_id: req_01HZY9T8YF3KZ9F2V5G9N0E2ZP
+            message: DNS challenge propagated.
+            metadata:
+              authorization_identifier: api.torob.dev
+              dns_challenge_record_name: _acme-challenge.api.torob.dev
+              dns_provider_type: cloudflare
+            created_at: '2026-06-24T12:02:00Z'
+        pagination:
+          limit: 50
+          offset: 0
+          total: 1
     CertificateRevokeRequest:
       value:
         reason: cessation_of_operation

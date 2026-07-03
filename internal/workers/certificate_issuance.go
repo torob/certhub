@@ -35,6 +35,8 @@ const (
 	defaultDNSChallengeTTL       = 120
 	defaultIssuanceMaxAttempts   = 5
 	defaultIssuanceRetryBackoff  = 30 * time.Second
+	maxActiveValidVersions       = 2
+	versionOverlapFailureMessage = "too many active valid certificate versions; revoke or wait for an older valid version before retrying renewal or key rotation"
 )
 
 type CertificateIssuanceStore interface {
@@ -106,6 +108,7 @@ type issuanceFailure struct {
 	code       string
 	err        error
 	redactions []string
+	metadata   map[string]any
 }
 
 func (e issuanceFailure) Error() string { return e.err.Error() }
@@ -180,6 +183,7 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 	if err := s.completeClaimedJob(ctx, workerID, job); err != nil {
 		_ = s.cleanupRecordedChallenges(ctx, job)
 		code, message := sanitizedFailure(err)
+		failureMetadata := issuanceFailureMetadata(err)
 		retryable := retryableIssuanceFailure(code)
 		failed, failErr := s.Certificates.FailIssuanceJob(ctx, certificates.FailIssuanceJobParams{
 			JobID:          job.ID,
@@ -190,13 +194,17 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 			MaxAttempts:    s.maxAttempts(),
 			RetryAfter:     s.retryBackoff(job.Attempt),
 		})
-		_ = s.recordEvent(ctx, job, "certificate_issuance_failed", certificates.EventResultFailure, map[string]any{
+		eventMetadata := map[string]any{
 			"failure_code":             code,
 			"failure_message":          message,
 			"retryable":                retryable,
 			"job_status_after_failure": string(failed.Status),
 			"next_run_at":              failed.NextRunAt,
-		})
+		}
+		for key, value := range failureMetadata {
+			eventMetadata[key] = value
+		}
+		_ = s.recordEventWithMessage(ctx, job, "certificate_issuance_failed", certificates.EventResultFailure, message, eventMetadata)
 		if failErr != nil {
 			return failed, true, failErr
 		}
@@ -216,6 +224,8 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 			_ = s.recordEvent(ctx, job, "certificate_dns_cleanup_enqueue_failed", certificates.EventResultFailure, map[string]any{
 				"failure_code": "dns_cleanup_enqueue_failed",
 			})
+		} else if job.CertificateVersionID != nil {
+			_ = s.recordVersionEvent(ctx, job, *job.CertificateVersionID, "certificate_dns_cleanup_queued", certificates.EventResultSuccess, nil)
 		}
 	}
 	return succeeded, true, nil
@@ -286,6 +296,11 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "certificate_version_loaded", certificates.EventResultSuccess, map[string]any{
+		"version": version.Version,
+		"status":  string(version.Status),
+		"reason":  string(version.Reason),
+	})
 	if version.Status == certificates.VersionStatusValid {
 		return nil
 	}
@@ -308,6 +323,9 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "certificate_private_key_ready", certificates.EventResultSuccess, map[string]any{
+		"key_type": cert.KeyType,
+	})
 	orderParams := acmedomain.OrderClientParams{
 		DirectoryURL:         issuer.DirectoryURL,
 		AccountURL:           account.AccountURL,
@@ -317,6 +335,9 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_ready", certificates.EventResultSuccess, map[string]any{
+		"authorization_count": len(order.AuthorizationURLs),
+	})
 	encryptedKey := deref(version.PrivateKeyPEMEncrypted)
 	if encryptedKey == "" {
 		encryptedKey, err = s.KeySet.SealDatabaseValue([]byte(privateKeyPEM), certificatePrivateKeyAAD(version.ID))
@@ -333,6 +354,9 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return issuanceFailure{code: "certificate_version_prepare_failed", err: err}
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "certificate_version_prepared", certificates.EventResultSuccess, map[string]any{
+		"acme_order_url": order.URL,
+	})
 	_, _ = s.Certificates.UpdateCertificateIssuanceStatus(ctx, certificates.UpdateCertificateIssuanceStatusParams{CertificateID: cert.ID, Status: certificates.StatusValidatingDNS})
 	if err := s.presentAndValidate(ctx, orderParams, job, version, order); err != nil {
 		return err
@@ -346,9 +370,19 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_finalized", certificates.EventResultSuccess, map[string]any{
+		"certificate_url": bundle.CertificateURL,
+	})
 	material, err := materialFromBundle(bundle, privateKeyPEM, keyFingerprint, s.KeySet)
 	if err != nil {
 		return err
+	}
+	activeValidCount, err := s.activeValidVersionCount(ctx, version.CertificateID, version.ID)
+	if err != nil {
+		return issuanceFailure{code: "certificate_version_overlap_check_failed", err: err, metadata: map[string]any{"phase": "certificate_material_store"}}
+	}
+	if activeValidCount >= maxActiveValidVersions {
+		return certificateVersionOverlapFailure(activeValidCount)
 	}
 	_, err = s.Certificates.StoreMaterial(ctx, certificates.StoreMaterialParams{
 		JobID:                  job.ID,
@@ -368,9 +402,54 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 		CertificateURL:         optionalString(bundle.CertificateURL),
 	})
 	if err != nil {
+		if isPostgresP0001(err) {
+			return certificateVersionOverlapFailure(activeValidCount)
+		}
 		return issuanceFailure{code: "certificate_material_store_failed", err: err}
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "certificate_material_stored", certificates.EventResultSuccess, map[string]any{
+		"not_before":      material.notBefore,
+		"not_after":       material.notAfter,
+		"serial_number":   material.serialNumber,
+		"material_etag":   material.etag,
+		"certificate_url": bundle.CertificateURL,
+	})
 	return nil
+}
+
+func (s *CertificateIssuanceService) activeValidVersionCount(ctx context.Context, certificateID, currentVersionID string) (int, error) {
+	versions, err := s.Certificates.ListVersions(ctx, certificates.ListVersionsParams{
+		CertificateID: certificateID,
+		ListOptions:   storage.ListOptions{Limit: storage.MaxListLimit},
+	})
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC()
+	count := 0
+	for _, version := range versions {
+		if version.ID == currentVersionID || version.Status != certificates.VersionStatusValid || version.NotAfter == nil || !version.NotAfter.After(now) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+func certificateVersionOverlapFailure(activeValidCount int) issuanceFailure {
+	return issuanceFailure{
+		code: "certificate_version_overlap",
+		err:  errors.New(versionOverlapFailureMessage),
+		metadata: map[string]any{
+			"phase":                      "certificate_material_store",
+			"active_valid_version_count": activeValidCount,
+			"max_active_valid_versions":  maxActiveValidVersions,
+		},
+	}
+}
+
+func isPostgresP0001(err error) bool {
+	return strings.Contains(err.Error(), "SQLSTATE P0001")
 }
 
 func (s *CertificateIssuanceService) ensureJobVersion(ctx context.Context, workerID string, job certificates.IssuanceJob) (certificates.CertificateVersion, certificates.IssuanceJob, error) {
@@ -397,6 +476,10 @@ func (s *CertificateIssuanceService) ensureJobVersion(ctx context.Context, worke
 	if err != nil {
 		return certificates.CertificateVersion{}, job, issuanceFailure{code: "certificate_version_create_failed", err: err}
 	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "certificate_version_created", certificates.EventResultSuccess, map[string]any{
+		"version": version.Version,
+		"reason":  string(version.Reason),
+	})
 	attached, err := s.Certificates.AttachIssuingVersionToJob(ctx, certificates.AttachIssuingVersionToJobParams{
 		JobID:                job.ID,
 		WorkerID:             workerID,
@@ -406,6 +489,10 @@ func (s *CertificateIssuanceService) ensureJobVersion(ctx context.Context, worke
 		return certificates.CertificateVersion{}, job, issuanceFailure{code: "issuance_job_update_failed", err: err}
 	}
 	job = attached
+	_ = s.recordVersionEvent(ctx, job, version.ID, "issuance_job_attached", certificates.EventResultSuccess, map[string]any{
+		"job_id":     job.ID,
+		"job_reason": string(job.Reason),
+	})
 	return version, job, nil
 }
 
@@ -501,8 +588,16 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 	for _, authzURL := range order.AuthorizationURLs {
 		authz, err := s.OrderManager.FetchAuthorization(ctx, acmedomain.FetchAuthorizationParams{OrderClientParams: params, AuthorizationURL: authzURL})
 		if err != nil {
+			_ = s.recordVersionEvent(ctx, job, version.ID, "acme_authorization_fetch_failed", certificates.EventResultFailure, map[string]any{
+				"authorization_url": authzURL,
+			})
 			return issuanceFailure{code: "acme_authorization_fetch_failed", err: err}
 		}
+		_ = s.recordVersionEvent(ctx, job, version.ID, "acme_authorization_fetched", certificates.EventResultSuccess, map[string]any{
+			"authorization_url": authzURL,
+			"identifier":        authz.Identifier,
+			"status":            authz.Status,
+		})
 		if strings.EqualFold(authz.Status, "valid") {
 			continue
 		}
@@ -520,6 +615,7 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 			continue
 		}
 		if err := s.presentDNSChallenge(ctx, challenges[i].provider, challenges[i].op); err != nil {
+			_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_present_failed", certificates.EventResultFailure, dnsChallengeEventMetadata(challenges[i]))
 			return err
 		}
 		record, err := s.Certificates.MarkDNSChallengePresented(ctx, certificates.MarkDNSChallengePresentedParams{ID: challenges[i].record.ID})
@@ -527,11 +623,14 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 			return issuanceFailure{code: "dns_challenge_record_update_failed", err: err}
 		}
 		challenges[i].record = record
+		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_presented", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenges[i]))
 	}
 	for _, challenge := range challenges {
 		if err := s.waitForPropagation(ctx, challenge.op.RecordName, challenge.op.TXTValue); err != nil {
+			_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagation_failed", certificates.EventResultFailure, dnsChallengeEventMetadata(challenge))
 			return err
 		}
+		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_propagated", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
 	}
 	for _, challenge := range challenges {
 		if err := s.OrderManager.AcceptChallenge(ctx, acmedomain.AcceptChallengeParams{
@@ -539,14 +638,17 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 			ChallengeURL:      challenge.authz.DNSChallenge.URL,
 			Token:             challenge.authz.DNSChallenge.Token,
 		}); err != nil {
+			_ = s.recordVersionEvent(ctx, job, version.ID, "acme_challenge_accept_failed", certificates.EventResultFailure, dnsChallengeEventMetadata(challenge))
 			return issuanceFailure{code: "dns_validation_failed", err: err, redactions: []string{challenge.authz.DNSChallenge.Token, challenge.op.TXTValue}}
 		}
+		_ = s.recordVersionEvent(ctx, job, version.ID, "acme_challenge_accepted", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
 		if _, err := s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{
 			ID:     challenge.record.ID,
 			Status: certificates.DNSChallengeStatusCleanupPending,
 		}); err != nil {
 			return issuanceFailure{code: "dns_challenge_record_update_failed", err: err}
 		}
+		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_cleanup_pending", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
 	}
 	return nil
 }
@@ -603,8 +705,13 @@ func (s *CertificateIssuanceService) ensureChallengeRecord(ctx context.Context, 
 		if err != nil {
 			return dnsAuthorizationChallenge{}, issuanceFailure{code: "dns_challenge_record_create_failed", err: err}
 		}
+		challenge := dnsAuthorizationChallenge{authz: authz, record: record, op: op, provider: match.Provider}
+		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_record_created", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
+		return challenge, nil
 	}
-	return dnsAuthorizationChallenge{authz: authz, record: record, op: op, provider: match.Provider}, nil
+	challenge := dnsAuthorizationChallenge{authz: authz, record: record, op: op, provider: match.Provider}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_record_reused", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
+	return challenge, nil
 }
 
 func challengeNeedsPresent(status certificates.DNSChallengeStatus) bool {
@@ -746,7 +853,40 @@ func (s *CertificateIssuanceService) cleanupDNSChallenge(ctx context.Context, pr
 }
 
 func (s *CertificateIssuanceService) recordEvent(ctx context.Context, job certificates.IssuanceJob, eventType string, result certificates.EventResult, metadata map[string]any) error {
+	return s.recordEventWithMessage(ctx, job, eventType, result, "", metadata)
+}
+
+func (s *CertificateIssuanceService) recordEventWithMessage(ctx context.Context, job certificates.IssuanceJob, eventType string, result certificates.EventResult, message string, metadata map[string]any) error {
 	if s == nil || s.Certificates == nil {
+		return nil
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["job_reason"] = string(job.Reason)
+	metadata["job_attempt"] = job.Attempt
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		raw = []byte(`{}`)
+	}
+	var messagePtr *string
+	if message != "" {
+		messagePtr = &message
+	}
+	_, err = s.Certificates.RecordEvent(ctx, certificates.RecordEventParams{
+		CertificateID:        job.CertificateID,
+		CertificateVersionID: job.CertificateVersionID,
+		IssuanceJobID:        &job.ID,
+		EventType:            eventType,
+		Result:               result,
+		Message:              messagePtr,
+		Metadata:             raw,
+	})
+	return err
+}
+
+func (s *CertificateIssuanceService) recordVersionEvent(ctx context.Context, job certificates.IssuanceJob, versionID string, eventType string, result certificates.EventResult, metadata map[string]any) error {
+	if s == nil || s.Certificates == nil || versionID == "" {
 		return nil
 	}
 	if metadata == nil {
@@ -760,13 +900,27 @@ func (s *CertificateIssuanceService) recordEvent(ctx context.Context, job certif
 	}
 	_, err = s.Certificates.RecordEvent(ctx, certificates.RecordEventParams{
 		CertificateID:        job.CertificateID,
-		CertificateVersionID: job.CertificateVersionID,
+		CertificateVersionID: &versionID,
 		IssuanceJobID:        &job.ID,
 		EventType:            eventType,
 		Result:               result,
 		Metadata:             raw,
 	})
 	return err
+}
+
+func dnsChallengeEventMetadata(challenge dnsAuthorizationChallenge) map[string]any {
+	return map[string]any{
+		"authorization_identifier": challenge.authz.Identifier,
+		"authorization_status":     challenge.authz.Status,
+		"record_name":              challenge.op.RecordName,
+		"dns_provider_id":          challenge.provider.ID,
+		"dns_provider_name":        challenge.provider.Name,
+		"dns_provider_type":        string(challenge.provider.Type),
+		"dns_provider_zone_id":     challenge.record.DNSProviderZoneID,
+		"dns_provider_zone_name":   challenge.op.ZoneName,
+		"dns_challenge_record_id":  challenge.record.ID,
+	}
 }
 
 func (s *CertificateIssuanceService) providerCredentials(ctx context.Context, provider dnsdomain.Provider) ([]byte, error) {
@@ -1101,6 +1255,18 @@ func sanitizedFailure(err error) (string, string) {
 		message = message[:2048]
 	}
 	return code, message
+}
+
+func issuanceFailureMetadata(err error) map[string]any {
+	var failure issuanceFailure
+	if !errors.As(err, &failure) || len(failure.metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(failure.metadata))
+	for key, value := range failure.metadata {
+		out[key] = value
+	}
+	return out
 }
 
 func optionalMessage(err error) *string {

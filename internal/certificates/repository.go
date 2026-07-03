@@ -1041,7 +1041,7 @@ returning `+eventReturningSQL(),
 }
 
 func (r Repository) ListEvents(ctx context.Context, params ListEventsParams) ([]Event, error) {
-	query, args, err := r.listEventsQuery(params)
+	query, args, err := r.listEventsQuery(params, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,6 +1062,18 @@ func (r Repository) ListEvents(ctx context.Context, params ListEventsParams) ([]
 		return nil, fmt.Errorf("list certificate events: %w", err)
 	}
 	return events, nil
+}
+
+func (r Repository) CountEvents(ctx context.Context, params ListEventsParams) (int64, error) {
+	query, args, err := r.listEventsQuery(params, true)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	if err := r.db.QueryRow(ctx, query, args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count certificate events: %w", err)
+	}
+	return total, nil
 }
 
 func (r Repository) listQuery(params ListCertificatesParams, count bool) (string, []any, error) {
@@ -1178,7 +1190,7 @@ func (r Repository) listDNSChallengesQuery(params ListDNSChallengesParams) (stri
 	return query, args, nil
 }
 
-func (r Repository) listEventsQuery(params ListEventsParams) (string, []any, error) {
+func (r Repository) listEventsQuery(params ListEventsParams, count bool) (string, []any, error) {
 	opts, err := storage.NormalizeListOptions(params.ListOptions)
 	if err != nil {
 		return "", nil, err
@@ -1217,9 +1229,12 @@ func (r Repository) listEventsQuery(params ListEventsParams) (string, []any, err
 		}
 		add("result = $%d", string(*params.Result))
 	}
+	if count {
+		return "select count(*)::bigint from certificate_events where " + strings.Join(where, " and "), args, nil
+	}
 	args = append(args, opts.Limit, opts.Offset)
 	query := "select " + eventReturningSQL() + " from certificate_events where " + strings.Join(where, " and ")
-	query += fmt.Sprintf(" order by created_at desc, id desc limit $%d offset $%d", len(args)-1, len(args))
+	query += fmt.Sprintf(" order by created_at asc, id asc limit $%d offset $%d", len(args)-1, len(args))
 	return query, args, nil
 }
 

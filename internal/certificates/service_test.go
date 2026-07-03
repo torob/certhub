@@ -257,6 +257,7 @@ type lifecycleStore struct {
 	material            CertificateVersion
 	materialErr         error
 	versions            []CertificateVersion
+	events              []Event
 	createVersionCalls  int
 	createVersionReason IssuanceReason
 	ensureJobCalls      []EnsureIssuanceJobParams
@@ -288,6 +289,14 @@ func (s *lifecycleStore) ListVersions(context.Context, ListVersionsParams) ([]Ce
 
 func (s *lifecycleStore) CountVersions(context.Context, string) (int64, error) {
 	return int64(len(s.versions)), nil
+}
+
+func (s *lifecycleStore) ListEvents(context.Context, ListEventsParams) ([]Event, error) {
+	return append([]Event(nil), s.events...), nil
+}
+
+func (s *lifecycleStore) CountEvents(context.Context, ListEventsParams) (int64, error) {
+	return int64(len(s.events)), nil
 }
 
 func (s *lifecycleStore) GetVersion(context.Context, string) (CertificateVersion, error) {

@@ -201,6 +201,10 @@ h3 {
   width: min(100%, 980px);
 }
 
+.events-detail {
+  gap: 12px;
+}
+
 .inline-form {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-items: end;
@@ -678,6 +682,143 @@ tr.selectable:focus-within td {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.event-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.event-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  padding: 0 0 14px;
+}
+
+.event-item::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 16px;
+  bottom: 0;
+  width: 2px;
+  background: #d5e0df;
+}
+
+.event-item:last-child {
+  padding-bottom: 0;
+}
+
+.event-item:last-child::before {
+  display: none;
+}
+
+.event-marker {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 2px solid #1e6b5c;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.event-item.failure .event-marker {
+  border-color: #b13a2e;
+}
+
+.event-body {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dbe4e9;
+  border-radius: 8px;
+  background: #f9fbfb;
+}
+
+.event-head,
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.event-head strong,
+.event-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.event-result {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid #b8d2cc;
+  border-radius: 999px;
+  background: #eaf6f2;
+  color: #1e6b5c;
+  font-size: 0.75rem;
+}
+
+.event-result.failure {
+  border-color: #e1b4ae;
+  background: #fff1ef;
+  color: #9f2d22;
+}
+
+.event-meta,
+.event-message {
+  color: #52616b;
+  font-size: 0.82rem;
+}
+
+.failure-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e1b4ae;
+  border-radius: 8px;
+  background: #fff6f4;
+  color: #5d241f;
+}
+
+.failure-summary > strong {
+  color: #9f2d22;
+}
+
+.failure-summary p {
+  color: #5d241f;
+  font-size: 0.86rem;
+}
+
+.event-failure-fields {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #ead0cc;
+  border-radius: 6px;
+  background: #fffafa;
+}
+
+.event-metadata {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #172026;
+  color: #eef6f5;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .issue-flow > .toolbar {

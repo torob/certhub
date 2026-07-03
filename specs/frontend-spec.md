@@ -191,7 +191,7 @@ Required web management workflows:
 - Application token management: list token metadata, create tokens, display raw token value exactly once, support expiring and non-expiring tokens, and revoke tokens.
 - Application User grant management: list grants, create or replace grants, and remove grants.
 - Domain scope management: list scopes, add immutable scopes, and delete scopes.
-- Certificate management: create Application-owned certificates, list and inspect certificates, download current and version-specific ID-based archives when authorized, inspect events, renew, rotate key, reissue, and revoke specific CertificateVersions.
+- Certificate management: create Application-owned certificates, list and inspect certificates, download current and version-specific ID-based archives when authorized, inspect CertificateVersion issuance events, inspect certificate audit events, renew, rotate key, reissue, and revoke specific CertificateVersions.
 - Issuer management: list, create, inspect, update mutable fields, disable/enable through status, configure default issuer, renewal-window, and contact email.
 - DNS provider management: list, create, inspect, update mutable metadata, replace write-only credentials, list zones, manually add/delete zones in manual mode, view discovered zones, and trigger auto-mode zone refresh.
 - Audit management: list and filter global audit events for admins, scoped Application/certificate audit events for Users with relevant Application access, and certificate-specific events.
@@ -263,6 +263,7 @@ Certificate detail page:
 - Latest issuance status.
 - Renewal history.
 - Version history.
+- CertificateVersion issuance events.
 - Audit events for this certificate.
 - Archive download button only when the User has `certificate_reader`, `manager`, or global `admin`.
 - Metadata-only Users can inspect certificate metadata but cannot download archives in v1 because current archive endpoints include private-key material.
@@ -270,6 +271,8 @@ Certificate detail page:
 Current certificate archive downloads from the web UI must call `GET /v1/certificates/{certificate_id}/tls-archive`. Version-specific archive downloads must call `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` and be offered for downloadable `valid` or `revoked` CertificateVersions. The frontend must not use criteria-based material endpoints for User/browser downloads. Every archive download is a private-key-capable operation and must require an explicit audited user action.
 
 Certificate renewal and version history must call `GET /v1/certificates/{certificate_id}/versions`. The frontend must not try to reconstruct complete version history from the single `latest_version` field. Certificate detail must show sanitized `failure_code` and `failure_message` when the Certificate carries latest failure metadata. Version history must show per-version `failure_code`, and must offer a failure-message button that opens the full sanitized `failure_message` in a preformatted dialog so managers can identify the root cause and fix issuer, DNS provider, or domain-scope configuration.
+
+CertificateVersion event inspection must be available from each version row and route to `/certificates/{certificate_id}/versions/{certificate_version_id}/events`. The page must call `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`, render the returned `certificate_events` oldest first as an issuance timeline, show each event result, timestamp, message, correlation/job IDs when available, and render structured metadata in a preformatted code-style block. Failed versions or failed events must show a visible failure summary before the timeline and promote `failure_code`/`failure_message` outside the JSON block. For active-valid-version overlap failures, the page must tell the operator to revoke an older valid version or wait for one to expire before retrying renewal/key rotation. The page must have a refresh button that disables and spins while refreshing, and must not hide existing content during refresh. This page is operational troubleshooting feedback and is separate from the certificate audit-event table.
 
 Browser downloads of the tar.gz archive must use the backend `Content-Disposition` filename, which must be `<safe_certificate_name>.tar.gz`. The `<safe_certificate_name>` basename is derived by the backend from the first normalized SAN, falls back to Certificate ID, and must not contain `*` or `.`.
 
@@ -281,7 +284,8 @@ Certificate lifecycle actions:
 - Reissue calls `POST /v1/certificates/{certificate_id}/reissue` when no active valid CertificateVersion exists and no CertificateVersion is issuing.
 - Reissue is disabled when `has_active_valid_version=true` or `has_issuing_version=true`.
 - Revocation calls `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`.
-- Certificate-specific event history calls `GET /v1/certificates/{certificate_id}/events`.
+- CertificateVersion issuance event history calls `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`.
+- Certificate-specific audit event history calls `GET /v1/certificates/{certificate_id}/events`.
 
 Lifecycle actions are visible only to Users with Application `manager` access or global `admin`.
 

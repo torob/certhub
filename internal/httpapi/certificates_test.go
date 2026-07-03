@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -115,6 +116,64 @@ func TestIDTLSMaterialEndpointReturnsNotFound(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"certificate_not_found"`) {
 		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestListCertificateVersionEventsReturnsOperationalTimeline(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	message := "TXT record propagated"
+	jobID := "92345678-1234-4234-9234-123456789abc"
+	correlationID := "corr-1"
+	fixture.certStore.events = []certdomain.Event{
+		{
+			ID:                   "a2345678-1234-4234-9234-123456789abc",
+			CertificateID:        fixture.cert.ID,
+			CertificateVersionID: &fixture.version.ID,
+			IssuanceJobID:        &jobID,
+			EventType:            "dns_challenge_propagated",
+			Result:               certdomain.EventResultSuccess,
+			CorrelationID:        &correlationID,
+			Message:              &message,
+			Metadata:             json.RawMessage(`{"record_name":"_acme-challenge.api.example.com","provider":"cloudflare"}`),
+			CreatedAt:            fixture.now.Add(time.Second),
+		},
+		{
+			ID:                   "b2345678-1234-4234-9234-123456789abc",
+			CertificateID:        fixture.cert.ID,
+			CertificateVersionID: &fixture.version.ID,
+			EventType:            "acme_challenge_accepted",
+			Result:               certdomain.EventResultSuccess,
+			Metadata:             json.RawMessage(`{}`),
+			CreatedAt:            fixture.now.Add(2 * time.Second),
+		},
+	}
+	handler, userToken := newCertificateHTTPUserHandler(t, fixture, &certificateHTTPAuditStore{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/versions/"+fixture.version.ID+"/events?limit=20", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Events []apiCertificateEvent `json:"certificate_events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Events) != 2 {
+		t.Fatalf("events = %#v body=%s", body.Events, rec.Body.String())
+	}
+	if body.Events[0].EventType != "dns_challenge_propagated" || string(body.Events[0].Metadata) != `{"record_name":"_acme-challenge.api.example.com","provider":"cloudflare"}` {
+		t.Fatalf("first event = %#v", body.Events[0])
+	}
+	if body.Events[0].IssuanceJobID == nil || *body.Events[0].IssuanceJobID != jobID {
+		t.Fatalf("issuance job id = %#v", body.Events[0].IssuanceJobID)
+	}
+	if strings.Contains(rec.Body.String(), "audit_events") {
+		t.Fatalf("response used audit event shape: %s", rec.Body.String())
 	}
 }
 
@@ -523,6 +582,7 @@ type certificateHTTPCertStore struct {
 	createOrReuseCert certdomain.Certificate
 	createParams      certdomain.CreateOrReuseCertificateParams
 	version           certdomain.CertificateVersion
+	events            []certdomain.Event
 	listParams        certdomain.ListCertificatesParams
 	countParams       certdomain.ListCertificatesParams
 }
@@ -559,6 +619,14 @@ func (s *certificateHTTPCertStore) ListVersions(context.Context, certdomain.List
 
 func (s *certificateHTTPCertStore) CountVersions(context.Context, string) (int64, error) {
 	return 1, nil
+}
+
+func (s *certificateHTTPCertStore) ListEvents(context.Context, certdomain.ListEventsParams) ([]certdomain.Event, error) {
+	return append([]certdomain.Event(nil), s.events...), nil
+}
+
+func (s *certificateHTTPCertStore) CountEvents(context.Context, certdomain.ListEventsParams) (int64, error) {
+	return int64(len(s.events)), nil
 }
 
 func (s *certificateHTTPCertStore) GetVersion(context.Context, string) (certdomain.CertificateVersion, error) {
