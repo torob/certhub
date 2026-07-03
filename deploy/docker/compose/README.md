@@ -6,9 +6,11 @@ run in local HTTP mode or direct HTTPS mode with a server-managed Let's Encrypt
 certificate.
 
 The Compose file bind-mounts `server.yaml` directly into the scratch-based
-server image. Keep secrets in `.env` and reference them from `server.yaml` with
-the documented `*_env` fields; operators are responsible for not placing
-secrets directly in the server config file.
+server image. The server image sets `CERTHUB_SERVER_CONFIG` to that default
+mount path, so in-container commands can omit `--config`. Keep secrets in `.env`
+and reference them from `server.yaml` with the documented `*_env` fields;
+operators are responsible for not placing secrets directly in the server config
+file.
 
 ## First run
 
@@ -39,7 +41,6 @@ After PostgreSQL and Certhub are ready, create the first admin user:
 cd deploy/docker/compose
 docker compose --env-file .env run --rm server \
   bootstrap create-admin \
-  --config /etc/certhub/server.yaml \
   --email admin@example.com \
   --display-name "Admin"
 ```
@@ -51,7 +52,6 @@ a password source explicitly, for example:
 CERTHUB_BOOTSTRAP_ADMIN_PASSWORD='change-this-admin-password' \
   docker compose --env-file .env run --rm -e CERTHUB_BOOTSTRAP_ADMIN_PASSWORD server \
     bootstrap create-admin \
-    --config /etc/certhub/server.yaml \
     --email admin@example.com \
     --display-name "Admin" \
     --password-env CERTHUB_BOOTSTRAP_ADMIN_PASSWORD
@@ -98,7 +98,7 @@ Run migrations:
 
 ```bash
 cd deploy/docker/compose
-docker compose --env-file .env run --rm server migrate --config /etc/certhub/server.yaml
+docker compose --env-file .env run --rm server migrate
 ```
 
 Create the admin user if you have not already done so, then create the ACME
@@ -108,7 +108,6 @@ production directory shown here for a trusted certificate:
 ```bash
 docker compose --env-file .env run --rm server \
   bootstrap create-issuer \
-  --config /etc/certhub/server.yaml \
   --name letsencrypt_prod \
   --environment production \
   --directory-url https://acme-v02.api.letsencrypt.org/directory \
@@ -123,7 +122,6 @@ hostname's zone. Cloudflare credentials use `api_token`:
 printf '%s\n' '{"api_token":"cloudflare-api-token"}' | \
   docker compose --env-file .env run --rm -T server \
     bootstrap create-dns-provider \
-    --config /etc/certhub/server.yaml \
     --name cloudflare_main \
     --type cloudflare \
     --zone-mode manual \
@@ -135,7 +133,6 @@ Add the DNS zone that contains `server.public_hostname`:
 ```bash
 docker compose --env-file .env run --rm server \
   bootstrap add-dns-provider-zone \
-  --config /etc/certhub/server.yaml \
   --dns-provider cloudflare_main \
   --zone example.com
 ```

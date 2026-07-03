@@ -17,8 +17,6 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-const DefaultPath = "/etc/certhub/server.yaml"
-
 var (
 	envNameRE     = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	machineNameRE = regexp.MustCompile(`^[a-z](?:[a-z0-9_]{0,62}[a-z0-9])?$`)
@@ -279,7 +277,7 @@ type rawApplicationToken struct {
 
 func LoadFile(path string, opts LoadOptions) (*Config, error) {
 	if path == "" {
-		path = DefaultPath
+		return nil, errors.New("config path: required")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {

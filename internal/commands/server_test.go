@@ -162,10 +162,56 @@ func TestRunHelpIncludesMigrateFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "run [--migrate] --config <path>") {
+	if !strings.Contains(stdout.String(), "run [--migrate] [--config <path>]") || !strings.Contains(stdout.String(), serverConfigPathEnv) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestServerConfigPathResolution(t *testing.T) {
+	t.Setenv(serverConfigPathEnv, "")
+	if _, err := resolveServerConfigPath(""); err == nil || !strings.Contains(err.Error(), serverConfigPathEnv) {
+		t.Fatalf("resolveServerConfigPath(empty) error = %v", err)
+	}
+
+	t.Setenv(serverConfigPathEnv, "/env/server.yaml")
+	path, err := resolveServerConfigPath("")
+	if err != nil || path != "/env/server.yaml" {
+		t.Fatalf("env config path = %q, %v", path, err)
+	}
+
+	path, err = resolveServerConfigPath("/flag/server.yaml")
+	if err != nil || path != "/flag/server.yaml" {
+		t.Fatalf("flag config path = %q, %v", path, err)
+	}
+}
+
+func TestRunRequiresConfigPath(t *testing.T) {
+	t.Setenv(serverConfigPathEnv, "")
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"run"})
+	if code == 0 {
+		t.Fatalf("run unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "config path is required") || !strings.Contains(stderr.String(), serverConfigPathEnv) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunLoadsConfigPathFromEnv(t *testing.T) {
+	configPath := writeCommandConfig(t)
+	t.Setenv(serverConfigPathEnv, configPath)
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"run"})
+	if code == 0 {
+		t.Fatalf("run unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "server readiness failed") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

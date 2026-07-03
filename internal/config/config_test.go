@@ -486,3 +486,9 @@ func TestLoadFileSafety(t *testing.T) {
 		t.Fatalf("LoadFile(symlink) succeeded")
 	}
 }
+
+func TestLoadFileRequiresPath(t *testing.T) {
+	if _, err := LoadFile("", LoadOptions{}); err == nil || !strings.Contains(err.Error(), "config path: required") {
+		t.Fatalf("LoadFile(empty) error = %v", err)
+	}
+}

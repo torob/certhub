@@ -18,7 +18,7 @@ services:
 
   server:
     image: ghcr.io/torob/certhub-server:${CERTHUB_IMAGE_TAG:-0.1.0}
-    command: ["run", "--migrate", "--config", "/etc/certhub/server.yaml"]
+    command: ["run", "--migrate"]
     depends_on:
       postgres:
         condition: service_healthy

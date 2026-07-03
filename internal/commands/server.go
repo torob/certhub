@@ -41,16 +41,19 @@ import (
 )
 
 const bootstrapActorID = "00000000-0000-4000-8000-000000000001"
+const serverConfigPathEnv = "CERTHUB_SERVER_CONFIG"
 
 const ServerHelp = `certhub-server is the Certhub backend server command.
 
 Usage:
   certhub-server help
   certhub-server --help
-  certhub-server run [--migrate] --config <path>
-  certhub-server migrate --config <path>
+  certhub-server run [--migrate] [--config <path>]
+  certhub-server migrate [--config <path>]
   certhub-server generate-encryption-key
   certhub-server bootstrap ...
+
+Server config path must be provided by --config or CERTHUB_SERVER_CONFIG.
 `
 
 type ServerRunner struct {
@@ -119,24 +122,39 @@ func (r ServerRunner) generateEncryptionKey(args []string) int {
 	return 0
 }
 
+func resolveServerConfigPath(flagValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	if envValue := os.Getenv(serverConfigPathEnv); envValue != "" {
+		return envValue, nil
+	}
+	return "", fmt.Errorf("config path is required; pass --config <path> or set %s", serverConfigPathEnv)
+}
+
 func (r ServerRunner) run(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	applyMigrations := fs.Bool("migrate", false, "apply pending database migrations before starting")
 	help := fs.Bool("help", false, "show help")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server run [--migrate] --config <path>")
+		fmt.Fprintln(r.Stdout, "Usage: certhub-server run [--migrate] [--config <path>]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
 		return 0
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(r.Stderr, "run accepts no positional arguments")
 		return 2
 	}
-	cfg, err := config.LoadFile(*configPath, config.LoadOptions{})
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "config validation failed: %v\n", err)
+		return 1
+	}
+	cfg, err := config.LoadFile(resolvedConfigPath, config.LoadOptions{})
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "config validation failed: %v\n", err)
 		return 1
@@ -419,21 +437,25 @@ func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderTyp
 func (r ServerRunner) migrate(args []string) int {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	jsonOut := fs.Bool("json", false, "print JSON output")
 	help := fs.Bool("help", false, "show help")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *help {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server migrate --config <path> [--json]")
+		fmt.Fprintln(r.Stdout, "Usage: certhub-server migrate [--config <path>] [--json]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
 		return 0
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(r.Stderr, "migrate accepts no positional arguments")
 		return 2
 	}
-	cfg, err := config.LoadFile(*configPath, config.LoadOptions{})
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportMigrationFailure(*jsonOut, "config validation failed", "config_invalid", err)
+	}
+	cfg, err := config.LoadFile(resolvedConfigPath, config.LoadOptions{})
 	if err != nil {
 		return r.reportMigrationFailure(*jsonOut, "config validation failed", "config_invalid", err)
 	}
@@ -488,7 +510,7 @@ func (r ServerRunner) reportMigrationFailure(jsonOut bool, prefix, code string, 
 
 func (r ServerRunner) bootstrap(args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(r.Stdout, "Usage: certhub-server bootstrap [--interactive|create-admin|create-issuer|create-dns-provider|add-dns-provider-zone|refresh-dns-provider-zones] --config <path>")
+		fmt.Fprintln(r.Stdout, "Usage: certhub-server bootstrap [--interactive|create-admin|create-issuer|create-dns-provider|add-dns-provider-zone|refresh-dns-provider-zones] [--config <path>]\n\nServer config path must be provided by --config or CERTHUB_SERVER_CONFIG.")
 		return 0
 	}
 	if args[0] == "--interactive" {
@@ -514,7 +536,7 @@ func (r ServerRunner) bootstrap(args []string) int {
 func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 	fs := flag.NewFlagSet("bootstrap create-admin", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	email := fs.String("email", "", "admin email")
 	displayName := fs.String("display-name", "", "admin display name")
 	passwordValue := fs.String("password", "", "admin password")
@@ -539,11 +561,15 @@ func (r ServerRunner) bootstrapCreateAdmin(args []string) int {
 	if fs.NArg() != 0 || *email == "" || *displayName == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("email and display-name are required"))
 	}
+	resolvedConfigPath, configErr := resolveServerConfigPath(*configPath)
+	if configErr != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", configErr)
+	}
 	password, err := r.readBootstrapAdminPassword(passwordFlagSet, *passwordValue, *passwordStdin, *passwordEnv, *passwordFile, *jsonOut)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
 	}
-	boot, err := r.openBootstrapServices(context.Background(), *configPath)
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
@@ -635,7 +661,7 @@ func (r ServerRunner) readBootstrapAdminPassword(flagSet bool, flagValue string,
 func (r ServerRunner) bootstrapInteractive(args []string) int {
 	fs := flag.NewFlagSet("bootstrap --interactive", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -645,6 +671,10 @@ func (r ServerRunner) bootstrapInteractive(args []string) int {
 	if err := r.requireInteractiveTerminal(); err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
 	}
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
+	}
 	action, err := r.promptLine("Bootstrap action [create-admin]: ")
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
@@ -652,7 +682,7 @@ func (r ServerRunner) bootstrapInteractive(args []string) int {
 	if strings.TrimSpace(action) != "" && strings.TrimSpace(action) != "create-admin" {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("unsupported interactive bootstrap action"))
 	}
-	return r.bootstrapCreateAdminInteractive(*configPath, false, false)
+	return r.bootstrapCreateAdminInteractive(resolvedConfigPath, false, false)
 }
 
 func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowExistingAdmin bool, jsonOut bool) int {
@@ -661,6 +691,10 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 	}
 	if err := r.requireInteractiveTerminal(); err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
+	}
+	resolvedConfigPath, err := resolveServerConfigPath(configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
 	}
 	email, err := r.promptLine("Admin email: ")
 	if err != nil {
@@ -685,7 +719,7 @@ func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowEx
 	if password != "" {
 		passwordPtr = &password
 	}
-	boot, err := r.openBootstrapServices(context.Background(), configPath)
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "bootstrap_unavailable", err)
 	}
@@ -719,7 +753,7 @@ func (r ServerRunner) writeTOTPProvisioning(uri string) {
 func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 	fs := flag.NewFlagSet("bootstrap create-issuer", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	name := fs.String("name", "", "issuer machine name")
 	directoryURL := fs.String("directory-url", "", "ACME directory URL")
 	contactEmail := fs.String("contact-email", "", "ACME contact email")
@@ -732,7 +766,11 @@ func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 	if fs.NArg() != 0 || *name == "" || *directoryURL == "" || *contactEmail == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, directory-url, and contact-email are required"))
 	}
-	boot, err := r.openBootstrapServices(context.Background(), *configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+	}
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
@@ -757,7 +795,7 @@ func (r ServerRunner) bootstrapCreateIssuer(args []string) int {
 func (r ServerRunner) bootstrapCreateDNSProvider(args []string) int {
 	fs := flag.NewFlagSet("bootstrap create-dns-provider", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	name := fs.String("name", "", "DNS provider machine name")
 	providerType := fs.String("type", "", "provider type")
 	zoneMode := fs.String("zone-mode", "", "zone mode")
@@ -771,11 +809,15 @@ func (r ServerRunner) bootstrapCreateDNSProvider(args []string) int {
 	if fs.NArg() != 0 || *name == "" || *providerType == "" || *zoneMode == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("name, type, and zone-mode are required"))
 	}
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+	}
 	credentials, err := r.readBootstrapCredentials(*credentialsStdin, *credentialsEnv, *credentialsFile)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
 	}
-	boot, err := r.openBootstrapServices(context.Background(), *configPath)
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
@@ -799,7 +841,7 @@ func (r ServerRunner) bootstrapCreateDNSProvider(args []string) int {
 func (r ServerRunner) bootstrapAddDNSProviderZone(args []string) int {
 	fs := flag.NewFlagSet("bootstrap add-dns-provider-zone", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	providerRef := fs.String("dns-provider", "", "DNS provider name or ID")
 	zoneName := fs.String("zone", "", "DNS zone name")
 	jsonOut := fs.Bool("json", false, "print JSON output")
@@ -809,7 +851,11 @@ func (r ServerRunner) bootstrapAddDNSProviderZone(args []string) int {
 	if fs.NArg() != 0 || *providerRef == "" || *zoneName == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider and zone are required"))
 	}
-	boot, err := r.openBootstrapServices(context.Background(), *configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+	}
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}
@@ -834,7 +880,7 @@ func (r ServerRunner) bootstrapAddDNSProviderZone(args []string) int {
 func (r ServerRunner) bootstrapRefreshDNSProviderZones(args []string) int {
 	fs := flag.NewFlagSet("bootstrap refresh-dns-provider-zones", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
-	configPath := fs.String("config", config.DefaultPath, "server YAML config path")
+	configPath := fs.String("config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
 	providerRef := fs.String("dns-provider", "", "DNS provider name or ID")
 	jsonOut := fs.Bool("json", false, "print JSON output")
 	if err := fs.Parse(args); err != nil {
@@ -843,7 +889,11 @@ func (r ServerRunner) bootstrapRefreshDNSProviderZones(args []string) int {
 	if fs.NArg() != 0 || *providerRef == "" {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider is required"))
 	}
-	boot, err := r.openBootstrapServices(context.Background(), *configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*configPath)
+	if err != nil {
+		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "invalid_request", err)
+	}
+	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
 		return r.reportBootstrapFailure(*jsonOut, "bootstrap failed", "bootstrap_unavailable", err)
 	}

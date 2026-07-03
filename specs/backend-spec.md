@@ -59,7 +59,7 @@ Certhub has two configuration layers:
 - Process configuration: deployment-time settings loaded before the backend starts.
 - Operational configuration: database-backed settings managed by admin APIs, such as issuers, DNS providers, DNS zones, normal Applications, Users, grants, tokens, and domain scopes.
 
-Process configuration must be provided by a YAML config file in v1. The backend serving process is started only with `certhub-server run`. The run command accepts the config path with `certhub-server run --config <path>` and defaults to `/etc/certhub/server.yaml` when the flag is omitted. Operators may pass `--migrate` to apply pending database migrations before the backend starts serving. Environment variables must not override server process configuration values in v1, except for explicitly configured secret-value references described below. Certhub must validate process configuration at startup and fail fast when a required value is missing or malformed. Changing process configuration requires restarting the backend process.
+Process configuration must be provided by a YAML config file in v1. The backend serving process is started only with `certhub-server run`. The run command accepts the config path with `certhub-server run --config <path>` or, when the flag is omitted, `CERTHUB_SERVER_CONFIG`. Operators may pass `--migrate` to apply pending database migrations before the backend starts serving. Environment variables must not override server process configuration values in v1, except for `CERTHUB_SERVER_CONFIG` selecting the config file path and explicitly configured secret-value references described below. Certhub must validate process configuration at startup and fail fast when a required value is missing or malformed. Changing process configuration requires restarting the backend process.
 
 Operational configuration is changed through the public admin APIs and persisted in the database. It must not be configured through the server YAML config file. Initial bootstrap uses direct database management commands under the `certhub-server` binary, not an unauthenticated HTTP API.
 
@@ -82,7 +82,7 @@ Config file requirements:
 - Exactly one of `database.url` or `database.url_env` must be set. Exactly one of `encryption.key` or `encryption.key_env` must be set.
 - Environment variable names in `*_env` keys must match `^[A-Z_][A-Z0-9_]*$`.
 - If a `*_env` key is configured, the named environment variable must exist, must be non-empty, and its value must pass the same validation as the inline secret field.
-- Environment variables are not used for defaults and do not override YAML values. The YAML file remains the source of truth for whether a secret comes from an environment variable and which variable name is used.
+- Apart from `CERTHUB_SERVER_CONFIG` selecting the YAML file path, environment variables are not used for defaults and do not override YAML values. The YAML file remains the source of truth for whether a secret comes from an environment variable and which variable name is used.
 - Secret values in the config file must never be logged, written to audit metadata, returned by APIs, exposed in health-check output, or printed in startup errors.
 
 Configuration keys:
@@ -236,7 +236,7 @@ Description and notes:
 Example:
 
 ```bash
-certhub-server run [--migrate] --config /etc/certhub/server.yaml
+certhub-server run [--migrate] [--config /etc/certhub/server.yaml]
 ```
 
 #### `certhub-server generate-encryption-key`
@@ -283,21 +283,21 @@ Description and notes:
 Common flags:
 
 ```text
---config <path>     server YAML config path; default /etc/certhub/server.yaml
+--config <path>     server YAML config path; overrides CERTHUB_SERVER_CONFIG
 --json              print JSON output
 ```
 
 Required bootstrap and management commands:
 
 ```text
-certhub-server migrate --config <path>
-certhub-server bootstrap --interactive --config <path>
-certhub-server bootstrap create-admin --config <path> --email <email> --display-name <name> [--password <value>|--password-stdin|--password-env <env>|--password-file <path>] [--allow-existing-admin]
-certhub-server bootstrap create-admin --interactive --config <path> [--allow-existing-admin]
-certhub-server bootstrap create-issuer --config <path> --name <machine_name> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
-certhub-server bootstrap create-dns-provider --config <path> --name <machine_name> --type <cloudflare|arvancloud> --zone-mode <auto|manual> [--credentials-stdin|--credentials-env <env>|--credentials-file <path>]
-certhub-server bootstrap add-dns-provider-zone --config <path> --dns-provider <name-or-id> --zone <dns_name>
-certhub-server bootstrap refresh-dns-provider-zones --config <path> --dns-provider <name-or-id>
+certhub-server migrate [--config <path>]
+certhub-server bootstrap --interactive [--config <path>]
+certhub-server bootstrap create-admin [--config <path>] --email <email> --display-name <name> [--password <value>|--password-stdin|--password-env <env>|--password-file <path>] [--allow-existing-admin]
+certhub-server bootstrap create-admin --interactive [--config <path>] [--allow-existing-admin]
+certhub-server bootstrap create-issuer [--config <path>] --name <machine_name> --directory-url <https_url> --contact-email <email> [--default] [--renewal-window-seconds <seconds>]
+certhub-server bootstrap create-dns-provider [--config <path>] --name <machine_name> --type <cloudflare|arvancloud> --zone-mode <auto|manual> [--credentials-stdin|--credentials-env <env>|--credentials-file <path>]
+certhub-server bootstrap add-dns-provider-zone [--config <path>] --dns-provider <name-or-id> --zone <dns_name>
+certhub-server bootstrap refresh-dns-provider-zones [--config <path>] --dns-provider <name-or-id>
 ```
 
 Command-specific rules:
@@ -4055,7 +4055,7 @@ Required backend scenarios:
 
 - PostgreSQL migrations are idempotent and create required foreign keys, uniqueness constraints, and indexes.
 - Go enum/domain types reject invalid API values before database persistence.
-- `certhub-server run` loads server process configuration only from the YAML config file selected by `certhub-server run --config <path>` or the default `/etc/certhub/server.yaml`; environment variables do not override server config values except for explicitly configured `database.url_env`, `encryption.key_env`, and `outbound_http.proxies.<name>.url_env`.
+- `certhub-server run` loads server process configuration only from the YAML config file selected by `certhub-server run --config <path>` or `CERTHUB_SERVER_CONFIG`; environment variables do not override server config values except for `CERTHUB_SERVER_CONFIG` selecting the config file path and explicitly configured `database.url_env`, `encryption.key_env`, and `outbound_http.proxies.<name>.url_env`.
 - `certhub-server run --migrate` applies pending migrations before starting HTTP listeners, while plain `certhub-server run` fails closed when migrations are pending.
 - Bare `certhub-server` without a subcommand prints help and does not start HTTP listeners, workers, metrics, web UI, migrations, or database-mutating jobs.
 - `certhub-server run` is the only command that starts the long-running backend serving process.

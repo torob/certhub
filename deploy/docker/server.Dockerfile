@@ -11,5 +11,6 @@ COPY --from=certs /image-root/ /
 COPY ${BINARY_DIR}/${TARGETOS}-${TARGETARCH}/certhub-server /usr/local/bin/certhub-server
 
 USER 65532:65532
+ENV CERTHUB_SERVER_CONFIG=/etc/certhub/server.yaml
 ENTRYPOINT ["/usr/local/bin/certhub-server"]
-CMD ["run", "--config", "/etc/certhub/server.yaml"]
+CMD ["run"]
