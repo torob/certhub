@@ -31,7 +31,7 @@ func TestCommandHelpAndKeyGenerationPublicSurfaces(t *testing.T) {
 		contains []string
 	}{
 		{"server bootstrap help", []string{"certhub-server", "bootstrap", "--help"}, []string{"create-admin", "--config"}},
-		{"server bootstrap leaf help", []string{"certhub-server", "bootstrap", "create-admin", "--help"}, []string{"--email", "--password-stdin"}},
+		{"server bootstrap leaf help", []string{"certhub-server", "bootstrap", "create-admin", "--help"}, []string{"--email", "--password"}},
 		{"cli run help", []string{"certhub-cli", "run", "--help"}, []string{"--config", "--once"}},
 		{"operator run help", []string{"certhub-operator", "run", "--help"}, []string{"CERTHUB_URL", "CERTHUB_TOKEN_SECRET_NAME"}},
 	}

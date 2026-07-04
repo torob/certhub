@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +43,7 @@ import (
 
 const bootstrapActorID = "00000000-0000-4000-8000-000000000001"
 const serverConfigPathEnv = "CERTHUB_SERVER_CONFIG"
+const defaultACMEDirectoryURL = "https://acme-v02.api.letsencrypt.org/directory"
 
 type ServerRunner struct {
 	Stdin  io.Reader
@@ -510,7 +512,6 @@ func (r ServerRunner) reportMigrationFailure(jsonOut bool, prefix, code string, 
 
 func (r ServerRunner) bootstrapCommand(exitCode *int) *cobra.Command {
 	var configPath string
-	var interactive bool
 	cmd := &cobra.Command{
 		Use:   "bootstrap",
 		Short: "Run first-bootstrap and emergency management jobs",
@@ -520,15 +521,10 @@ func (r ServerRunner) bootstrapCommand(exitCode *int) *cobra.Command {
 				*exitCode = 2
 				return
 			}
-			if interactive {
-				*exitCode = r.bootstrapInteractive(configPath)
-				return
-			}
 			_ = cmd.Help()
 		},
 	}
 	cmd.PersistentFlags().StringVar(&configPath, "config", "", "server YAML config path (or CERTHUB_SERVER_CONFIG)")
-	cmd.Flags().BoolVar(&interactive, "interactive", false, "run guided bootstrap")
 	cmd.AddCommand(r.bootstrapCreateAdminCommand(exitCode, &configPath))
 	cmd.AddCommand(r.bootstrapCreateIssuerCommand(exitCode, &configPath))
 	cmd.AddCommand(r.bootstrapCreateDNSProviderCommand(exitCode, &configPath))
@@ -540,12 +536,13 @@ func (r ServerRunner) bootstrapCommand(exitCode *int) *cobra.Command {
 type bootstrapCreateAdminOptions struct {
 	configPath         *string
 	email              string
+	emailSet           bool
 	displayName        string
+	displayNameSet     bool
 	passwordValue      string
-	passwordStdin      bool
-	passwordEnv        string
-	passwordFile       string
+	passwordFlagSet    bool
 	allowExistingAdmin bool
+	allowExistingSet   bool
 	interactive        bool
 	jsonOut            bool
 }
@@ -557,24 +554,25 @@ func (r ServerRunner) bootstrapCreateAdminCommand(exitCode *int, configPath *str
 		Short: "Create a global admin user",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			*exitCode = r.bootstrapCreateAdmin(opts, cmd.Flags().Changed("password"))
+			opts.emailSet = cmd.Flags().Changed("email")
+			opts.displayNameSet = cmd.Flags().Changed("display-name")
+			opts.passwordFlagSet = cmd.Flags().Changed("password")
+			opts.allowExistingSet = cmd.Flags().Changed("allow-existing-admin")
+			*exitCode = r.bootstrapCreateAdmin(opts)
 		},
 	}
 	cmd.Flags().StringVar(&opts.email, "email", "", "admin email")
 	cmd.Flags().StringVar(&opts.displayName, "display-name", "", "admin display name")
 	cmd.Flags().StringVar(&opts.passwordValue, "password", "", "admin password")
-	cmd.Flags().BoolVar(&opts.passwordStdin, "password-stdin", false, "read password from stdin")
-	cmd.Flags().StringVar(&opts.passwordEnv, "password-env", "", "environment variable containing admin password")
-	cmd.Flags().StringVar(&opts.passwordFile, "password-file", "", "file containing admin password")
 	cmd.Flags().BoolVar(&opts.allowExistingAdmin, "allow-existing-admin", false, "allow creation when an active admin already exists")
 	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided admin creation")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
 	return cmd
 }
 
-func (r ServerRunner) bootstrapCreateAdmin(opts bootstrapCreateAdminOptions, passwordFlagSet bool) int {
+func (r ServerRunner) bootstrapCreateAdmin(opts bootstrapCreateAdminOptions) int {
 	if opts.interactive {
-		return r.bootstrapCreateAdminInteractive(*opts.configPath, opts.allowExistingAdmin, opts.jsonOut)
+		return r.bootstrapCreateAdminInteractive(opts)
 	}
 	if opts.email == "" || opts.displayName == "" {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("email and display-name are required"))
@@ -583,7 +581,7 @@ func (r ServerRunner) bootstrapCreateAdmin(opts bootstrapCreateAdminOptions, pas
 	if configErr != nil {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", configErr)
 	}
-	password, err := r.readBootstrapAdminPassword(passwordFlagSet, opts.passwordValue, opts.passwordStdin, opts.passwordEnv, opts.passwordFile, opts.jsonOut)
+	password, err := r.readBootstrapAdminPassword(opts.passwordFlagSet, opts.passwordValue, opts.jsonOut)
 	if err != nil {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
@@ -613,120 +611,56 @@ func (r ServerRunner) bootstrapCreateAdmin(opts bootstrapCreateAdminOptions, pas
 	})
 }
 
-func (r ServerRunner) readBootstrapAdminPassword(flagSet bool, flagValue string, stdin bool, envName, filePath string, jsonOut bool) (*string, error) {
-	selected := 0
+func (r ServerRunner) readBootstrapAdminPassword(flagSet bool, flagValue string, jsonOut bool) (*string, error) {
 	if flagSet {
-		selected++
-	}
-	if stdin {
-		selected++
-	}
-	if envName != "" {
-		selected++
-	}
-	if filePath != "" {
-		selected++
-	}
-	if selected > 1 {
-		return nil, errors.New("at most one password source may be selected")
-	}
-	switch {
-	case flagSet:
 		return &flagValue, nil
-	case stdin:
-		raw, err := io.ReadAll(r.Stdin)
-		if err != nil {
-			return nil, err
-		}
-		value := strings.TrimRight(string(raw), "\r\n")
-		return &value, nil
-	case envName != "":
-		value, ok := os.LookupEnv(envName)
-		if !ok {
-			return nil, errors.New("password environment variable is unset")
-		}
-		value = strings.TrimRight(value, "\r\n")
-		return &value, nil
-	case filePath != "":
-		raw, err := readProtectedSecretFile("password file", filePath)
-		if err != nil {
-			return nil, err
-		}
-		value := strings.TrimRight(string(raw), "\r\n")
-		return &value, nil
-	default:
-		if jsonOut || !r.canPromptSecret() {
-			return nil, nil
-		}
-		password, err := r.promptSecret("Admin password [optional when OIDC is enabled]: ")
-		if err != nil {
-			return nil, err
-		}
-		confirm, err := r.promptSecret("Confirm admin password: ")
-		if err != nil {
-			return nil, err
-		}
-		if password != confirm {
-			return nil, errors.New("password confirmation does not match")
-		}
-		if password == "" {
-			return nil, nil
-		}
-		return &password, nil
 	}
+	if jsonOut || !r.canPromptSecret() {
+		return nil, nil
+	}
+	password, err := r.promptSecret("Admin password [optional when OIDC is enabled]: ")
+	if err != nil {
+		return nil, err
+	}
+	confirm, err := r.promptSecret("Confirm admin password: ")
+	if err != nil {
+		return nil, err
+	}
+	if password != confirm {
+		return nil, errors.New("password confirmation does not match")
+	}
+	if password == "" {
+		return nil, nil
+	}
+	return &password, nil
 }
 
-func (r ServerRunner) bootstrapInteractive(configPath string) int {
-	if err := r.requireInteractiveTerminal(); err != nil {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
-	}
-	resolvedConfigPath, err := resolveServerConfigPath(configPath)
-	if err != nil {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
-	}
-	action, err := r.promptLine("Bootstrap action [create-admin]: ")
-	if err != nil {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
-	}
-	if strings.TrimSpace(action) != "" && strings.TrimSpace(action) != "create-admin" {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("unsupported interactive bootstrap action"))
-	}
-	return r.bootstrapCreateAdminInteractive(resolvedConfigPath, false, false)
-}
-
-func (r ServerRunner) bootstrapCreateAdminInteractive(configPath string, allowExistingAdmin bool, jsonOut bool) int {
-	if jsonOut {
+func (r ServerRunner) bootstrapCreateAdminInteractive(opts bootstrapCreateAdminOptions) int {
+	if opts.jsonOut {
 		return r.reportBootstrapFailure(true, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap does not support json output"))
 	}
 	if err := r.requireInteractiveTerminal(); err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
 	}
-	resolvedConfigPath, err := resolveServerConfigPath(configPath)
+	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
 	}
-	email, err := r.promptLine("Admin email: ")
+	email, err := r.promptRequiredString("Admin email", opts.email, opts.emailSet)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
 	}
-	displayName, err := r.promptLine("Admin display name: ")
+	displayName, err := r.promptRequiredString("Admin display name", opts.displayName, opts.displayNameSet)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
 	}
-	password, err := r.promptSecret("Admin password [optional when OIDC is enabled]: ")
+	passwordPtr, err := r.readBootstrapAdminPassword(opts.passwordFlagSet, opts.passwordValue, false)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", err)
+	}
+	allowExistingAdmin, err := r.promptBool("Allow existing admin", opts.allowExistingAdmin, opts.allowExistingSet, false)
 	if err != nil {
 		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
-	}
-	confirm, err := r.promptSecret("Confirm admin password: ")
-	if err != nil {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
-	}
-	if password != confirm {
-		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("password confirmation does not match"))
-	}
-	var passwordPtr *string
-	if password != "" {
-		passwordPtr = &password
 	}
 	boot, err := r.openBootstrapServices(context.Background(), resolvedConfigPath)
 	if err != nil {
@@ -762,10 +696,16 @@ func (r ServerRunner) writeTOTPProvisioning(uri string) {
 type bootstrapCreateIssuerOptions struct {
 	configPath    *string
 	name          string
+	nameSet       bool
 	directoryURL  string
+	directorySet  bool
 	contactEmail  string
+	emailSet      bool
 	isDefault     bool
+	defaultSet    bool
 	renewalWindow int
+	renewalSet    bool
+	interactive   bool
 	jsonOut       bool
 }
 
@@ -776,6 +716,11 @@ func (r ServerRunner) bootstrapCreateIssuerCommand(exitCode *int, configPath *st
 		Short: "Create an ACME issuer",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			opts.nameSet = cmd.Flags().Changed("name")
+			opts.directorySet = cmd.Flags().Changed("directory-url")
+			opts.emailSet = cmd.Flags().Changed("contact-email")
+			opts.defaultSet = cmd.Flags().Changed("default")
+			opts.renewalSet = cmd.Flags().Changed("renewal-window-seconds")
 			*exitCode = r.bootstrapCreateIssuer(opts)
 		},
 	}
@@ -784,11 +729,15 @@ func (r ServerRunner) bootstrapCreateIssuerCommand(exitCode *int, configPath *st
 	cmd.Flags().StringVar(&opts.contactEmail, "contact-email", "", "ACME contact email")
 	cmd.Flags().BoolVar(&opts.isDefault, "default", false, "make issuer default")
 	cmd.Flags().IntVar(&opts.renewalWindow, "renewal-window-seconds", 0, "renewal window in seconds")
+	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided issuer creation")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
 	return cmd
 }
 
 func (r ServerRunner) bootstrapCreateIssuer(opts bootstrapCreateIssuerOptions) int {
+	if opts.interactive {
+		return r.bootstrapCreateIssuerInteractive(opts)
+	}
 	if opts.name == "" || opts.directoryURL == "" || opts.contactEmail == "" {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("name, directory-url, and contact-email are required"))
 	}
@@ -818,15 +767,54 @@ func (r ServerRunner) bootstrapCreateIssuer(opts bootstrapCreateIssuerOptions) i
 	})
 }
 
+func (r ServerRunner) bootstrapCreateIssuerInteractive(opts bootstrapCreateIssuerOptions) int {
+	if opts.jsonOut {
+		return r.reportBootstrapFailure(true, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap does not support json output"))
+	}
+	if err := r.requireInteractiveTerminal(); err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
+	}
+	name, err := r.promptRequiredString("Issuer name", opts.name, opts.nameSet)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	directoryURL, err := r.promptString("ACME directory URL", opts.directoryURL, opts.directorySet, defaultACMEDirectoryURL, true)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	contactEmail, err := r.promptRequiredString("Contact email", opts.contactEmail, opts.emailSet)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	isDefault, err := r.promptBool("Default issuer", opts.isDefault, opts.defaultSet, false)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	renewalWindow, err := r.promptInt("Renewal window seconds", opts.renewalWindow, opts.renewalSet, 0)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	opts.name = name
+	opts.directoryURL = directoryURL
+	opts.contactEmail = contactEmail
+	opts.isDefault = isDefault
+	opts.renewalWindow = renewalWindow
+	opts.interactive = false
+	return r.bootstrapCreateIssuer(opts)
+}
+
 type bootstrapCreateDNSProviderOptions struct {
-	configPath       *string
-	name             string
-	providerType     string
-	zoneMode         string
-	credentialsStdin bool
-	credentialsEnv   string
-	credentialsFile  string
-	jsonOut          bool
+	configPath   *string
+	name         string
+	nameSet      bool
+	providerType string
+	typeSet      bool
+	zoneMode     string
+	zoneModeSet  bool
+	token        string
+	tokenSet     bool
+	interactive  bool
+	jsonOut      bool
 }
 
 func (r ServerRunner) bootstrapCreateDNSProviderCommand(exitCode *int, configPath *string) *cobra.Command {
@@ -836,28 +824,34 @@ func (r ServerRunner) bootstrapCreateDNSProviderCommand(exitCode *int, configPat
 		Short: "Create a DNS provider",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			opts.nameSet = cmd.Flags().Changed("name")
+			opts.typeSet = cmd.Flags().Changed("type")
+			opts.zoneModeSet = cmd.Flags().Changed("zone-mode")
+			opts.tokenSet = cmd.Flags().Changed("token")
 			*exitCode = r.bootstrapCreateDNSProvider(opts)
 		},
 	}
 	cmd.Flags().StringVar(&opts.name, "name", "", "DNS provider machine name")
 	cmd.Flags().StringVar(&opts.providerType, "type", "", "provider type")
 	cmd.Flags().StringVar(&opts.zoneMode, "zone-mode", "", "zone mode")
-	cmd.Flags().BoolVar(&opts.credentialsStdin, "credentials-stdin", false, "read credential JSON from stdin")
-	cmd.Flags().StringVar(&opts.credentialsEnv, "credentials-env", "", "environment variable containing credential JSON")
-	cmd.Flags().StringVar(&opts.credentialsFile, "credentials-file", "", "file containing credential JSON")
+	cmd.Flags().StringVar(&opts.token, "token", "", "DNS provider API token")
+	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided DNS provider creation")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
 	return cmd
 }
 
 func (r ServerRunner) bootstrapCreateDNSProvider(opts bootstrapCreateDNSProviderOptions) int {
-	if opts.name == "" || opts.providerType == "" || opts.zoneMode == "" {
-		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("name, type, and zone-mode are required"))
+	if opts.interactive {
+		return r.bootstrapCreateDNSProviderInteractive(opts)
+	}
+	if opts.name == "" || opts.providerType == "" || opts.zoneMode == "" || !opts.tokenSet {
+		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("name, type, zone-mode, and token are required"))
 	}
 	resolvedConfigPath, err := resolveServerConfigPath(*opts.configPath)
 	if err != nil {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
-	credentials, err := r.readBootstrapCredentials(opts.credentialsStdin, opts.credentialsEnv, opts.credentialsFile)
+	credentials, err := dnsProviderTokenCredentials(opts.providerType, opts.token)
 	if err != nil {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", err)
 	}
@@ -882,11 +876,65 @@ func (r ServerRunner) bootstrapCreateDNSProvider(opts bootstrapCreateDNSProvider
 	})
 }
 
+func (r ServerRunner) bootstrapCreateDNSProviderInteractive(opts bootstrapCreateDNSProviderOptions) int {
+	if opts.jsonOut {
+		return r.reportBootstrapFailure(true, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap does not support json output"))
+	}
+	if err := r.requireInteractiveTerminal(); err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
+	}
+	providerType, err := r.promptString("DNS provider type", opts.providerType, opts.typeSet, string(dnsproviders.ProviderTypeCloudflare), true)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	switch dnsproviders.ProviderType(providerType) {
+	case dnsproviders.ProviderTypeCloudflare, dnsproviders.ProviderTypeArvanCloud:
+	default:
+		return r.reportBootstrapFailure(false, "bootstrap failed", "invalid_request", errors.New("unsupported DNS provider type"))
+	}
+	nameDefault := providerType + "_main"
+	if providerType == string(dnsproviders.ProviderTypeArvanCloud) {
+		nameDefault = "arvancloud_main"
+	}
+	name, err := r.promptString("DNS provider name", opts.name, opts.nameSet, nameDefault, true)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	zoneMode, err := r.promptString("Zone mode", opts.zoneMode, opts.zoneModeSet, string(dnsproviders.ZoneModeManual), true)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	token := opts.token
+	if !opts.tokenSet {
+		prompt := "DNS provider API token: "
+		switch dnsproviders.ProviderType(providerType) {
+		case dnsproviders.ProviderTypeCloudflare:
+			prompt = "Cloudflare API token: "
+		case dnsproviders.ProviderTypeArvanCloud:
+			prompt = "ArvanCloud API key: "
+		}
+		token, err = r.promptSecret(prompt)
+		if err != nil {
+			return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+		}
+	}
+	opts.name = name
+	opts.providerType = providerType
+	opts.zoneMode = zoneMode
+	opts.token = token
+	opts.tokenSet = true
+	opts.interactive = false
+	return r.bootstrapCreateDNSProvider(opts)
+}
+
 type bootstrapAddDNSProviderZoneOptions struct {
-	configPath  *string
-	providerRef string
-	zoneName    string
-	jsonOut     bool
+	configPath     *string
+	providerRef    string
+	providerRefSet bool
+	zoneName       string
+	zoneSet        bool
+	interactive    bool
+	jsonOut        bool
 }
 
 func (r ServerRunner) bootstrapAddDNSProviderZoneCommand(exitCode *int, configPath *string) *cobra.Command {
@@ -896,16 +944,22 @@ func (r ServerRunner) bootstrapAddDNSProviderZoneCommand(exitCode *int, configPa
 		Short: "Add a DNS provider zone",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			opts.providerRefSet = cmd.Flags().Changed("dns-provider")
+			opts.zoneSet = cmd.Flags().Changed("zone")
 			*exitCode = r.bootstrapAddDNSProviderZone(opts)
 		},
 	}
 	cmd.Flags().StringVar(&opts.providerRef, "dns-provider", "", "DNS provider name or ID")
 	cmd.Flags().StringVar(&opts.zoneName, "zone", "", "DNS zone name")
+	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided DNS provider zone creation")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
 	return cmd
 }
 
 func (r ServerRunner) bootstrapAddDNSProviderZone(opts bootstrapAddDNSProviderZoneOptions) int {
+	if opts.interactive {
+		return r.bootstrapAddDNSProviderZoneInteractive(opts)
+	}
 	if opts.providerRef == "" || opts.zoneName == "" {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider and zone are required"))
 	}
@@ -935,10 +989,33 @@ func (r ServerRunner) bootstrapAddDNSProviderZone(opts bootstrapAddDNSProviderZo
 	})
 }
 
+func (r ServerRunner) bootstrapAddDNSProviderZoneInteractive(opts bootstrapAddDNSProviderZoneOptions) int {
+	if opts.jsonOut {
+		return r.reportBootstrapFailure(true, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap does not support json output"))
+	}
+	if err := r.requireInteractiveTerminal(); err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
+	}
+	providerRef, err := r.promptRequiredString("DNS provider", opts.providerRef, opts.providerRefSet)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	zoneName, err := r.promptRequiredString("DNS zone", opts.zoneName, opts.zoneSet)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
+	}
+	opts.providerRef = providerRef
+	opts.zoneName = zoneName
+	opts.interactive = false
+	return r.bootstrapAddDNSProviderZone(opts)
+}
+
 type bootstrapRefreshDNSProviderZonesOptions struct {
-	configPath  *string
-	providerRef string
-	jsonOut     bool
+	configPath     *string
+	providerRef    string
+	providerRefSet bool
+	interactive    bool
+	jsonOut        bool
 }
 
 func (r ServerRunner) bootstrapRefreshDNSProviderZonesCommand(exitCode *int, configPath *string) *cobra.Command {
@@ -948,15 +1025,20 @@ func (r ServerRunner) bootstrapRefreshDNSProviderZonesCommand(exitCode *int, con
 		Short: "Refresh DNS provider zones",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			opts.providerRefSet = cmd.Flags().Changed("dns-provider")
 			*exitCode = r.bootstrapRefreshDNSProviderZones(opts)
 		},
 	}
 	cmd.Flags().StringVar(&opts.providerRef, "dns-provider", "", "DNS provider name or ID")
+	cmd.Flags().BoolVar(&opts.interactive, "interactive", false, "run guided DNS provider zone refresh")
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "print JSON output")
 	return cmd
 }
 
 func (r ServerRunner) bootstrapRefreshDNSProviderZones(opts bootstrapRefreshDNSProviderZonesOptions) int {
+	if opts.interactive {
+		return r.bootstrapRefreshDNSProviderZonesInteractive(opts)
+	}
 	if opts.providerRef == "" {
 		return r.reportBootstrapFailure(opts.jsonOut, "bootstrap failed", "invalid_request", errors.New("dns-provider is required"))
 	}
@@ -986,31 +1068,34 @@ func (r ServerRunner) bootstrapRefreshDNSProviderZones(opts bootstrapRefreshDNSP
 	})
 }
 
-func (r ServerRunner) readBootstrapCredentials(stdin bool, envName, filePath string) ([]byte, error) {
-	selected := 0
-	if stdin {
-		selected++
+func (r ServerRunner) bootstrapRefreshDNSProviderZonesInteractive(opts bootstrapRefreshDNSProviderZonesOptions) int {
+	if opts.jsonOut {
+		return r.reportBootstrapFailure(true, "bootstrap failed", "invalid_request", errors.New("interactive bootstrap does not support json output"))
 	}
-	if envName != "" {
-		selected++
+	if err := r.requireInteractiveTerminal(); err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_tty_required", err)
 	}
-	if filePath != "" {
-		selected++
+	providerRef, err := r.promptRequiredString("DNS provider", opts.providerRef, opts.providerRefSet)
+	if err != nil {
+		return r.reportBootstrapFailure(false, "bootstrap failed", "interactive_input_failed", err)
 	}
-	if selected != 1 {
-		return nil, errors.New("exactly one credential source is required")
+	opts.providerRef = providerRef
+	opts.interactive = false
+	return r.bootstrapRefreshDNSProviderZones(opts)
+}
+
+func dnsProviderTokenCredentials(providerType, token string) ([]byte, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("token is required")
 	}
-	switch {
-	case stdin:
-		return io.ReadAll(r.Stdin)
-	case envName != "":
-		value, ok := os.LookupEnv(envName)
-		if !ok {
-			return nil, errors.New("credential environment variable is unset")
-		}
-		return []byte(value), nil
+	switch dnsproviders.ProviderType(providerType) {
+	case dnsproviders.ProviderTypeCloudflare:
+		return json.Marshal(dnsproviders.CloudflareCredentials{APIToken: token})
+	case dnsproviders.ProviderTypeArvanCloud:
+		return json.Marshal(dnsproviders.ArvanCloudCredentials{APIKey: token})
 	default:
-		return readProtectedSecretFile("credential file", filePath)
+		return nil, errors.New("unsupported DNS provider type")
 	}
 }
 
@@ -1052,6 +1137,77 @@ func (r ServerRunner) promptLine(prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+func (r ServerRunner) promptRequiredString(label, value string, valueSet bool) (string, error) {
+	return r.promptString(label, value, valueSet, "", true)
+}
+
+func (r ServerRunner) promptString(label, value string, valueSet bool, defaultValue string, required bool) (string, error) {
+	if valueSet {
+		value = strings.TrimSpace(value)
+		if required && value == "" {
+			return "", fmt.Errorf("%s is required", label)
+		}
+		return value, nil
+	}
+	prompt := label + ": "
+	if defaultValue != "" {
+		prompt = fmt.Sprintf("%s [%s]: ", label, defaultValue)
+	}
+	line, err := r.promptLine(prompt)
+	if err != nil {
+		return "", err
+	}
+	value = strings.TrimSpace(line)
+	if value == "" {
+		value = defaultValue
+	}
+	if required && value == "" {
+		return "", fmt.Errorf("%s is required", label)
+	}
+	return value, nil
+}
+
+func (r ServerRunner) promptBool(label string, value bool, valueSet bool, defaultValue bool) (bool, error) {
+	if valueSet {
+		return value, nil
+	}
+	line, err := r.promptLine(fmt.Sprintf("%s [%t]: ", label, defaultValue))
+	if err != nil {
+		return false, err
+	}
+	line = strings.TrimSpace(strings.ToLower(line))
+	if line == "" {
+		return defaultValue, nil
+	}
+	switch line {
+	case "true", "t", "yes", "y", "1":
+		return true, nil
+	case "false", "f", "no", "n", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", label)
+	}
+}
+
+func (r ServerRunner) promptInt(label string, value int, valueSet bool, defaultValue int) (int, error) {
+	if valueSet {
+		return value, nil
+	}
+	line, err := r.promptLine(fmt.Sprintf("%s [%d]: ", label, defaultValue))
+	if err != nil {
+		return 0, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(line)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", label)
+	}
+	return parsed, nil
 }
 
 func (r ServerRunner) promptSecret(prompt string) (string, error) {

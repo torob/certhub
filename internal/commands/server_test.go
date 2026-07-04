@@ -59,12 +59,12 @@ func TestServerHelpSurfaces(t *testing.T) {
 		{
 			name:     "bootstrap help",
 			args:     []string{"bootstrap", "--help"},
-			contains: []string{"Usage:", "certhub-server bootstrap", "create-dns-provider", "refresh-dns-provider-zones", "--interactive"},
+			contains: []string{"Usage:", "certhub-server bootstrap", "create-dns-provider", "refresh-dns-provider-zones"},
 		},
 		{
 			name:     "help bootstrap create-admin",
 			args:     []string{"help", "bootstrap", "create-admin"},
-			contains: []string{"Usage:", "certhub-server bootstrap create-admin", "--email", "--display-name", "--password-stdin"},
+			contains: []string{"Usage:", "certhub-server bootstrap create-admin", "--email", "--display-name", "--password"},
 		},
 	}
 	for _, tt := range tests {
@@ -88,11 +88,11 @@ func TestServerHelpSurfaces(t *testing.T) {
 
 func TestServerBootstrapLeafHelpSurfaces(t *testing.T) {
 	tests := map[string][]string{
-		"create-admin":               {"--email", "--display-name", "--allow-existing-admin"},
-		"create-issuer":              {"--name", "--directory-url", "--contact-email"},
-		"create-dns-provider":        {"--name", "--type", "--zone-mode", "--credentials-file"},
-		"add-dns-provider-zone":      {"--dns-provider", "--zone"},
-		"refresh-dns-provider-zones": {"--dns-provider"},
+		"create-admin":               {"--email", "--display-name", "--allow-existing-admin", "--interactive"},
+		"create-issuer":              {"--name", "--directory-url", "--contact-email", "--interactive"},
+		"create-dns-provider":        {"--name", "--type", "--zone-mode", "--token", "--interactive"},
+		"add-dns-provider-zone":      {"--dns-provider", "--zone", "--interactive"},
+		"refresh-dns-provider-zones": {"--dns-provider", "--interactive"},
 		"generate-encryption-key":    {"Generate a base64 Certhub encryption key"},
 		"migrate":                    {"--config", "--json"},
 		"run":                        {"--config", "--migrate"},
@@ -333,12 +333,12 @@ tls:
 func TestBootstrapCreateAdminIsNotScaffolded(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	missingPath := filepath.Join(t.TempDir(), "missing.yaml")
-	code := (ServerRunner{Stdin: strings.NewReader("correct horse battery staple\n"), Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
 		"bootstrap", "create-admin",
 		"--config", missingPath,
 		"--email", "admin@example.com",
 		"--display-name", "Admin User",
-		"--password-stdin",
+		"--password", "correct horse battery staple",
 	})
 	if code == 0 {
 		t.Fatalf("bootstrap unexpectedly succeeded")
@@ -352,96 +352,42 @@ func TestBootstrapCreateAdminIsNotScaffolded(t *testing.T) {
 	}
 }
 
-func TestBootstrapCreateAdminAcceptsPasswordSources(t *testing.T) {
-	dir := newCommandTempDir(t)
-	passwordPath := filepath.Join(dir, "admin-password")
-	if err := os.WriteFile(passwordPath, []byte("correct horse battery staple\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CERTHUB_BOOTSTRAP_ADMIN_PASSWORD", "correct horse battery staple")
-
-	tests := map[string][]string{
-		"flag": {"--password", "correct horse battery staple"},
-		"env":  {"--password-env", "CERTHUB_BOOTSTRAP_ADMIN_PASSWORD"},
-		"file": {"--password-file", passwordPath},
-	}
-	for name, passwordArgs := range tests {
-		t.Run(name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			missingPath := filepath.Join(t.TempDir(), "missing.yaml")
-			args := []string{
-				"bootstrap", "create-admin",
-				"--config", missingPath,
-				"--email", "admin@example.com",
-				"--display-name", "Admin User",
-			}
-			args = append(args, passwordArgs...)
-			code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), args)
-			if code == 0 {
-				t.Fatalf("bootstrap unexpectedly succeeded")
-			}
-			if strings.Contains(stderr.String(), "flag provided but not defined") {
-				t.Fatalf("password source flag was rejected: %q", stderr.String())
-			}
-			if !strings.Contains(stderr.String(), "bootstrap failed") {
-				t.Fatalf("stderr = %q", stderr.String())
-			}
-		})
-	}
-}
-
-func TestBootstrapCreateAdminRejectsMultiplePasswordSources(t *testing.T) {
+func TestBootstrapCreateAdminAcceptsPasswordFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := (ServerRunner{Stdin: strings.NewReader("correct horse battery staple\n"), Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
 		"bootstrap", "create-admin",
 		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
 		"--email", "admin@example.com",
 		"--display-name", "Admin User",
 		"--password", "correct horse battery staple",
-		"--password-stdin",
 	})
 	if code == 0 {
 		t.Fatalf("bootstrap unexpectedly succeeded")
 	}
-	if !strings.Contains(stderr.String(), "at most one password source") {
-		t.Fatalf("stderr = %q", stderr.String())
+	if strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("password flag was rejected: %q", stderr.String())
 	}
-	if strings.Contains(stderr.String(), "stat failed") {
-		t.Fatalf("command tried to open config before rejecting password sources: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "bootstrap failed") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
-func TestBootstrapPasswordFileRequiresPrivateRegularFile(t *testing.T) {
-	dir := newCommandTempDir(t)
-	secretPath := filepath.Join(dir, "admin-password")
-	const canary = "ADMIN-PASSWORD-CANARY"
-	if err := os.WriteFile(secretPath, []byte(canary+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	password, err := (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", secretPath, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if password == nil || *password != canary {
-		t.Fatalf("password was not read and trimmed: %v", password)
-	}
-	if err := os.Chmod(secretPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", secretPath, false)
-	if err == nil || !strings.Contains(err.Error(), "password file: unsafe permissions") {
-		t.Fatalf("broad password file error = %v", err)
-	}
-	if strings.Contains(err.Error(), canary) {
-		t.Fatalf("password error leaked secret: %v", err)
-	}
-	linkPath := filepath.Join(dir, "admin-password-link")
-	if err := os.Symlink(secretPath, linkPath); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	_, err = (ServerRunner{}).readBootstrapAdminPassword(false, "", false, "", linkPath, false)
-	if err == nil || !strings.Contains(err.Error(), "non-symlink") {
-		t.Fatalf("symlink password file error = %v", err)
+func TestBootstrapCreateAdminRejectsRemovedPasswordSourceFlags(t *testing.T) {
+	for _, flag := range []string{"--password-env", "--password-file", "--password-stdin"} {
+		t.Run(flag, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := []string{"bootstrap", "create-admin", flag}
+			if flag != "--password-stdin" {
+				args = append(args, "value")
+			}
+			code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), args)
+			if code != 2 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "unknown flag") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
 	}
 }
 
@@ -463,47 +409,62 @@ func TestBootstrapCreateAdminRejectsOIDCLinkFlags(t *testing.T) {
 	}
 }
 
-func TestBootstrapCredentialFileRequiresPrivateRegularFile(t *testing.T) {
-	dir := newCommandTempDir(t)
-	secretPath := filepath.Join(dir, "credentials.json")
-	const canary = "DNS-CREDENTIAL-CANARY"
-	if err := os.WriteFile(secretPath, []byte(`{"api_token":"`+canary+`"}`), 0o600); err != nil {
-		t.Fatal(err)
+func TestBootstrapDNSProviderTokenCredentials(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerType string
+		token        string
+		wantJSON     string
+		wantErr      string
+	}{
+		{name: "cloudflare", providerType: "cloudflare", token: "  token-value  ", wantJSON: `{"api_token":"token-value"}`},
+		{name: "arvancloud", providerType: "arvancloud", token: "Apikey token-value", wantJSON: `{"api_key":"Apikey token-value"}`},
+		{name: "empty", providerType: "cloudflare", token: " ", wantErr: "token is required"},
+		{name: "unsupported", providerType: "route53", token: "token-value", wantErr: "unsupported DNS provider type"},
 	}
-	data, err := (ServerRunner{}).readBootstrapCredentials(false, "", secretPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), canary) {
-		t.Fatalf("credential data was not read")
-	}
-	if err := os.Chmod(secretPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = (ServerRunner{}).readBootstrapCredentials(false, "", secretPath)
-	if err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
-		t.Fatalf("broad credential file error = %v", err)
-	}
-	if strings.Contains(err.Error(), canary) {
-		t.Fatalf("credential error leaked secret: %v", err)
-	}
-	linkPath := filepath.Join(dir, "credentials-link.json")
-	if err := os.Symlink(secretPath, linkPath); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	_, err = (ServerRunner{}).readBootstrapCredentials(false, "", linkPath)
-	if err == nil || !strings.Contains(err.Error(), "non-symlink") {
-		t.Fatalf("symlink credential file error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := dnsProviderTokenCredentials(tt.providerType, tt.token)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v want %q", err, tt.wantErr)
+				}
+				if strings.TrimSpace(tt.token) != "" && strings.Contains(err.Error(), strings.TrimSpace(tt.token)) {
+					t.Fatalf("error leaked token: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.wantJSON {
+				t.Fatalf("credentials = %s want %s", got, tt.wantJSON)
+			}
+		})
 	}
 }
 
-func TestBootstrapInteractiveFailsClosedInNonTTY(t *testing.T) {
+func TestBootstrapCreateDNSProviderRejectsRemovedCredentialFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{
+		"bootstrap", "create-dns-provider",
+		"--credentials-file", "credentials.json",
+	})
+	if code != 2 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestBootstrapRootRejectsInteractiveFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := (ServerRunner{Stdout: &stdout, Stderr: &stderr}).Execute(context.Background(), []string{"bootstrap", "--interactive"})
-	if code == 0 {
-		t.Fatalf("interactive bootstrap unexpectedly succeeded")
+	if code != 2 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "requires a TTY") {
+	if !strings.Contains(stderr.String(), "unknown flag") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "scaffolding") {

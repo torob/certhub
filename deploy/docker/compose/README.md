@@ -1,257 +1,76 @@
 # Certhub server with Docker Compose
 
-This example starts PostgreSQL and starts the Certhub server image. The server
-command applies pending Certhub migrations before it starts serving HTTP. It can
-run in local HTTP mode or direct HTTPS mode with a server-managed Let's Encrypt
-certificate.
+This Compose setup runs PostgreSQL and the Certhub server. Keep secrets in
+`.env`; `server.yaml` reads them through environment variable references.
 
-The Compose file bind-mounts `server.yaml` directly into the scratch-based
-server image. The server image sets `CERTHUB_SERVER_CONFIG` to that default
-mount path, so in-container commands can omit `--config`. Keep secrets in `.env`
-and reference them from `server.yaml` with the documented `*_env` fields;
-operators are responsible for not placing secrets directly in the server config
-file.
+## Setup
 
-## First run
-
-Copy the example environment file and replace the placeholder values:
+Create the environment file and replace the placeholder values:
 
 ```bash
-cp deploy/docker/compose/example.env deploy/docker/compose/.env
+cd deploy/docker/compose
+cp example.env .env
 docker run --rm ghcr.io/torob/certhub-server:0.1.0 generate-encryption-key
 ```
 
-Set `CERTHUB_ENCRYPTION_KEY` in `deploy/docker/compose/.env` to the generated
-value and choose a strong `CERTHUB_POSTGRES_PASSWORD`.
+Set `CERTHUB_ENCRYPTION_KEY` in `.env` to the generated value and choose a
+strong `CERTHUB_POSTGRES_PASSWORD`.
 
-Start the default local HTTP stack:
+Edit `server.yaml` and set `server.public_hostname` to the public DNS name for
+this host.
 
-```bash
-cd deploy/docker/compose
-docker compose --env-file .env up -d
-```
+## Bootstrap
 
-The web UI and API listen on `http://localhost:8080` by default.
-
-To inspect command options inside the released image, use command-specific help:
+Run bootstrap interactively. Do not pass `-T`; prompts need a TTY. Values
+provided as flags are reused, and missing values are prompted.
 
 ```bash
-docker compose --env-file .env run --rm server --help
-docker compose --env-file .env run --rm server bootstrap --help
-docker compose --env-file .env run --rm server bootstrap create-admin --help
+docker compose --env-file .env run --rm server bootstrap create-admin --interactive
+docker compose --env-file .env run --rm server bootstrap create-issuer --interactive
+docker compose --env-file .env run --rm server bootstrap create-dns-provider --interactive
+docker compose --env-file .env run --rm server bootstrap add-dns-provider-zone --interactive
 ```
 
-## Bootstrap an admin
+For DNS provider setup, paste the raw Cloudflare API token or ArvanCloud API key
+when prompted. Do not wrap it in JSON.
 
-After PostgreSQL and Certhub are ready, create the first admin user:
+For the issuer, use Let's Encrypt staging first if you want a dry run:
 
-```bash
-cd deploy/docker/compose
-docker compose --env-file .env run --rm server \
-  bootstrap create-admin \
-  --email admin@example.com \
-  --display-name "Admin"
+```text
+https://acme-staging-v02.api.letsencrypt.org/directory
 ```
 
-The command prompts for the admin password and confirmation. For automation, pass
-a password source explicitly, for example:
+Use production when ready for a trusted certificate:
 
-```bash
-CERTHUB_BOOTSTRAP_ADMIN_PASSWORD='change-this-admin-password' \
-  docker compose --env-file .env run --rm -e CERTHUB_BOOTSTRAP_ADMIN_PASSWORD server \
-    bootstrap create-admin \
-    --email admin@example.com \
-    --display-name "Admin" \
-    --password-env CERTHUB_BOOTSTRAP_ADMIN_PASSWORD
+```text
+https://acme-v02.api.letsencrypt.org/directory
 ```
 
-`--password-file`, `--password-stdin`, and `--password <value>` are also
-supported. Prefer env, file, or stdin for automation because command-line
-arguments can be visible through process listings and shell history.
+## Start
 
-When `auth.password.2fa_required` is `true`, the command prints a terminal QR
-code and one-time TOTP provisioning URI for the admin account.
-
-## Direct HTTPS With Certhub Certificate
-
-Use this flow when the Certhub container should serve HTTPS itself. Before
-starting, make sure the public DNS name points to this host and that the host
-port in `.env` is reachable by users:
-
-```bash
-CERTHUB_SERVER_PORT=443
-```
-
-Edit `deploy/docker/compose/server.yaml` and enable HTTPS plus
-self-certificate sync:
-
-```yaml
-http:
-  bind_addr: ":8080"
-  require_https: true
-  trusted_proxy_cidrs: []
-server:
-  public_hostname: "certhub.example.com"
-tls:
-  cert_file: "/var/lib/certhub/tls/current/fullchain.pem"
-  key_file: "/var/lib/certhub/tls/current/privkey.pem"
-self_certificate:
-  sync_enabled: true
-  output_dir: "/var/lib/certhub/tls"
-  issuer: "letsencrypt_prod"
-  key_type: "ecdsa-p256"
-```
-
-Run migrations:
-
-```bash
-cd deploy/docker/compose
-docker compose --env-file .env run --rm server migrate
-```
-
-Create the admin user if you have not already done so, then create the ACME
-issuer. Use the Let's Encrypt staging directory first for a dry run, or use the
-production directory shown here for a trusted certificate:
-
-```bash
-docker compose --env-file .env run --rm server \
-  bootstrap create-issuer \
-  --name letsencrypt_prod \
-  --directory-url https://acme-v02.api.letsencrypt.org/directory \
-  --contact-email admin@example.com \
-  --default
-```
-
-Create a DNS provider that can write DNS-01 challenge records for the public
-hostname's zone. Cloudflare credentials use `api_token`:
-
-```bash
-printf '%s\n' '{"api_token":"cloudflare-api-token"}' | \
-  docker compose --env-file .env run --rm -T server \
-    bootstrap create-dns-provider \
-    --name cloudflare_main \
-    --type cloudflare \
-    --zone-mode manual \
-    --credentials-stdin
-```
-
-Add the DNS zone that contains `server.public_hostname`:
-
-```bash
-docker compose --env-file .env run --rm server \
-  bootstrap add-dns-provider-zone \
-  --dns-provider cloudflare_main \
-  --zone example.com
-```
-
-For ArvanCloud, use `--type arvancloud` and credential JSON shaped like
-`{"api_key":"Apikey ..."}`.
-
-Certhub checks DNS-01 TXT propagation before asking the issuer to validate a
-challenge. By default, each provider type uses the system resolver:
-
-```yaml
-dns:
-  propagation_resolvers:
-    cloudflare:
-      type: system
-```
-
-To use a regular DNS resolver for all Cloudflare-backed challenges:
-
-```yaml
-dns:
-  propagation_resolvers:
-    cloudflare:
-      type: dns
-      endpoint: "1.1.1.1:53"
-```
-
-To use DNS-over-HTTPS through a named proxy:
-
-```yaml
-outbound_http:
-  proxies:
-    corp_proxy:
-      url_env: "CERTHUB_CORP_PROXY_URL"
-dns:
-  propagation_resolvers:
-    cloudflare:
-      type: doh
-      endpoint: "https://cloudflare-dns.com/dns-query"
-      proxy: "corp_proxy"
-```
-
-To use DNS-over-TLS through a named proxy:
-
-```yaml
-outbound_http:
-  proxies:
-    corp_proxy:
-      url_env: "CERTHUB_CORP_PROXY_URL"
-dns:
-  propagation_resolvers:
-    cloudflare:
-      type: dot
-      endpoint: "1.1.1.1:853"
-      tls_server_name: "cloudflare-dns.com"
-      proxy: "corp_proxy"
-```
-
-Start the server in HTTPS mode:
+Start the Certhub server:
 
 ```bash
 docker compose --env-file .env up -d server
 docker compose --env-file .env logs -f server
 ```
 
-The first start is allowed even though
-`/var/lib/certhub/tls/current/fullchain.pem` and `privkey.pem` do
-not exist yet. Certhub creates the reserved server certificate, completes the
-ACME DNS-01 flow through the configured DNS provider, writes the certificate
-material into the TLS data directory, and begins serving HTTPS on the configured
-host port.
+The server applies pending migrations before it starts. The first start can
+succeed before certificate files exist; Certhub creates the server certificate
+through DNS-01 and writes it under the `server-data` volume.
 
-If issuance has completed but `/readyz` still reports pending TLS material,
-wait for `self_certificate.sync_interval_seconds` or restart the server to
-trigger a startup sync immediately:
+## Useful Commands
 
 ```bash
+docker compose --env-file .env ps
+docker compose --env-file .env logs -f postgres
 docker compose --env-file .env restart server
+docker compose --env-file .env down
 ```
 
-For an operator-provided certificate, place the certificate and private key in
-the `server-data` volume under `/var/lib/certhub/tls`, set `tls.cert_file` and
-`tls.key_file` to those paths, and leave `self_certificate.sync_enabled: false`.
-
-After issuance succeeds:
+To inspect command help:
 
 ```bash
-curl https://certhub.example.com/readyz
+docker compose --env-file .env run --rm server --help
+docker compose --env-file .env run --rm server bootstrap --help
 ```
-
-If you used the Let's Encrypt staging directory, the certificate will not be
-browser-trusted. Create a production issuer, set `self_certificate.issuer` to
-that issuer name, and recreate the server.
-
-## Updating config
-
-Edit `deploy/docker/compose/server.yaml`, then recreate the server:
-
-```bash
-cd deploy/docker/compose
-docker compose --env-file .env up -d --force-recreate server
-```
-
-Recreate the server when upgrading Certhub or applying a build that may include
-database migrations. The server applies pending migrations before it starts
-serving HTTP:
-
-```bash
-docker compose --env-file .env up -d --force-recreate server
-```
-
-For deployments behind an external HTTPS reverse proxy, terminate TLS at the
-proxy instead of using the direct HTTPS flow above. Set `http.require_https:
-true`, configure `http.trusted_proxy_cidrs` for the proxy network, and set
-`server.public_hostname` to the public Certhub hostname.
