@@ -135,7 +135,7 @@ const reviewedUnusedGooseModules = versionMap({
   "modernc.org/sqlite": "v1.49.1"
 });
 
-// Go 1.26.4 tidy retains these historical go.mod checksums for module graph
+// Go 1.26.5 tidy retains these historical go.mod checksums for module graph
 // resolution, even though the selected module versions above are newer.
 const reviewedChecksumOnlyGoModSums = moduleVersionSet([
   ["github.com/davecgh/go-spew", "v1.1.0"],

@@ -5,11 +5,11 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 export CODEX_TOOLS="${CODEX_TOOLS:-$HOME/.tools}"
-local_go="$CODEX_TOOLS/go/1.26.4/bin/go"
+local_go="$CODEX_TOOLS/go/1.26.5/bin/go"
 if [ ! -x "$local_go" ]; then
   local_go="go"
 fi
-export PATH="$CODEX_TOOLS/go/1.26.4/bin:$CODEX_TOOLS/bin:$PATH"
+export PATH="$CODEX_TOOLS/go/1.26.5/bin:$CODEX_TOOLS/bin:$PATH"
 export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
 export GOPATH="${GOPATH:-$HOME/go}"
 export GOMODCACHE="${GOMODCACHE:-$HOME/go/pkg/mod}"

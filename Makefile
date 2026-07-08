@@ -4,8 +4,8 @@ CODEX_TOOLS ?= $(HOME)/.tools
 export CODEX_TOOLS
 export PATH := $(CODEX_TOOLS)/bin:$(PATH)
 
-LOCAL_GO := $(CODEX_TOOLS)/go/1.26.4/bin/go
-LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.26.4/bin/gofmt
+LOCAL_GO := $(CODEX_TOOLS)/go/1.26.5/bin/go
+LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.26.5/bin/gofmt
 LOCAL_NODE_DIR := $(CODEX_TOOLS)/node/24.15.0/bin
 LOCAL_NODE := $(LOCAL_NODE_DIR)/node
 LOCAL_NPM := $(LOCAL_NODE_DIR)/npm
