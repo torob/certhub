@@ -248,6 +248,22 @@ h3 {
   align-items: start;
 }
 
+.token-form {
+  grid-template-columns: minmax(170px, 1fr) minmax(240px, 1.4fr) minmax(120px, auto);
+}
+
+.token-expiry-fields {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.2fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.token-rotate-dialog {
+  display: grid;
+  gap: 12px;
+}
+
 .inline-form strong {
   align-self: center;
 }
@@ -867,6 +883,10 @@ tr.selectable:focus-within td {
   .create-form,
   .issue-flow,
   .filter-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .token-expiry-fields {
     grid-template-columns: 1fr;
   }
 

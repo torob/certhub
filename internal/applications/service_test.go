@@ -131,6 +131,47 @@ func TestCreateTokenReturnsRawOnceAndStoresHashOnly(t *testing.T) {
 	}
 }
 
+func TestRotateTokenUpdatesSameRowAndDoesNotLeakSecret(t *testing.T) {
+	keys := serviceTestKeySet(t)
+	now := time.Now().UTC()
+	app := Application{
+		ID:          "22345678-1234-4234-9234-123456789abc",
+		Name:        "api_app",
+		DisplayName: "API App",
+		Status:      StatusActive,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	auditRepo := &serviceFakeAudit{}
+	store := &serviceFakeStore{application: app}
+	service := NewService(ServiceConfig{Repository: store, AuditRepository: auditRepo, KeySet: keys, Config: serviceTokenConfig()})
+	expiresAt := now.Add(2 * time.Hour)
+
+	result, err := service.RotateToken(context.Background(), Actor{
+		ID:         "12345678-1234-4234-9234-123456789abc",
+		GlobalRole: users.GlobalRoleAdmin,
+	}, app.ID, "42345678-1234-4234-9234-123456789abc", CreateTokenServiceParams{ExpiresAtSet: true, ExpiresAt: &expiresAt}, AuditContext{CorrelationID: "req-test", SourceIP: "203.0.113.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Token.ID != "42345678-1234-4234-9234-123456789abc" {
+		t.Fatalf("rotated token id = %q", result.Token.ID)
+	}
+	if !strings.HasPrefix(result.TokenValue, ApplicationTokenPrefix) {
+		t.Fatalf("token value = %q", result.TokenValue)
+	}
+	if store.rotatedToken.TokenHash != keys.HashToken(result.TokenValue) || store.rotatedToken.TokenHash == result.TokenValue {
+		t.Fatalf("stored rotated token hash = %q", store.rotatedToken.TokenHash)
+	}
+	if store.rotatedToken.ExpiresAt == nil || !store.rotatedToken.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("rotated expires_at = %#v; want %s", store.rotatedToken.ExpiresAt, expiresAt)
+	}
+	body, _ := json.Marshal(auditRepo.events)
+	if strings.Contains(string(body), result.TokenValue) || strings.Contains(string(body), store.rotatedToken.TokenHash) {
+		t.Fatalf("audit leaked token secret/hash: %s", body)
+	}
+}
+
 func TestDomainScopeCoverageHelpers(t *testing.T) {
 	scopes := []DomainScope{{Value: "*.example.com"}, {Value: "api.internal.example.com"}}
 	result, err := ScopesCoverIdentifiers(scopes, []string{"API.Example.com.", "*.example.com", "api.internal.example.com", "deep.api.example.com"})
@@ -182,6 +223,7 @@ type serviceFakeStore struct {
 	lookupHash      string
 	markedTokenID   string
 	createdToken    CreateTokenParams
+	rotatedToken    RotateTokenParams
 	accessibleAppID []string
 }
 
@@ -244,6 +286,19 @@ func (f *serviceFakeStore) LookupTokenByHash(_ context.Context, hash string) (To
 func (f *serviceFakeStore) MarkTokenUsed(_ context.Context, tokenID string) error {
 	f.markedTokenID = tokenID
 	return nil
+}
+
+func (f *serviceFakeStore) RotateToken(_ context.Context, params RotateTokenParams) (ApplicationToken, error) {
+	f.rotatedToken = params
+	return ApplicationToken{
+		ID:            params.TokenID,
+		ApplicationID: params.ApplicationID,
+		Name:          "deploy",
+		TokenHash:     params.TokenHash,
+		Status:        TokenStatusActive,
+		CreatedAt:     time.Now().UTC(),
+		ExpiresAt:     params.ExpiresAt,
+	}, nil
 }
 
 func (f *serviceFakeStore) ListTokens(context.Context, string, ListTokensParams) ([]ApplicationToken, error) {

@@ -140,6 +140,13 @@ type CreateTokenParams struct {
 	ExpiresAt     *time.Time
 }
 
+type RotateTokenParams struct {
+	ApplicationID string
+	TokenID       string
+	TokenHash     string
+	ExpiresAt     *time.Time
+}
+
 type AddDomainScopeParams struct {
 	ID              string
 	ApplicationID   string
@@ -496,6 +503,25 @@ where id = $1
 		return fmt.Errorf("mark application token used: %w", err)
 	}
 	return nil
+}
+
+func (r Repository) RotateToken(ctx context.Context, params RotateTokenParams) (ApplicationToken, error) {
+	if err := validateRotateToken(params); err != nil {
+		return ApplicationToken{}, err
+	}
+	token, err := scanToken(r.db.QueryRow(ctx, `
+update application_tokens
+set token_hash = $3,
+    expires_at = $4,
+    last_used_at = null
+where application_id = $1
+  and id = $2
+  and status = 'active'
+returning `+tokenReturningSQL(), params.ApplicationID, params.TokenID, params.TokenHash, params.ExpiresAt))
+	if err != nil {
+		return ApplicationToken{}, fmt.Errorf("rotate application token: %w", err)
+	}
+	return token, nil
 }
 
 func (r Repository) ListTokens(ctx context.Context, applicationID string, params ListTokensParams) ([]ApplicationToken, error) {
@@ -1072,6 +1098,16 @@ func validateCreateToken(params CreateTokenParams) error {
 		return err
 	}
 	if err := storage.ValidateHumanString(params.Name, "token_name", 1, 128); err != nil {
+		return err
+	}
+	return storage.ValidateTokenHash(params.TokenHash, "token_hash")
+}
+
+func validateRotateToken(params RotateTokenParams) error {
+	if err := storage.ValidateUUID(params.ApplicationID, "application_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateUUID(params.TokenID, "token_id"); err != nil {
 		return err
 	}
 	return storage.ValidateTokenHash(params.TokenHash, "token_hash")

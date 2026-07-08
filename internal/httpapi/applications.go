@@ -53,7 +53,7 @@ type apiApplicationToken struct {
 	Name          string     `json:"name"`
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"created_at"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at"`
 	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 }
@@ -123,6 +123,8 @@ func (s *Server) serveApplications(w http.ResponseWriter, r *http.Request, reqct
 		return s.handleListApplicationTokens(w, r, reqctx, applicationID)
 	case len(parts) == 2 && parts[1] == "tokens" && r.Method == http.MethodPost:
 		return s.handleCreateApplicationToken(w, r, reqctx, applicationID)
+	case len(parts) == 4 && parts[1] == "tokens" && parts[3] == "rotate" && r.Method == http.MethodPost:
+		return s.handleRotateApplicationToken(w, r, reqctx, applicationID, parts[2])
 	case len(parts) == 3 && parts[1] == "tokens" && r.Method == http.MethodDelete:
 		return s.handleRevokeApplicationToken(w, r, reqctx, applicationID, parts[2])
 	case len(parts) == 2 && parts[1] == "domain-scopes" && r.Method == http.MethodGet:
@@ -274,6 +276,27 @@ func (s *Server) handleCreateApplicationToken(w http.ResponseWriter, r *http.Req
 		"token_value": result.TokenValue,
 	})
 	return http.StatusCreated, ""
+}
+
+func (s *Server) handleRotateApplicationToken(w http.ResponseWriter, r *http.Request, reqctx RequestContext, applicationID, tokenID string) (int, string) {
+	current, status, code, ok := s.authenticateUser(w, r)
+	if !ok {
+		return status, code
+	}
+	params, err := decodeApplicationTokenRotate(r)
+	if err != nil {
+		return writeApplicationError(w, appdomain.ErrInvalidRequest)
+	}
+	result, err := s.apps.RotateToken(r.Context(), applicationActor(current), applicationID, tokenID, params, applicationAuditContext(reqctx))
+	if err != nil {
+		return writeApplicationError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":       serializeApplicationToken(result.Token),
+		"token_value": result.TokenValue,
+	})
+	return http.StatusOK, ""
 }
 
 func (s *Server) handleRevokeApplicationToken(w http.ResponseWriter, r *http.Request, reqctx RequestContext, applicationID, tokenID string) (int, string) {
@@ -649,19 +672,8 @@ func decodeApplicationTokenCreate(r *http.Request) (appdomain.CreateTokenService
 	if err := json.Unmarshal(nameRaw, &out.Name); err != nil {
 		return out, err
 	}
-	if expiresRaw, ok := raw["expires_at"]; ok {
-		out.ExpiresAtSet = true
-		if string(expiresRaw) != "null" {
-			var rawTime string
-			if err := json.Unmarshal(expiresRaw, &rawTime); err != nil {
-				return out, err
-			}
-			expiresAt, err := time.Parse(time.RFC3339, rawTime)
-			if err != nil {
-				return out, err
-			}
-			out.ExpiresAt = &expiresAt
-		}
+	if err := decodeExpiresAt(raw, &out); err != nil {
+		return out, err
 	}
 	for key := range raw {
 		if key != "name" && key != "expires_at" {
@@ -669,6 +681,44 @@ func decodeApplicationTokenCreate(r *http.Request) (appdomain.CreateTokenService
 		}
 	}
 	return out, nil
+}
+
+func decodeApplicationTokenRotate(r *http.Request) (appdomain.CreateTokenServiceParams, error) {
+	var raw map[string]json.RawMessage
+	if err := decodeJSONBody(r, &raw); err != nil {
+		return appdomain.CreateTokenServiceParams{}, err
+	}
+	var out appdomain.CreateTokenServiceParams
+	if err := decodeExpiresAt(raw, &out); err != nil {
+		return out, err
+	}
+	for key := range raw {
+		if key != "expires_at" {
+			return out, errors.New("unknown field")
+		}
+	}
+	return out, nil
+}
+
+func decodeExpiresAt(raw map[string]json.RawMessage, out *appdomain.CreateTokenServiceParams) error {
+	expiresRaw, ok := raw["expires_at"]
+	if !ok {
+		return nil
+	}
+	out.ExpiresAtSet = true
+	if string(expiresRaw) == "null" {
+		return nil
+	}
+	var rawTime string
+	if err := json.Unmarshal(expiresRaw, &rawTime); err != nil {
+		return err
+	}
+	expiresAt, err := time.Parse(time.RFC3339, rawTime)
+	if err != nil {
+		return err
+	}
+	out.ExpiresAt = &expiresAt
+	return nil
 }
 
 func applicationPathParts(p string) ([]string, bool) {

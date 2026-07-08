@@ -1060,6 +1060,7 @@ Rules:
 | `POST` | `/v1/applications/{application_id}/certificates` | Ensure a Certificate exists for an Application selected by ID and start issuance when needed. |
 | `POST` | `/v1/applications/{application_id}/tokens` | Create an Application token and return the raw token once. |
 | `GET` | `/v1/applications/{application_id}/tokens` | List Application token metadata without raw token values. |
+| `POST` | `/v1/applications/{application_id}/tokens/{token_id}/rotate` | Rotate an Application token secret in place and return the raw token once. |
 | `DELETE` | `/v1/applications/{application_id}/tokens/{token_id}` | Revoke an Application token. |
 | `POST` | `/v1/applications/{application_id}/domain-scopes` | Add an immutable domain scope to an Application. |
 | `GET` | `/v1/applications/{application_id}/domain-scopes` | List domain scopes for an Application. |
@@ -2473,6 +2474,40 @@ Expected responses:
 - `403 Forbidden`: User lacks manager access.
 - `404 Not Found`: Application does not exist or is not visible.
 
+#### POST /v1/applications/{application_id}/tokens/{token_id}/rotate
+
+Summary: Rotate an Application token secret in place and return the raw token once.
+
+Description and notes:
+
+- Requires Application `manager` grant or global `admin`.
+- Rotation preserves the existing token ID, name, status, and creation time.
+- Rotation replaces `token_hash`, clears `last_used_at`, and returns the new raw token only in this response.
+- If `expires_at` is omitted, Certhub sets the rotated token expiration from `application_tokens.default_ttl_seconds`.
+- If `expires_at` is explicitly `null`, Certhub makes the rotated token non-expiring.
+- Requested non-null token expiration must not exceed `application_tokens.max_ttl_seconds`.
+- Revoked tokens cannot be rotated.
+- Rotation for the reserved `certhub_server` Application must return `409 system_managed_resource`.
+
+```http
+POST /v1/applications/{application_id}/tokens/{token_id}/rotate
+Authorization: Bearer <user-access-token>
+Content-Type: application/json
+```
+
+Query params: None.
+
+Request body: Optional nullable expiration.
+
+Expected responses:
+
+- `200 OK`: token metadata and one-time replacement raw token value.
+- `400 Bad Request`: invalid body, invalid expiration, or expiration exceeds maximum lifetime.
+- `401 Unauthorized`: token is missing or invalid.
+- `403 Forbidden`: User lacks manager access.
+- `404 Not Found`: Application or active token does not exist or is not visible.
+- `409 Conflict`: token rotation is not allowed for the reserved system Application.
+
 #### DELETE /v1/applications/{application_id}/tokens/{token_id}
 
 Summary: Revoke an Application token.
@@ -3501,7 +3536,7 @@ Constraints:
 
 - Revoked, expired, or disabled-Application tokens must not authenticate.
 - `expires_at`, when non-null and `expires_at <= now`, makes the token expired.
-- `expires_at`, when non-null, must not exceed `application_tokens.max_ttl_seconds` from creation time.
+- `expires_at`, when non-null, must not exceed `application_tokens.max_ttl_seconds` from creation or rotation time.
 - Null `expires_at` is allowed, intentionally bypasses `application_tokens.max_ttl_seconds`, and means the token is non-expiring until revoked or the Application is disabled.
 - Tokens must not be created for Applications with `system_kind=certhub_server`.
 
@@ -3900,6 +3935,7 @@ Required audit actions include:
 - `application_created`
 - `application_updated`
 - `application_token_created`
+- `application_token_rotated`
 - `application_token_revoked`
 - `domain_scope_created`
 - `domain_scope_deleted`

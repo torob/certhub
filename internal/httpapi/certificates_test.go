@@ -717,6 +717,10 @@ func (s *certificateHTTPAppStore) MarkTokenUsed(_ context.Context, id string) er
 	return nil
 }
 
+func (s *certificateHTTPAppStore) RotateToken(context.Context, appdomain.RotateTokenParams) (appdomain.ApplicationToken, error) {
+	return appdomain.ApplicationToken{}, errors.New("not implemented")
+}
+
 func (s *certificateHTTPAppStore) ListTokens(context.Context, string, appdomain.ListTokensParams) ([]appdomain.ApplicationToken, error) {
 	return nil, errors.New("not implemented")
 }

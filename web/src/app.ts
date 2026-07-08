@@ -1157,6 +1157,7 @@ function ApplicationDetailPage(props: PageProps) {
   const base = `/v1/applications/${id}`;
   const [refresh, setRefresh] = useState(0);
   const [tokenValue, setTokenValue] = useState("");
+  const [rotatingToken, setRotatingToken] = useState<any | undefined>(undefined);
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] as string[] });
   const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
@@ -1175,9 +1176,13 @@ function ApplicationDetailPage(props: PageProps) {
   const events = useAsync<{ audit_events: any[] }>(props.session, activeTab === "audit" ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh, activeTab]);
   useEffect(() => {
     setTokenValue("");
+    setRotatingToken(undefined);
   }, [id]);
   useEffect(() => {
-    if (activeTab !== "tokens") setTokenValue("");
+    if (activeTab !== "tokens") {
+      setTokenValue("");
+      setRotatingToken(undefined);
+    }
   }, [activeTab]);
   useEffect(() => {
     if (!id || !appLoaded || rawTab === activeTab) return;
@@ -1247,23 +1252,25 @@ function ApplicationDetailPage(props: PageProps) {
       canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh((value) => value + 1)) }) : null,
       table(scopes, ["value", "kind", "created_at", canManage ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
     ) :
-    activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
-      createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),
-      canManage ? createElement(GenericCreate, { title: "Create token", fields: ["name", "expires_at"], onSubmit: (body: Record<string, string>) => {
-        setTokenValue("");
-        api<any>(`${base}/tokens`, props.session, { method: "POST", body: JSON.stringify(tokenCreateBody(body)) }).then((r) => {
-          if (!r.error && r.data?.token_value) setTokenValue(r.data.token_value);
-          props.setNotice(errorOrOK(r));
-          setRefresh((value) => value + 1);
-        });
-      } }) : null,
-      tokenValue ? createElement("div", { className: "secret-once" },
-        createElement("strong", null, "Raw token value, shown once"),
-        createElement("code", null, tokenValue),
-        createElement("button", { onClick: () => setTokenValue("") }, "Clear")
-      ) : null,
-      table(tokens, ["name", "status", "expires_at", "last_used_at", canManage ? actionsColumn((token) => rowAction("Revoke", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Revoke ${token.name}` })) : null].filter(Boolean) as TableColumn[])
-    ) :
+	    activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
+	      createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),
+	      canManage ? createElement(ApplicationTokenForm, {
+	        session: props.session,
+	        applicationID: id,
+	        setNotice: props.setNotice,
+	        onTokenValue: setTokenValue,
+	        onDone: () => setRefresh((value) => value + 1)
+	      }) : null,
+	      tokenValue ? createElement("div", { className: "secret-once" },
+	        createElement("strong", null, "Raw token value, shown once"),
+	        createElement("code", null, tokenValue),
+	        createElement("button", { onClick: () => setTokenValue("") }, "Clear")
+	      ) : null,
+	      table(tokens, ["name", "status", { key: "expires_at", render: tokenExpiryCell }, "last_used_at", canManage ? actionsColumn((token) => [
+	        token.status === "active" ? rowAction("Rotate", () => setRotatingToken(token), { icon: RefreshCw, label: `Rotate ${token.name}` }) : null,
+	        rowAction("Revoke", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/tokens/${token.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Revoke ${token.name}` })
+	      ]) : null].filter(Boolean) as TableColumn[])
+	    ) :
     activeTab === "access" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Access")),
       canManage ? createElement(GrantForm, { session: props.session, applicationID: app.id, setNotice: props.setNotice, onDone: () => setRefresh((value) => value + 1) }) : null,
@@ -1286,11 +1293,23 @@ function ApplicationDetailPage(props: PageProps) {
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
       refreshButton(refreshing, () => setRefresh((value) => value + 1))
     ),
-    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("div", { className: "tabbed-detail" },
-      createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
-      tabContent
-    )
-  );
+	    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("div", { className: "tabbed-detail" },
+	      createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
+	      tabContent
+	    ),
+	    rotatingToken ? createElement(TokenRotateDialog, {
+	      session: props.session,
+	      applicationID: id,
+	      token: rotatingToken,
+	      setNotice: props.setNotice,
+	      onClose: () => setRotatingToken(undefined),
+	      onTokenValue: setTokenValue,
+	      onDone: () => {
+	        setRotatingToken(undefined);
+	        setRefresh((value) => value + 1);
+	      }
+	    }) : null
+	  );
 }
 
 function UsersPage(props: PageProps) {
@@ -1956,6 +1975,124 @@ function GenericCreate(props: { title: string; fields: string[]; onSubmit: (body
   );
 }
 
+type TokenExpiryMode = "default" | "custom" | "never";
+
+function ApplicationTokenForm(props: { session: Session; applicationID: string; setNotice: (s: string) => void; onTokenValue: (value: string) => void; onDone: () => void }) {
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState<TokenExpiryMode>("default");
+  const [expiresAt, setExpiresAt] = useState("");
+  const error = required(name, "name") || tokenExpiryError(mode, expiresAt);
+  return createElement("form", { className: "inline-form token-form", onSubmit: async (e: Event) => {
+    e.preventDefault();
+    if (error) return props.setNotice(error);
+    props.onTokenValue("");
+    const result = await api<any>(`/v1/applications/${props.applicationID}/tokens`, props.session, { method: "POST", body: JSON.stringify({ name, ...tokenExpiryPayload(mode, expiresAt) }) });
+    if (!result.error && result.data?.token_value) {
+      props.onTokenValue(result.data.token_value);
+      setName("");
+      setMode("default");
+      setExpiresAt("");
+      props.onDone();
+    }
+    props.setNotice(errorOrOK(result));
+  } },
+    createElement("strong", null, "Create token"),
+    input("name", name, setName),
+    createElement(TokenExpiryFields, { mode, expiresAt, onMode: setMode, onExpiresAt: setExpiresAt }),
+    error ? createElement("span", { className: "field-error" }, error) : null,
+    createElement("button", { className: "primary", disabled: Boolean(error) }, "Create")
+  );
+}
+
+function TokenRotateDialog(props: { session: Session; applicationID: string; token: any; setNotice: (s: string) => void; onClose: () => void; onTokenValue: (value: string) => void; onDone: () => void }) {
+  const initial = initialTokenExpiry(props.token);
+  const [mode, setMode] = useState<TokenExpiryMode>(initial.mode);
+  const [expiresAt, setExpiresAt] = useState(initial.expiresAt);
+  const error = tokenExpiryError(mode, expiresAt);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [props.onClose]);
+  return createElement("div", {
+    className: "modal-backdrop",
+    role: "presentation",
+    onClick: props.onClose
+  },
+    createElement("form", {
+      className: "modal-dialog token-rotate-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "token-rotate-title",
+      onClick: (event: any) => event.stopPropagation(),
+      onSubmit: async (e: Event) => {
+        e.preventDefault();
+        if (error) return props.setNotice(error);
+        props.onTokenValue("");
+        const result = await api<any>(`/v1/applications/${props.applicationID}/tokens/${props.token.id}/rotate`, props.session, { method: "POST", body: JSON.stringify(tokenExpiryPayload(mode, expiresAt)) });
+        if (!result.error && result.data?.token_value) {
+          props.onTokenValue(result.data.token_value);
+          props.onDone();
+        }
+        props.setNotice(errorOrOK(result));
+      }
+    },
+      createElement("div", { className: "modal-header" },
+        createElement("h2", { id: "token-rotate-title" }, "Rotate token"),
+        createElement("button", { type: "button", className: "modal-close", onClick: props.onClose, "aria-label": "Close token rotation", title: "Close token rotation" }, createElement(X, { size: 18 }))
+      ),
+      createElement("div", { className: "field" }, createElement("span", null, "Token"), createElement("strong", null, props.token.name || props.token.id)),
+      createElement(TokenExpiryFields, { mode, expiresAt, onMode: setMode, onExpiresAt: setExpiresAt }),
+      error ? createElement("span", { className: "field-error" }, error) : null,
+      createElement("div", { className: "toolbar form-actions" },
+        createElement("button", { className: "primary", disabled: Boolean(error) }, "Rotate"),
+        createElement("button", { type: "button", onClick: props.onClose }, "Cancel")
+      )
+    )
+  );
+}
+
+function TokenExpiryFields(props: { mode: TokenExpiryMode; expiresAt: string; onMode: (mode: TokenExpiryMode) => void; onExpiresAt: (value: string) => void }) {
+  return createElement("div", { className: "token-expiry-fields" },
+    selectInput("Expiration", props.mode, (value) => props.onMode(value as TokenExpiryMode), [["default", "Default"], ["custom", "Custom"], ["never", "Never expires"]]),
+    props.mode === "custom" ? createElement("label", null,
+      createElement("span", null, "Expires at"),
+      createElement("input", {
+        value: localDateTimeInputValue(props.expiresAt),
+        type: "datetime-local",
+        onChange: (e: Event) => props.onExpiresAt(rfc3339FromLocalInput((e.target as HTMLInputElement).value)),
+        autoComplete: "off"
+      })
+    ) : null
+  );
+}
+
+function tokenExpiryPayload(mode: TokenExpiryMode, expiresAt: string) {
+  if (mode === "never") return { expires_at: null };
+  if (mode === "custom") return { expires_at: expiresAt };
+  return {};
+}
+
+function tokenExpiryError(mode: TokenExpiryMode, expiresAt: string) {
+  if (mode !== "custom") return "";
+  if (!expiresAt) return "expires_at is required";
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return "invalid date-time";
+  if (date.getTime() <= Date.now()) return "expires_at must be in the future";
+  return "";
+}
+
+function initialTokenExpiry(token: any): { mode: TokenExpiryMode; expiresAt: string } {
+  if (token?.expires_at) return { mode: "custom", expiresAt: token.expires_at };
+  return { mode: "never", expiresAt: "" };
+}
+
+function tokenExpiryCell(token: any) {
+  return token.expires_at ? formatDateTime(token.expires_at) : "Never";
+}
+
 function GrantForm(props: { session: Session; applicationID: string; setNotice: (s: string) => void; onDone: () => void }) {
   const [body, setBody] = useState({ email: "", role: "viewer" });
   return createElement("form", { className: "inline-form", onSubmit: async (e: Event) => {
@@ -2448,6 +2585,7 @@ function auditActionOptions(): FilterOption[] {
     "application_created",
     "application_updated",
     "application_token_created",
+    "application_token_rotated",
     "application_token_revoked",
     "domain_scope_created",
     "domain_scope_deleted",
@@ -2824,13 +2962,6 @@ function listItemError(value: string, mode: ListInputMode) {
 
 function emptyToNull(body: Record<string, string>) {
   return Object.fromEntries(Object.entries(body).map(([k, v]) => [k, v === "" ? null : v]));
-}
-
-function tokenCreateBody(body: Record<string, string>) {
-  return {
-    name: body.name,
-    expires_at: body.expires_at === "null" ? null : body.expires_at || undefined
-  };
 }
 
 function validateField(field: string, value: string) {

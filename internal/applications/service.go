@@ -47,6 +47,7 @@ type Store interface {
 	CreateToken(context.Context, CreateTokenParams) (ApplicationToken, error)
 	LookupTokenByHash(context.Context, string) (TokenIdentity, error)
 	MarkTokenUsed(context.Context, string) error
+	RotateToken(context.Context, RotateTokenParams) (ApplicationToken, error)
 	ListTokens(context.Context, string, ListTokensParams) ([]ApplicationToken, error)
 	CountTokens(context.Context, string, ListTokensParams) (int64, error)
 	RevokeToken(context.Context, string, string) (bool, error)
@@ -121,6 +122,11 @@ type CreateTokenServiceParams struct {
 }
 
 type CreateTokenResult struct {
+	Token      ApplicationToken
+	TokenValue string
+}
+
+type RotateTokenResult struct {
 	Token      ApplicationToken
 	TokenValue string
 }
@@ -388,6 +394,51 @@ func (s *Service) RevokeToken(ctx context.Context, actor Actor, applicationID, t
 	return s.withWriteTx(ctx, func(txsvc *Service) error {
 		return txsvc.revokeToken(ctx, actor, applicationID, tokenID, auditCtx)
 	})
+}
+
+func (s *Service) RotateToken(ctx context.Context, actor Actor, applicationID, tokenID string, params CreateTokenServiceParams, auditCtx AuditContext) (RotateTokenResult, error) {
+	var result RotateTokenResult
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		var err error
+		result, err = txsvc.rotateToken(ctx, actor, applicationID, tokenID, params, auditCtx)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) rotateToken(ctx context.Context, actor Actor, applicationID, tokenID string, params CreateTokenServiceParams, auditCtx AuditContext) (RotateTokenResult, error) {
+	if err := s.ready(); err != nil {
+		return RotateTokenResult{}, err
+	}
+	app, err := s.requireMutableManager(ctx, actor, applicationID)
+	if err != nil {
+		return RotateTokenResult{}, err
+	}
+	expiresAt, err := s.resolveTokenExpiry(params)
+	if err != nil {
+		return RotateTokenResult{}, err
+	}
+	tokenValue, err := randomApplicationToken()
+	if err != nil {
+		return RotateTokenResult{}, err
+	}
+	token, err := s.repo.RotateToken(ctx, RotateTokenParams{
+		ApplicationID: applicationID,
+		TokenID:       tokenID,
+		TokenHash:     s.keys.HashToken(tokenValue),
+		ExpiresAt:     expiresAt,
+	})
+	if err != nil {
+		return RotateTokenResult{}, classifyWriteError(err)
+	}
+	if err := s.auditApplicationEvent(ctx, actor.ID, "application_token_rotated", "application_token", &token.ID, app.ID, auditCtx, map[string]any{
+		"application_id": app.ID,
+		"name":           token.Name,
+		"expires_at":     token.ExpiresAt,
+	}); err != nil {
+		return RotateTokenResult{}, err
+	}
+	return RotateTokenResult{Token: token, TokenValue: tokenValue}, nil
 }
 
 func (s *Service) revokeToken(ctx context.Context, actor Actor, applicationID, tokenID string, auditCtx AuditContext) error {

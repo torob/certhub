@@ -205,6 +205,73 @@ func TestCreateApplicationTokenResponseShowsRawOnceAndNoHash(t *testing.T) {
 	}
 }
 
+func TestRotateApplicationTokenResponseShowsRawOnceAndNoHash(t *testing.T) {
+	keys := testKeySet(t)
+	user := fakeUser()
+	userToken := auth.UserAccessTokenPrefix + strings.Repeat("D", 43)
+	authRepo := &identityFakeAuthRepo{session: auth.Session{
+		ID:               "52345678-1234-4234-9234-123456789abc",
+		UserID:           user.ID,
+		AuthMethod:       auth.AuthMethodPassword,
+		AccessTokenHash:  keys.HashToken(userToken),
+		Status:           auth.SessionStatusActive,
+		AccessExpiresAt:  time.Now().Add(time.Minute),
+		SessionExpiresAt: time.Now().Add(time.Hour),
+	}}
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository:  authRepo,
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          keys,
+		Config:          testConfig(t, "").Auth,
+	})
+	now := time.Now().UTC()
+	app := httpFakeApplication(now, nil)
+	appAudit := &httpAppFakeAudit{}
+	store := &httpAppFakeStore{application: app}
+	appSvc := appdomain.NewService(appdomain.ServiceConfig{
+		Repository:      store,
+		AuditRepository: appAudit,
+		KeySet:          keys,
+		Config:          config.ApplicationTokenConfig{DefaultTTLSeconds: 3600, MaxTTLSeconds: 86400},
+	})
+	handler := New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithApplicationAccessServices(appSvc, nil)).Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/applications/"+app.ID+"/tokens/42345678-1234-4234-9234-123456789abc/rotate", strings.NewReader(`{"expires_at":null}`))
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("missing no-store header")
+	}
+	var body struct {
+		Token struct {
+			ID        string     `json:"id"`
+			ExpiresAt *time.Time `json:"expires_at"`
+		} `json:"token"`
+		TokenValue string `json:"token_value"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Token.ID != "42345678-1234-4234-9234-123456789abc" || body.Token.ExpiresAt != nil {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if !strings.HasPrefix(body.TokenValue, appdomain.ApplicationTokenPrefix) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "token_hash") || strings.Contains(rec.Body.String(), store.rotatedToken.TokenHash) {
+		t.Fatalf("response leaked token hash: %s", rec.Body.String())
+	}
+	auditJSON, _ := json.Marshal(appAudit.events)
+	if strings.Contains(string(auditJSON), body.TokenValue) || strings.Contains(string(auditJSON), store.rotatedToken.TokenHash) {
+		t.Fatalf("audit leaked token material: %s", auditJSON)
+	}
+}
+
 func httpFakeApplication(now time.Time, cidrs []string) appdomain.Application {
 	if cidrs == nil {
 		cidrs = []string{}
@@ -225,6 +292,7 @@ type httpAppFakeStore struct {
 	application   appdomain.Application
 	tokenIdentity appdomain.TokenIdentity
 	createdToken  appdomain.CreateTokenParams
+	rotatedToken  appdomain.RotateTokenParams
 	markedTokenID string
 }
 
@@ -289,6 +357,19 @@ func (f *httpAppFakeStore) LookupTokenByHash(context.Context, string) (appdomain
 func (f *httpAppFakeStore) MarkTokenUsed(_ context.Context, tokenID string) error {
 	f.markedTokenID = tokenID
 	return nil
+}
+
+func (f *httpAppFakeStore) RotateToken(_ context.Context, params appdomain.RotateTokenParams) (appdomain.ApplicationToken, error) {
+	f.rotatedToken = params
+	return appdomain.ApplicationToken{
+		ID:            params.TokenID,
+		ApplicationID: params.ApplicationID,
+		Name:          "deploy",
+		TokenHash:     params.TokenHash,
+		Status:        appdomain.TokenStatusActive,
+		CreatedAt:     time.Now().UTC(),
+		ExpiresAt:     params.ExpiresAt,
+	}, nil
 }
 
 func (f *httpAppFakeStore) ListTokens(context.Context, string, appdomain.ListTokensParams) ([]appdomain.ApplicationToken, error) {
