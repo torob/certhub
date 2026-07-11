@@ -248,7 +248,7 @@ func (r Reconciler) ReconcileDesired(ctx context.Context) (DesiredState, error) 
 			}
 			continue
 		}
-		if _, err := r.Certs.DeleteCertificate(ctx, certificates.DeleteCertificateParams{ID: cert.ID}); err != nil {
+		if _, err := r.Certs.DeleteCertificate(ctx, certificates.DeleteCertificateParams{ID: cert.ID, Force: true}); err != nil {
 			return DesiredState{}, err
 		}
 	}

@@ -34,7 +34,25 @@ var (
 	ErrCertificateRevoked            = errors.New("certificate revoked")
 	ErrCertificateNoActiveVersion    = errors.New("certificate has no active valid version")
 	ErrCertificateDisabled           = errors.New("certificate is disabled")
+	ErrCertificateBusy               = errors.New("certificate has active work or unclean DNS challenges")
+	ErrCertificateHasValidVersions   = errors.New("certificate has valid versions")
 )
+
+type CertificateBusyError struct {
+	ActiveJobs        int64
+	IssuingVersions   int64
+	UncleanChallenges int64
+}
+
+func (e CertificateBusyError) Error() string { return ErrCertificateBusy.Error() }
+func (e CertificateBusyError) Unwrap() error { return ErrCertificateBusy }
+
+type CertificateHasValidVersionsError struct{ Count int64 }
+
+func (e CertificateHasValidVersionsError) Error() string {
+	return ErrCertificateHasValidVersions.Error()
+}
+func (e CertificateHasValidVersionsError) Unwrap() error { return ErrCertificateHasValidVersions }
 
 type Store interface {
 	CreateOrReuse(context.Context, CreateOrReuseCertificateParams) (Certificate, error)
@@ -638,9 +656,9 @@ func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, cer
 	return version, err
 }
 
-func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificateID string, revoke bool, reason RevocationReason) error {
+func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificateID string, force bool, auditCtx *AuditContext) error {
 	return s.withWriteTx(ctx, func(txsvc *Service) error {
-		cert, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, true)
+		cert, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, false)
 		if err != nil {
 			return err
 		}
@@ -651,10 +669,37 @@ func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificat
 		if systemManagedApplication(app) {
 			return ErrSystemManagedResource
 		}
-		_ = revoke
-		_ = reason
-		if _, err := txsvc.repo.DeleteCertificate(ctx, DeleteCertificateParams{ID: certificateID}); err != nil {
+		deleted, err := txsvc.repo.DeleteCertificate(ctx, DeleteCertificateParams{ID: certificateID, Force: force})
+		if err != nil {
 			return classifyWriteError(err)
+		}
+		if txsvc.audit != nil {
+			metadata, _ := json.Marshal(map[string]any{
+				"application_id":  deleted.ApplicationID,
+				"certificate_id":  deleted.ID,
+				"force":           force,
+				"issuer_id":       deleted.IssuerID,
+				"key_type":        deleted.KeyType,
+				"normalized_sans": deleted.NormalizedSANs,
+				"version_count":   deleted.VersionCount,
+			})
+			params := auditdomain.AppendEventParams{
+				IdentityType:       auditdomain.IdentityTypeUser,
+				IdentityID:         &actor.ID,
+				Action:             "certificate_deleted",
+				TargetType:         "certificate",
+				TargetID:           &deleted.ID,
+				ScopeApplicationID: &deleted.ApplicationID,
+				Result:             auditdomain.ResultSuccess,
+				Metadata:           metadata,
+			}
+			if auditCtx != nil {
+				params.CorrelationID = optionalString(auditCtx.CorrelationID)
+				params.SourceIP = optionalString(auditCtx.SourceIP)
+			}
+			if _, err := txsvc.audit.Append(ctx, params); err != nil {
+				return classifyWriteError(err)
+			}
 		}
 		return nil
 	})

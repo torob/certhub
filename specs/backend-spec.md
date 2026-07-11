@@ -903,7 +903,7 @@ Reissue rules:
 - User lifecycle endpoints may retry an identity with no active valid version and no issuing version through `POST /v1/certificates/{certificate_id}/reissue`.
 - `POST /v1/certificates/{certificate_id}/renew` and `POST /v1/certificates/{certificate_id}/rotate-key` must return `409 certificate_no_active_version` when no active valid CertificateVersion exists.
 - `POST /v1/certificates/{certificate_id}/reissue` must return `409 conflict` when an active valid CertificateVersion exists or any CertificateVersion is currently issuing.
-- Certificates are never deleted through public APIs. Reissue keeps the same Certificate identity and creates a new CertificateVersion.
+- Certificates may be hard-deleted through the User-authenticated management API only when all certificate work is quiescent. Reissue keeps the same Certificate identity and creates a new CertificateVersion.
 
 Enablement rules:
 
@@ -1774,6 +1774,12 @@ Expected responses:
 #### PATCH /v1/certificates/{certificate_id}
 
 Updates the backend-owned Certificate enablement state. The JSON body is exactly `{ "enabled": boolean }`; empty bodies and unknown fields return `400 invalid_request`. Global admins and Users with `manager` access to the owning Application may call it. The operation is idempotent, returns updated Certificate metadata, changes `updated_at` only on a transition, and emits `certificate_enabled` or `certificate_disabled` only on a transition. It does not revoke or delete existing CertificateVersions.
+
+#### DELETE /v1/certificates/{certificate_id}
+
+Permanently deletes a Certificate and its CertificateVersions, issuance jobs, DNS challenge records, and certificate events. Global admins and Users with `manager` access to the owning Application may call it; reserved `certhub_server` Certificates return `409 system_managed_resource`.
+
+The optional JSON body is `{ "force": boolean }`, defaulting to false. Without force, any CertificateVersion in `valid` state returns `409 certificate_has_valid_versions`. Force deletion does not revoke those versions at the ACME issuer. Regardless of force, deletion returns `409 certificate_busy` while any issuance job is `pending` or `running`, any version is `issuing`, or any DNS challenge is not `cleaned`. The eligibility check and hard delete are atomic. Success returns `204 No Content` and emits `certificate_deleted`; audit history survives with its Certificate foreign-key scope cleared.
 
 #### GET /v1/certificates/{certificate_id}/versions
 

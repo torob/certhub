@@ -32,6 +32,10 @@ type certificateUpdateRequest struct {
 	Enabled *bool `json:"enabled"`
 }
 
+type certificateDeleteRequest struct {
+	Force bool `json:"force"`
+}
+
 type apiCertificate struct {
 	ID                    string                 `json:"id"`
 	Enabled               bool                   `json:"enabled"`
@@ -288,6 +292,20 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		noStoreHeaders(w.Header())
 		writeJSON(w, http.StatusOK, map[string]any{"certificate": serializeCertificate(cert)})
 		return http.StatusOK, ""
+	case r.Method == http.MethodDelete && tail == "":
+		var body certificateDeleteRequest
+		if r.ContentLength != 0 {
+			if err := decodeJSONBody(r, &body); err != nil {
+				return writeCertificateError(w, certdomain.ErrInvalidRequest)
+			}
+		}
+		auditCtx := certificateAuditContext(reqctx)
+		if err := s.certs.DeleteCertificate(r.Context(), actor, id, body.Force, &auditCtx); err != nil {
+			return writeCertificateError(w, err)
+		}
+		noStoreHeaders(w.Header())
+		w.WriteHeader(http.StatusNoContent)
+		return http.StatusNoContent, ""
 	case r.Method == http.MethodGet && tail == "versions":
 		opts, err := parseListOptions(r)
 		if err != nil {
@@ -530,6 +548,8 @@ func (s *Server) authenticateCertificateUser(w http.ResponseWriter, r *http.Requ
 func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 	var state certdomain.StateError
 	var renewalNotDue certdomain.RenewalNotDueError
+	var busy certdomain.CertificateBusyError
+	var validVersions certdomain.CertificateHasValidVersionsError
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "Internal server error."
@@ -550,6 +570,12 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusConflict, "issuer_not_configured", "No active default issuer is configured."
 	case errors.Is(err, certdomain.ErrSystemManagedResource):
 		status, code, message = http.StatusConflict, "system_managed_resource", "Resource is managed by Certhub configuration."
+	case errors.As(err, &busy):
+		status, code, message = http.StatusConflict, "certificate_busy", "Certificate has active work or DNS challenges that are not cleaned."
+		details = map[string]any{"active_jobs": busy.ActiveJobs, "issuing_versions": busy.IssuingVersions, "unclean_dns_challenges": busy.UncleanChallenges}
+	case errors.As(err, &validVersions):
+		status, code, message = http.StatusConflict, "certificate_has_valid_versions", "Certificate has valid versions; revoke them or force deletion."
+		details = map[string]any{"valid_versions": validVersions.Count}
 	case errors.As(err, &renewalNotDue):
 		status, code, message = http.StatusConflict, "renewal_not_due", "Certificate is not inside its renewal window."
 		details = renewalNotDueDetails(renewalNotDue)

@@ -290,6 +290,7 @@ Certificate lifecycle actions:
 - Revocation calls `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`.
 - CertificateVersion issuance event history calls `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`.
 - Certificate-specific audit event history calls `GET /v1/certificates/{certificate_id}/events`.
+- Hard deletion calls `DELETE /v1/certificates/{certificate_id}` and is available only to Application managers and global admins when certificate work is quiescent. The UI requires confirmation, explains permanent child-object removal, and requires an explicit force checkbox when valid versions remain.
 
 Renew and rotate-key require backend `enabled=true` and `has_active_valid_version=true`. Reissue requires backend `enabled=true`, `has_active_valid_version=false`, and `has_issuing_version=false`. Revocation and downloadable-version controls remain based on backend version state and permissions even when the Certificate is disabled. After enablement or lifecycle mutations, and after a concurrent-state `409`, the UI must refresh Certificate and version metadata before recalculating controls; it must not treat optimistic local state as authoritative. While the enablement PATCH is pending, the toggle and related lifecycle controls are disabled.
 
@@ -582,6 +583,7 @@ Certificate inventory, archive downloads, and lifecycle management:
 - `GET /v1/certificates`
 - `GET /v1/certificates/{certificate_id}`
 - `PATCH /v1/certificates/{certificate_id}`
+- `DELETE /v1/certificates/{certificate_id}`
 - `GET /v1/certificates/{certificate_id}/versions`
 - `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive`
 - `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`
@@ -763,7 +765,7 @@ Required frontend scenarios:
 - Trusted source IP/CIDR forms validate exact IPv4/IPv6 and CIDR inputs client-side, reject malformed values before submit, and render backend-normalized values after save.
 - No personal access-token management UI is shown.
 - Domain scope validation explains exact versus wildcard edge cases, including that `*.torob.dev` does not authorize `torob.dev` or `a.b.torob.dev`.
-- Version revoke flows require explicit reason selection and keep Certificate deletion unavailable.
+- Version revoke flows require explicit reason selection. Certificate deletion requires explicit confirmation and cannot bypass active jobs or DNS cleanup; force deletion only bypasses the valid-version revocation requirement.
 - Retryable backend errors use `Retry-After` or `retry_after_seconds` when polling.
 - Current material responses with `certificate_no_active_version` hide current download actions and show reissue guidance instead of stale material.
 - DNS provider credential replacement never displays existing secret.

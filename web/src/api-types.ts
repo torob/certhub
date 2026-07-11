@@ -403,7 +403,11 @@ export interface paths {
         get: operations["getCertificate"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Permanently delete a quiescent certificate and its operational child objects.
+         * @description Managers and admins may delete only when no certificate job is pending or running, no version is issuing, and every DNS challenge is cleaned. Valid versions require force=true.
+         */
+        delete: operations["deleteCertificate"];
         options?: never;
         head?: never;
         /** Enable or disable certificate lifecycle operations. */
@@ -1771,6 +1775,10 @@ export interface components {
         CertificateUpdateRequest: {
             enabled: boolean;
         };
+        CertificateDeleteRequest: {
+            /** @default false */
+            force: boolean;
+        };
         CertificateResponse: {
             certificate: components["schemas"]["Certificate"];
         };
@@ -2910,6 +2918,41 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    deleteCertificate: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CertificateDeleteRequest"];
+            };
+        };
+        responses: {
+            /** @description Certificate and operational child objects were permanently deleted. */
+            204: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     updateCertificate: {

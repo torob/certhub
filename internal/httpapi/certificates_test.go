@@ -145,6 +145,55 @@ func TestPatchCertificateEnabledReturnsBackendStateAndAudit(t *testing.T) {
 	}
 }
 
+func TestDeleteCertificateRequiresForceForValidVersionsAndAuditsSuccess(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	auditStore := &certificateHTTPAuditStore{}
+	handler, userToken := newCertificateHTTPUserHandler(t, fixture, auditStore)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/certificates/"+fixture.cert.ID, strings.NewReader(`{"force":true}`))
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !fixture.certStore.deleteParams.Force || fixture.certStore.deleteParams.ID != fixture.cert.ID {
+		t.Fatalf("delete params=%#v", fixture.certStore.deleteParams)
+	}
+	if len(auditStore.events) != 1 || auditStore.events[0].Action != "certificate_deleted" {
+		t.Fatalf("audit=%#v", auditStore.events)
+	}
+}
+
+func TestDeleteCertificateReturnsDeletionConflicts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "busy", err: certdomain.CertificateBusyError{ActiveJobs: 1, UncleanChallenges: 2}, code: "certificate_busy"},
+		{name: "valid versions", err: certdomain.CertificateHasValidVersionsError{Count: 2}, code: "certificate_has_valid_versions"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCertificateHTTPFixture(t)
+			fixture.certStore.deleteErr = test.err
+			auditStore := &certificateHTTPAuditStore{}
+			handler, userToken := newCertificateHTTPUserHandler(t, fixture, auditStore)
+			req := httptest.NewRequest(http.MethodDelete, "/v1/certificates/"+fixture.cert.ID, nil)
+			req.Header.Set("Authorization", "Bearer "+userToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(auditStore.events) != 0 {
+				t.Fatalf("audit=%#v", auditStore.events)
+			}
+		})
+	}
+}
+
 func TestListCertificateVersionEventsReturnsOperationalTimeline(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	message := "TXT record propagated"
@@ -634,6 +683,8 @@ type certificateHTTPCertStore struct {
 	events            []certdomain.Event
 	listParams        certdomain.ListCertificatesParams
 	countParams       certdomain.ListCertificatesParams
+	deleteParams      certdomain.DeleteCertificateParams
+	deleteErr         error
 }
 
 func (s *certificateHTTPCertStore) CreateOrReuse(_ context.Context, params certdomain.CreateOrReuseCertificateParams) (certdomain.Certificate, error) {
@@ -706,8 +757,12 @@ func (s *certificateHTTPCertStore) RevokeCertificateVersion(context.Context, cer
 	return certdomain.CertificateVersion{}, errors.New("not implemented")
 }
 
-func (s *certificateHTTPCertStore) DeleteCertificate(context.Context, certdomain.DeleteCertificateParams) (certdomain.Certificate, error) {
-	return certdomain.Certificate{}, errors.New("not implemented")
+func (s *certificateHTTPCertStore) DeleteCertificate(_ context.Context, params certdomain.DeleteCertificateParams) (certdomain.Certificate, error) {
+	s.deleteParams = params
+	if s.deleteErr != nil {
+		return certdomain.Certificate{}, s.deleteErr
+	}
+	return s.cert, nil
 }
 
 type certificateHTTPAppStore struct {

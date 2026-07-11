@@ -113,7 +113,8 @@ type RevokeCertificateVersionParams struct {
 }
 
 type DeleteCertificateParams struct {
-	ID string
+	ID    string
+	Force bool
 }
 
 type UpdateCertificateEnabledParams struct {
@@ -753,16 +754,35 @@ func (r Repository) DeleteCertificate(ctx context.Context, params DeleteCertific
 		return Certificate{}, err
 	}
 	cert, err := scanCertificate(r.db.QueryRow(ctx, `
-update certificates
-set status = 'deleted',
-    deleted_at = coalesce(deleted_at, now()),
-    failure_code = null,
-    failure_message = null,
-    updated_at = now()
-where id = $1
-returning `+certificateReturningSQL(), params.ID))
+select `+certificateSelectSQL("c")+`
+from certificates c
+where c.id = $1
+for update`, params.ID))
+	if err != nil {
+		return Certificate{}, fmt.Errorf("lock certificate for deletion: %w", err)
+	}
+	var activeJobs, issuingVersions, uncleanChallenges, validVersions int64
+	if err := r.db.QueryRow(ctx, `
+select
+    (select count(*) from certificate_issuance_jobs where certificate_id = $1 and status in ('pending', 'running')),
+    (select count(*) from certificate_versions where certificate_id = $1 and status = 'issuing'),
+    (select count(*) from dns_challenge_records where certificate_id = $1 and status <> 'cleaned'),
+    (select count(*) from certificate_versions where certificate_id = $1 and status = 'valid')`, params.ID).
+		Scan(&activeJobs, &issuingVersions, &uncleanChallenges, &validVersions); err != nil {
+		return Certificate{}, fmt.Errorf("inspect certificate deletion blockers: %w", err)
+	}
+	if activeJobs > 0 || issuingVersions > 0 || uncleanChallenges > 0 {
+		return Certificate{}, CertificateBusyError{ActiveJobs: activeJobs, IssuingVersions: issuingVersions, UncleanChallenges: uncleanChallenges}
+	}
+	if validVersions > 0 && !params.Force {
+		return Certificate{}, CertificateHasValidVersionsError{Count: validVersions}
+	}
+	result, err := r.db.Exec(ctx, `delete from certificates where id = $1`, params.ID)
 	if err != nil {
 		return Certificate{}, fmt.Errorf("delete certificate: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return Certificate{}, storage.ErrNoRows
 	}
 	return cert, nil
 }

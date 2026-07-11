@@ -46,6 +46,16 @@ button:disabled {
   opacity: 0.55;
 }
 
+button.danger {
+  border-color: #b45a5a;
+  background: #9b2929;
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #7f2020;
+}
+
 .spin {
   animation: spin 0.85s linear infinite;
 }
@@ -1061,6 +1071,36 @@ tr.selectable:focus-within td {
   padding: 0;
   display: inline-grid;
   place-items: center;
+}
+
+.certificate-delete-dialog {
+  width: min(560px, 100%);
+}
+
+.certificate-delete-content {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  overflow: auto;
+}
+
+.certificate-delete-content p {
+  margin: 0;
+}
+
+.certificate-delete-content .warning {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e0b878;
+  border-radius: 6px;
+  background: #fff8e8;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .failure-message-block {

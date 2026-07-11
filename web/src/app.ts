@@ -1038,6 +1038,8 @@ function CertificateDetailPage(props: PageProps) {
   const [failureMessage, setFailureMessage] = useState("");
   const [togglePending, setTogglePending] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
   const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
@@ -1073,6 +1075,8 @@ function CertificateDetailPage(props: PageProps) {
   const canLifecycle = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "manager");
   const hasActiveValidVersion = cert.has_active_valid_version === true;
   const hasIssuingVersion = cert.has_issuing_version === true;
+  const validVersionCount = rowsOf(versions).filter((version) => version.status === "valid").length;
+  const transientStatus = ["pending", "validating_dns", "issuing", "renewing", "rotating_key"].includes(cert.status);
   const certificateEnabled = cert.enabled === true;
   const lifecycleDisabledReason = "Certificate lifecycle is disabled";
   const activeVersionRequired = "Requires an active valid certificate version";
@@ -1088,7 +1092,13 @@ function CertificateDetailPage(props: PageProps) {
       canLifecycle ? createElement("button", { disabled: controlsBusy, onClick: toggleEnabled }, certificateEnabled ? "Disable" : "Enable") : null,
       canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || !hasActiveValidVersion, title: !certificateEnabled ? lifecycleDisabledReason : !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
       canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || !hasActiveValidVersion, title: !certificateEnabled ? lifecycleDisabledReason : !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/rotate-key") }, "Rotate key") : null,
-      canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || hasActiveValidVersion || hasIssuingVersion, title: !certificateEnabled ? lifecycleDisabledReason : hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null
+      canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || hasActiveValidVersion || hasIssuingVersion, title: !certificateEnabled ? lifecycleDisabledReason : hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null,
+      canLifecycle ? createElement("button", {
+        className: "danger",
+        disabled: controlsBusy || transientStatus || hasIssuingVersion,
+        title: transientStatus || hasIssuingVersion ? "Wait for certificate work to finish before deleting" : "Permanently delete certificate",
+        onClick: () => setDeleteOpen(true)
+      }, createElement(Trash2, { size: 16 }), "Delete") : null
     ),
     initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, certificateLabel(cert)),
@@ -1116,7 +1126,24 @@ function CertificateDetailPage(props: PageProps) {
     ]),
     createElement("h2", null, "Audit events"),
     table(events, auditColumns()),
-    failureMessage ? createElement(FailureMessageDialog, { message: failureMessage, onClose: () => setFailureMessage("") }) : null
+    failureMessage ? createElement(FailureMessageDialog, { message: failureMessage, onClose: () => setFailureMessage("") }) : null,
+    deleteOpen ? createElement(CertificateDeleteDialog, {
+      certificate: cert,
+      validVersionCount,
+      pending: deletePending,
+      onClose: () => setDeleteOpen(false),
+      onDelete: async (force: boolean) => {
+        setDeletePending(true);
+        const result = await api(`/v1/certificates/${id}`, props.session, { method: "DELETE", body: JSON.stringify({ force }) });
+        setDeletePending(false);
+        if (result.error) {
+          props.setNotice(errorText(result));
+          return;
+        }
+        props.setNotice("certificate permanently deleted");
+        props.navigate("/certificates");
+      }
+    }) : null
   );
 }
 
@@ -2423,6 +2450,47 @@ function FailureMessageDialog(props: { message: string; onClose: () => void }) {
         createElement("button", { type: "button", className: "modal-close", onClick: props.onClose, "aria-label": "Close failure message", title: "Close failure message" }, createElement(X, { size: 18 }))
       ),
       createElement("pre", { className: "failure-message-block" }, createElement("code", null, props.message))
+    )
+  );
+}
+
+function CertificateDeleteDialog(props: { certificate: any; validVersionCount: number; pending: boolean; onClose: () => void; onDelete: (force: boolean) => void }) {
+  const [force, setForce] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !props.pending) props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [props.onClose, props.pending]);
+  const requiresForce = props.validVersionCount > 0;
+  return createElement("div", { className: "modal-backdrop", role: "presentation", onClick: () => { if (!props.pending) props.onClose(); } },
+    createElement("section", {
+      className: "modal-dialog certificate-delete-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "certificate-delete-title",
+      onClick: (event: any) => event.stopPropagation()
+    },
+      createElement("div", { className: "modal-header" },
+        createElement("h2", { id: "certificate-delete-title" }, "Delete certificate permanently?"),
+        createElement("button", { type: "button", className: "modal-close", disabled: props.pending, onClick: props.onClose, "aria-label": "Close certificate deletion" }, createElement(X, { size: 18 }))
+      ),
+      createElement("div", { className: "certificate-delete-content" },
+        createElement("p", null, certificateLabel(props.certificate)),
+        createElement("p", null, "This permanently removes every version, private key, issuance job, DNS challenge record, and certificate event. This cannot be undone."),
+        requiresForce ? createElement("div", { className: "warning" },
+          createElement("p", null, `${props.validVersionCount} valid certificate version${props.validVersionCount === 1 ? "" : "s"} must be revoked before normal deletion.`),
+          createElement("label", { className: "checkbox-row" },
+            createElement("input", { type: "checkbox", checked: force, disabled: props.pending, onChange: (event: Event) => setForce((event.target as HTMLInputElement).checked) }),
+            createElement("span", null, "Force delete without revoking valid versions")
+          )
+        ) : null,
+        createElement("div", { className: "toolbar" },
+          createElement("button", { type: "button", disabled: props.pending, onClick: props.onClose }, "Cancel"),
+          createElement("button", { type: "button", className: "danger", disabled: props.pending || (requiresForce && !force), onClick: () => props.onDelete(force) }, props.pending ? "Deleting…" : "Delete permanently")
+        )
+      )
     )
   );
 }

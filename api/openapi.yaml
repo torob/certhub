@@ -865,6 +865,46 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Certificates]
+      operationId: deleteCertificate
+      summary: Permanently delete a quiescent certificate and its operational child objects.
+      description: Managers and admins may delete only when no certificate job is pending or running, no version is issuing, and every DNS challenge is cleaned. Valid versions require force=true.
+      security:
+        - UserBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateDeleteRequest'
+            examples:
+              normal:
+                value:
+                  force: false
+              force:
+                value:
+                  force: true
+      responses:
+        '204':
+          description: Certificate and operational child objects were permanently deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /v1/certificates/{certificate_id}/versions:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
@@ -4579,6 +4619,13 @@ components:
       properties:
         enabled:
           type: boolean
+    CertificateDeleteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        force:
+          type: boolean
+          default: false
     CertificateResponse:
       type: object
       additionalProperties: false
