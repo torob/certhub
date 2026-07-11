@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/torob/certhub/pkg/netretry"
 	xacme "golang.org/x/crypto/acme"
 )
 
@@ -19,8 +21,14 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 	}
 	certDER := []byte("leaf-cert-der")
 	var calls []string
+	directoryCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/directory" {
+			directoryCalls++
+			if directoryCalls < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"newNonce":   "http://" + r.Host + "/new-nonce",
 				"newAccount": "http://" + r.Host + "/new-account",
@@ -91,7 +99,7 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewOrderClient(server.Client())
+	client := NewOrderClient(server.Client(), netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond})
 	common := OrderClientParams{
 		DirectoryURL:         server.URL + "/directory",
 		AccountURL:           server.URL + "/acct/1",
@@ -106,6 +114,9 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 	}
 	if order.URL != server.URL+"/order/1" || order.FinalizeURL != server.URL+"/finalize/1" {
 		t.Fatalf("order = %#v", order)
+	}
+	if directoryCalls != 3 {
+		t.Fatalf("directory calls = %d; want 3", directoryCalls)
 	}
 	fetched, err := client.FetchOrder(context.Background(), FetchOrderParams{
 		OrderClientParams: common,

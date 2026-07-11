@@ -3,9 +3,33 @@ package config
 import (
 	"net/http"
 	"net/url"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
+
+func TestServerExampleRetryConfigurationLoads(t *testing.T) {
+	data, err := os.ReadFile("../../config/examples/server.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(data, "config/examples/server.yaml", LoadOptions{Env: func(key string) (string, bool) {
+		values := map[string]string{
+			"CERTHUB_DATABASE_URL":   "postgres://user:pass@localhost/db",
+			"CERTHUB_ENCRYPTION_KEY": validKey(),
+		}
+		value, ok := values[key]
+		return value, ok
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OutboundHTTP.Retry != netretry.DefaultPolicy() {
+		t.Fatalf("example retry policy = %#v", cfg.OutboundHTTP.Retry)
+	}
+}
 
 func TestDefaultOutboundRetryPolicy(t *testing.T) {
 	cfg, err := normalize(rawConfig{Database: rawDatabase{URL: "postgres://user:pass@localhost/db"}, Encryption: rawEncryption{Key: validKey()}}, "test.yaml", func(string) (string, bool) { return "", false })
@@ -16,6 +40,52 @@ func TestDefaultOutboundRetryPolicy(t *testing.T) {
 		t.Fatalf("retry policy = %#v", cfg.OutboundHTTP.Retry)
 	}
 }
+
+func TestCustomOutboundRetryPolicy(t *testing.T) {
+	cfg, err := normalize(rawConfig{
+		Database:   rawDatabase{URL: "postgres://user:pass@localhost/db"},
+		Encryption: rawEncryption{Key: validKey()},
+		OutboundHTTP: rawOutboundHTTP{Retry: rawRetryPolicy{
+			MaxAttempts:           testInt(1),
+			InitialBackoffSeconds: testInt(3),
+			MaxBackoffSeconds:     testInt(9),
+		}},
+	}, "test.yaml", func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.OutboundHTTP.Retry; got != (netretry.Policy{MaxAttempts: 1, InitialBackoff: 3 * time.Second, MaxBackoff: 9 * time.Second}) {
+		t.Fatalf("retry policy = %#v", got)
+	}
+}
+
+func TestOutboundRetryPolicyRejectsInvalidAndOverflowingValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		retry rawRetryPolicy
+	}{
+		{name: "zero attempts", retry: rawRetryPolicy{MaxAttempts: testInt(0)}},
+		{name: "too many attempts", retry: rawRetryPolicy{MaxAttempts: testInt(11)}},
+		{name: "zero initial", retry: rawRetryPolicy{InitialBackoffSeconds: testInt(0)}},
+		{name: "negative maximum", retry: rawRetryPolicy{MaxBackoffSeconds: testInt(-1)}},
+		{name: "maximum below initial", retry: rawRetryPolicy{InitialBackoffSeconds: testInt(9), MaxBackoffSeconds: testInt(3)}},
+		{name: "initial duration overflow", retry: rawRetryPolicy{InitialBackoffSeconds: testInt(18_446_744_075), MaxBackoffSeconds: testInt(18_446_744_075)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalize(rawConfig{
+				Database:     rawDatabase{URL: "postgres://user:pass@localhost/db"},
+				Encryption:   rawEncryption{Key: validKey()},
+				OutboundHTTP: rawOutboundHTTP{Retry: tt.retry},
+			}, "test.yaml", func(string) (string, bool) { return "", false })
+			if err == nil {
+				t.Fatal("invalid retry policy accepted")
+			}
+		})
+	}
+}
+
+func testInt(value int) *int { return &value }
 
 func TestOutboundHTTPTransportIgnoresAmbientProxyWhenDirect(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://ambient.example:8080")

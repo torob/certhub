@@ -10,6 +10,17 @@ import (
 
 const testAppToken = "cth_app_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
+func TestCLIExampleRetryConfigurationLoads(t *testing.T) {
+	t.Setenv("CERTHUB_TOKEN", testAppToken)
+	cfg, err := LoadConfig("../../config/examples/cli.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy := cfg.Sync.RetryPolicy(); policy.MaxAttempts != 5 || policy.InitialBackoff != time.Second || policy.MaxBackoff != 8*time.Second {
+		t.Fatalf("example retry policy = %#v", policy)
+	}
+}
+
 func TestLoadConfigRejectsDuplicateKeysAndUserTokens(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -86,6 +97,9 @@ out_dir: /tmp/out
 	}
 	if cfg.Sync.RequestTimeout != 30*time.Second {
 		t.Fatalf("default request timeout = %s; want 30s", cfg.Sync.RequestTimeout)
+	}
+	if policy := cfg.Sync.RetryPolicy(); policy.MaxAttempts != 5 || policy.InitialBackoff != time.Second || policy.MaxBackoff != 8*time.Second {
+		t.Fatalf("default retry policy = %#v", policy)
 	}
 }
 
@@ -168,6 +182,41 @@ out_dir: /tmp/out
 	}
 	if policy := cfg.Sync.RetryPolicy(); policy.MaxAttempts != 3 || policy.InitialBackoff != 2*time.Second || policy.MaxBackoff != 6*time.Second {
 		t.Fatalf("retry policy = %#v", policy)
+	}
+}
+
+func TestLoadConfigRetryPolicyBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		retry   string
+		wantErr bool
+	}{
+		{name: "one attempt disables retries", retry: "retry_max_attempts: 1\n  retry_initial_backoff: 1ns\n  retry_max_backoff: 1ns"},
+		{name: "maximum attempts", retry: "retry_max_attempts: 10\n  retry_initial_backoff: 1s\n  retry_max_backoff: 1h"},
+		{name: "zero attempts defaults", retry: "retry_max_attempts: 0\n  retry_initial_backoff: 2s\n  retry_max_backoff: 3s"},
+		{name: "negative attempts", retry: "retry_max_attempts: -1", wantErr: true},
+		{name: "too many attempts", retry: "retry_max_attempts: 11", wantErr: true},
+		{name: "negative initial", retry: "retry_initial_backoff: -1s", wantErr: true},
+		{name: "maximum below initial", retry: "retry_initial_backoff: 5s\n  retry_max_backoff: 4s", wantErr: true},
+		{name: "duration overflow", retry: "retry_initial_backoff: 999999999999999999999h", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			contents := "url: https://certhub.example.com\nsync:\n  " + tt.retry + "\ndomains:\n  - api.example.com\nout_dir: /tmp/out\n"
+			if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CERTHUB_TOKEN", testAppToken)
+			cfg, err := LoadConfig(path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadConfig error = %v, wantErr=%v", err, tt.wantErr)
+			}
+			if err == nil && tt.name == "one attempt disables retries" && cfg.Sync.RetryMaxAttempts != 1 {
+				t.Fatalf("max attempts = %d; want 1", cfg.Sync.RetryMaxAttempts)
+			}
+		})
 	}
 }
 

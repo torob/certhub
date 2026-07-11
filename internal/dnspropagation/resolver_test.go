@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -26,8 +27,53 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torob/certhub/pkg/netretry"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestRetryResolverRetriesOnlyTransientFailures(t *testing.T) {
+	t.Run("eventual success", func(t *testing.T) {
+		calls := 0
+		resolver := retryResolver{
+			resolver: resolverFunc(func(context.Context, string) ([]string, error) {
+				calls++
+				if calls < 3 {
+					return nil, io.ErrUnexpectedEOF
+				}
+				return []string{"value"}, nil
+			}),
+			policy: netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond},
+		}
+		values, err := resolver.LookupTXT(context.Background(), "example.com")
+		if err != nil || calls != 3 || len(values) != 1 || values[0] != "value" {
+			t.Fatalf("calls=%d values=%v err=%v", calls, values, err)
+		}
+	})
+
+	t.Run("permanent error", func(t *testing.T) {
+		calls := 0
+		permanent := errors.New("invalid DNS response")
+		resolver := retryResolver{
+			resolver: resolverFunc(func(context.Context, string) ([]string, error) {
+				calls++
+				return nil, permanent
+			}),
+			policy: netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond},
+		}
+		if _, err := resolver.LookupTXT(context.Background(), "example.com"); !errors.Is(err, permanent) {
+			t.Fatalf("error = %v; want permanent error", err)
+		}
+		if calls != 1 {
+			t.Fatalf("calls = %d; want 1", calls)
+		}
+	})
+}
+
+type resolverFunc func(context.Context, string) ([]string, error)
+
+func (f resolverFunc) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	return f(ctx, name)
+}
 
 func TestCheckerDoHLookupTXT(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

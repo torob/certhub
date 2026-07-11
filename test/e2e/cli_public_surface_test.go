@@ -175,12 +175,11 @@ func TestCLISchedulerSurvivesTemporaryBackendOutageAndRecovers(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Request-ID", "req-scheduler-outage")
-		switch materialRequests.Add(1) {
-		case 1:
-			w.Header().Set("Retry-After", "1")
+		switch request := materialRequests.Add(1); {
+		case request <= 5:
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","message":"backend upgrading","retryable":true,"retry_after_seconds":1,"details":{}}}`))
-		case 2:
+		case request == 6:
 			_, _ = w.Write([]byte(materialResponseJSON()))
 		default:
 			w.Header().Set("ETag", `"cth-mat-v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`)
@@ -196,6 +195,9 @@ func TestCLISchedulerSurvivesTemporaryBackendOutageAndRecovers(t *testing.T) {
 		"  per_certificate_timeout: 1s\n" +
 		"  poll_interval: 10ms\n" +
 		"  request_timeout: 200ms\n" +
+		"  retry_max_attempts: 5\n" +
+		"  retry_initial_backoff: 1ns\n" +
+		"  retry_max_backoff: 1ns\n" +
 		"scheduler:\n" +
 		"  interval: 50ms\n" +
 		"  jitter: 0s\n" +

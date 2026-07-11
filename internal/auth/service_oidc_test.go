@@ -24,7 +24,76 @@ import (
 	"github.com/torob/certhub/internal/migrations"
 	"github.com/torob/certhub/internal/storage"
 	"github.com/torob/certhub/internal/users"
+	"github.com/torob/certhub/pkg/netretry"
 )
+
+func TestOIDCRetriesReadsButNotAuthorizationCodeExchange(t *testing.T) {
+	policy := netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+	t.Run("discovery GET retries", func(t *testing.T) {
+		calls := 0
+		var server *httptest.Server
+		server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 server.URL,
+				"authorization_endpoint": server.URL + "/authorize",
+				"token_endpoint":         server.URL + "/token",
+				"jwks_uri":               server.URL + "/jwks",
+			})
+		}))
+		defer server.Close()
+		service := NewService(ServiceConfig{
+			Config:      config.AuthConfig{OIDC: config.OIDCConfig{IssuerURL: server.URL}},
+			HTTPClient:  server.Client(),
+			RetryPolicy: policy,
+		})
+		if _, err := service.fetchOIDCDiscovery(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 3 {
+			t.Fatalf("discovery calls = %d; want 3", calls)
+		}
+	})
+
+	t.Run("authorization code POST is single attempt", func(t *testing.T) {
+		discoveryCalls := 0
+		tokenCalls := 0
+		var server *httptest.Server
+		server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/.well-known/openid-configuration":
+				discoveryCalls++
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"issuer": server.URL, "authorization_endpoint": server.URL + "/authorize",
+					"token_endpoint": server.URL + "/token", "jwks_uri": server.URL + "/jwks",
+				})
+			case "/token":
+				tokenCalls++
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		service := NewService(ServiceConfig{
+			Config: config.AuthConfig{OIDC: config.OIDCConfig{
+				IssuerURL: server.URL, ClientID: "certhub-web", RedirectURL: "https://certhub.example/callback",
+			}},
+			HTTPClient:  server.Client(),
+			RetryPolicy: policy,
+		})
+		if _, err := service.validateOIDCCode(context.Background(), "one-use-code", "verifier", "nonce"); !errors.Is(err, ErrOIDCValidationFailed) {
+			t.Fatalf("error = %v; want OIDC validation failure", err)
+		}
+		if discoveryCalls != 1 || tokenCalls != 1 {
+			t.Fatalf("discovery calls=%d token calls=%d; want 1 each", discoveryCalls, tokenCalls)
+		}
+	})
+}
 
 func TestStartOIDCLoginBuildsAuthorizationCodePKCERedirect(t *testing.T) {
 	keys, err := security.NewKeySet(make([]byte, 32))

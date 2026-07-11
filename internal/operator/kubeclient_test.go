@@ -8,7 +8,64 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
+
+func TestRESTKubeClientRetriesReadsButNotMutations(t *testing.T) {
+	t.Run("GET eventually succeeds", func(t *testing.T) {
+		calls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			requireKubeAuth(t, r)
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s; want GET", r.Method)
+			}
+			if calls < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			writeKubeJSON(t, w, &Secret{Metadata: Metadata{Name: "token", Namespace: "ns"}, Data: map[string][]byte{"token": []byte("value")}})
+		}))
+		defer server.Close()
+		client := testRESTKubeClient(server.URL)
+		client.retry = netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+		if _, err := client.GetSecret(context.Background(), "ns", "token"); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 3 {
+			t.Fatalf("GET calls = %d; want 3", calls)
+		}
+	})
+
+	t.Run("POST is not replayed", func(t *testing.T) {
+		getCalls := 0
+		postCalls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requireKubeAuth(t, r)
+			switch r.Method {
+			case http.MethodGet:
+				getCalls++
+				http.NotFound(w, r)
+			case http.MethodPost:
+				postCalls++
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		}))
+		defer server.Close()
+		client := testRESTKubeClient(server.URL)
+		client.retry = netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+		err := client.CreateOrUpdateSecret(context.Background(), ownedSecret(testCertificate(), "etag"))
+		if err == nil {
+			t.Fatal("503 mutation unexpectedly succeeded")
+		}
+		if getCalls != 1 || postCalls != 1 {
+			t.Fatalf("GET calls=%d POST calls=%d; want 1 each", getCalls, postCalls)
+		}
+	})
+}
 
 func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *testing.T) {
 	ctx := context.Background()

@@ -125,6 +125,39 @@ func TestCloudflarePresentVerifiesAmbiguousCreateBeforeRetry(t *testing.T) {
 	}
 }
 
+func TestCloudflareCleanUpVerifiesAmbiguousDeleteBeforeRetry(t *testing.T) {
+	created := true
+	deletes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []map[string]string{{"id": "zone-id", "name": "example.com"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/zone-id/dns_records":
+			result := []map[string]string{}
+			if created {
+				result = append(result, map[string]string{"id": "record-id", "type": "TXT", "name": "_acme-challenge.example.com", "content": "value"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": result})
+		case r.Method == http.MethodDelete && r.URL.Path == "/zones/zone-id/dns_records/record-id":
+			deletes++
+			created = false
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := NewCloudflareClient(server.Client(), netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond})
+	client.BaseURL = server.URL
+	err := client.CleanUp(context.Background(), CloudflareCredentials{APIToken: "token"}, DNS01ChallengeOperation{ZoneName: "example.com", RecordName: "_acme-challenge.example.com", TXTValue: "value", TTL: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletes != 1 {
+		t.Fatalf("delete requests = %d; want 1", deletes)
+	}
+}
+
 func TestCloudflareChallengeErrorsAreSanitized(t *testing.T) {
 	const (
 		token    = "CF-TOKEN-CANARY"

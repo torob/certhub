@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -589,6 +590,76 @@ func TestConfigAndTokenLoading(t *testing.T) {
 	}
 	if !strings.HasPrefix(token, "cth_app_v1_") {
 		t.Fatalf("unexpected token: %q", token)
+	}
+}
+
+func TestOperatorRetryConfigDefaultsAndValidation(t *testing.T) {
+	base := map[string]string{
+		"CERTHUB_URL":               "https://certhub.example",
+		"CERTHUB_TOKEN_SECRET_NAME": "app-token",
+	}
+	load := func(overrides map[string]string) (Config, error) {
+		return LoadConfig(func(key string) string {
+			if value, ok := overrides[key]; ok {
+				return value
+			}
+			return base[key]
+		})
+	}
+	cfg, err := load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RetryPolicy.MaxAttempts != 5 || cfg.RetryPolicy.InitialBackoff != time.Second || cfg.RetryPolicy.MaxBackoff != 8*time.Second {
+		t.Fatalf("default retry policy = %#v", cfg.RetryPolicy)
+	}
+	tests := []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "attempts not integer", overrides: map[string]string{"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS": "many"}},
+		{name: "zero attempts", overrides: map[string]string{"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS": "0"}},
+		{name: "too many attempts", overrides: map[string]string{"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS": "11"}},
+		{name: "initial malformed", overrides: map[string]string{"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "soon"}},
+		{name: "initial nonpositive", overrides: map[string]string{"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "0s"}},
+		{name: "maximum malformed", overrides: map[string]string{"CERTHUB_HTTP_RETRY_MAX_BACKOFF": "later"}},
+		{name: "maximum below initial", overrides: map[string]string{"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "5s", "CERTHUB_HTTP_RETRY_MAX_BACKOFF": "4s"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := load(tt.overrides); err == nil {
+				t.Fatal("invalid retry configuration accepted")
+			}
+		})
+	}
+	cfg, err = load(map[string]string{
+		"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS":    "1",
+		"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "1ns",
+		"CERTHUB_HTTP_RETRY_MAX_BACKOFF":     "1ns",
+	})
+	if err != nil || cfg.RetryPolicy.MaxAttempts != 1 {
+		t.Fatalf("single-attempt policy = %#v, err=%v", cfg.RetryPolicy, err)
+	}
+}
+
+func TestOperatorExampleRetryConfigurationLoads(t *testing.T) {
+	data, err := os.ReadFile("../../config/examples/operator.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	cfg, err := LoadConfig(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RetryPolicy.MaxAttempts != 5 || cfg.RetryPolicy.InitialBackoff != time.Second || cfg.RetryPolicy.MaxBackoff != 8*time.Second {
+		t.Fatalf("example retry policy = %#v", cfg.RetryPolicy)
 	}
 }
 

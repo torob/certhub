@@ -292,6 +292,9 @@ func ParseRetryAfter(value string, now time.Time) time.Duration {
 	}
 	if seconds, err := strconv.Atoi(value); err == nil {
 		if seconds > 0 {
+			if int64(seconds) > int64((time.Duration(1<<63-1))/time.Second) {
+				return 0
+			}
 			return time.Duration(seconds) * time.Second
 		}
 		return 0

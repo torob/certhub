@@ -485,11 +485,11 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 	if raw.OutboundHTTP.Retry.MaxAttempts != nil {
 		cfg.OutboundHTTP.Retry.MaxAttempts = *raw.OutboundHTTP.Retry.MaxAttempts
 	}
-	if raw.OutboundHTTP.Retry.InitialBackoffSeconds != nil {
-		cfg.OutboundHTTP.Retry.InitialBackoff = time.Duration(*raw.OutboundHTTP.Retry.InitialBackoffSeconds) * time.Second
+	if err := retryDurationSeconds("outbound_http.retry.initial_backoff_seconds", raw.OutboundHTTP.Retry.InitialBackoffSeconds, &cfg.OutboundHTTP.Retry.InitialBackoff); err != nil {
+		return nil, err
 	}
-	if raw.OutboundHTTP.Retry.MaxBackoffSeconds != nil {
-		cfg.OutboundHTTP.Retry.MaxBackoff = time.Duration(*raw.OutboundHTTP.Retry.MaxBackoffSeconds) * time.Second
+	if err := retryDurationSeconds("outbound_http.retry.max_backoff_seconds", raw.OutboundHTTP.Retry.MaxBackoffSeconds, &cfg.OutboundHTTP.Retry.MaxBackoff); err != nil {
+		return nil, err
 	}
 	if err := cfg.OutboundHTTP.Retry.Validate(); err != nil {
 		return nil, fieldError("outbound_http.retry", err.Error())
@@ -602,6 +602,21 @@ func positiveInt(field string, raw *int, target *int) error {
 		return fieldError(field, "must be positive")
 	}
 	*target = *raw
+	return nil
+}
+
+func retryDurationSeconds(field string, raw *int, target *time.Duration) error {
+	if raw == nil {
+		return nil
+	}
+	seconds := int64(*raw)
+	if seconds <= 0 {
+		return fieldError(field, "must be positive")
+	}
+	if seconds > int64((time.Duration(1<<63-1))/time.Second) {
+		return fieldError(field, "is too large")
+	}
+	*target = time.Duration(seconds) * time.Second
 	return nil
 }
 

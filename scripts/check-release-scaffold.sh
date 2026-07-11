@@ -135,6 +135,31 @@ if ! grep -A1 'name: CERTHUB_TOKEN_SECRET_NAMESPACE' "$operator_rendered" | grep
   echo "operator cluster-scoped token namespace default does not match release namespace" >&2
   exit 1
 fi
+for expected in \
+  'name: CERTHUB_HTTP_RETRY_MAX_ATTEMPTS' \
+  'value: "5"' \
+  'name: CERTHUB_HTTP_RETRY_INITIAL_BACKOFF' \
+  'value: "1s"' \
+  'name: CERTHUB_HTTP_RETRY_MAX_BACKOFF' \
+  'value: "8s"'; do
+  if ! grep -F "$expected" "$operator_rendered" >/dev/null; then
+    echo "operator chart render missing retry default: $expected" >&2
+    exit 1
+  fi
+done
+
+operator_retry_rendered="$tmp_dir/operator-retry-rendered.yaml"
+"$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
+  --namespace certhub \
+  --set certhub.httpRetryMaxAttempts=1 \
+  --set certhub.httpRetryInitialBackoff=250ms \
+  --set certhub.httpRetryMaxBackoff=2s >"$operator_retry_rendered"
+for expected in 'value: "1"' 'value: "250ms"' 'value: "2s"'; do
+  if ! grep -F "$expected" "$operator_retry_rendered" >/dev/null; then
+    echo "operator chart render missing retry override: $expected" >&2
+    exit 1
+  fi
+done
 
 IMAGE_CHECK_CONTEXT="$tmp_dir/certhub" IMAGE_CHECK_BINARY_DIR=bin "$repo_root/scripts/check-cli-image.sh"
 

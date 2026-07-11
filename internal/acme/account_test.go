@@ -7,16 +7,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 func TestAccountClientRegistersThroughInjectedHTTPClient(t *testing.T) {
 	var directoryCalled bool
+	var directoryCalls int
 	var accountPosts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Replay-Nonce", "nonce")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/directory":
 			directoryCalled = true
+			directoryCalls++
+			if directoryCalls < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"newNonce":   "http://" + r.Host + "/new-nonce",
 				"newAccount": "http://" + r.Host + "/new-account",
@@ -38,7 +47,7 @@ func TestAccountClientRegistersThroughInjectedHTTPClient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAccountClient(server.Client())
+	client := NewAccountClient(server.Client(), netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond})
 	registration, err := client.RegisterOrReuseAccount(context.Background(), AccountRegistrationParams{
 		DirectoryURL: server.URL + "/directory",
 		Email:        "platform@example.com",
@@ -48,6 +57,9 @@ func TestAccountClientRegistersThroughInjectedHTTPClient(t *testing.T) {
 	}
 	if !directoryCalled {
 		t.Fatalf("directory endpoint was not called")
+	}
+	if directoryCalls != 3 {
+		t.Fatalf("directory calls = %d; want 3", directoryCalls)
 	}
 	if accountPosts != 1 {
 		t.Fatalf("account posts = %d", accountPosts)

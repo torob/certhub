@@ -130,6 +130,73 @@ func TestRunOnceNoContentLeavesCurrentUnchanged(t *testing.T) {
 	}
 }
 
+func TestRunOnceUsesConfiguredRequestRetryPolicy(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxAttempts  int
+		failures     int
+		wantCalls    int
+		wantExitCode int
+	}{
+		{name: "eventual success", maxAttempts: 3, failures: 2, wantCalls: 3, wantExitCode: ExitSuccess},
+		{name: "single attempt disables retry", maxAttempts: 1, failures: 2, wantCalls: 1, wantExitCode: ExitTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			if err := os.Chmod(outDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			var requestID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 1 {
+					requestID = r.Header.Get("X-Request-ID")
+				} else if r.Header.Get("X-Request-ID") != requestID {
+					t.Fatalf("request ID changed across attempts: first=%q current=%q", requestID, r.Header.Get("X-Request-ID"))
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if calls <= tt.failures {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","message":"temporary","retryable":true,"details":{}}}`))
+					return
+				}
+				_, _ = w.Write([]byte(materialJSON()))
+			}))
+			defer server.Close()
+
+			cfg := Config{URL: server.URL, Token: testAppToken, AllowPlainHTTPForLocalDev: true, Sync: SyncConfig{
+				PerCertificateTimeout: time.Second,
+				RequestTimeout:        time.Second,
+				RetryMaxAttempts:      tt.maxAttempts,
+				RetryInitialBackoff:   time.Nanosecond,
+				RetryMaxBackoff:       time.Nanosecond,
+			}}
+			runner, err := NewSyncRunner(cfg, []PlanItem{{Criteria: testCriteria(), OutDir: outDir, Timeout: time.Second}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary := runner.RunOnce(t.Context())
+			if calls != tt.wantCalls || summary.ExitCode() != tt.wantExitCode {
+				t.Fatalf("calls=%d exit=%d summary=%#v; want calls=%d exit=%d", calls, summary.ExitCode(), summary, tt.wantCalls, tt.wantExitCode)
+			}
+			if tt.wantExitCode == ExitSuccess {
+				entries, err := os.ReadDir(filepath.Join(outDir, "releases"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 1 {
+					t.Fatalf("release count = %d; want 1", len(entries))
+				}
+			}
+		})
+	}
+}
+
 func TestPublishMaterialRejectsUnsafeSymlink(t *testing.T) {
 	outDir := t.TempDir()
 	if err := os.Chmod(outDir, 0o700); err != nil {

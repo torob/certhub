@@ -18,11 +18,17 @@ const validAppToken = ApplicationTokenPrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 func TestClientRetriesTransientStatusAndPreservesRequestID(t *testing.T) {
 	attempts := 0
+	var bodies []CertificateCriteria
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		if r.Header.Get("X-Request-ID") != "stable-request" {
 			t.Fatalf("request ID = %q", r.Header.Get("X-Request-ID"))
 		}
+		var body CertificateCriteria
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
 		if attempts < 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -39,6 +45,46 @@ func TestClientRetriesTransientStatusAndPreservesRequestID(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("attempts = %d; want 3", attempts)
+	}
+	for i, body := range bodies {
+		if len(body.Domains) != 1 || body.Domains[0] != "example.com" {
+			t.Fatalf("attempt %d body = %#v", i+1, body)
+		}
+	}
+}
+
+func TestClientReturnsFinalRetryResponseAndDoesNotRetryConflict(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		wantCalls int
+	}{
+		{name: "retry budget exhausted", status: http.StatusServiceUnavailable, wantCalls: 2},
+		{name: "conflict is not transport-retried", status: http.StatusConflict, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("X-Request-ID", "final-response")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"error":{"code":"service_unavailable","message":"temporary","retryable":true,"details":{}}}`))
+			}))
+			defer server.Close()
+			client, err := New(server.URL, validAppToken, WithHTTPClient(server.Client()), WithRetryPolicy(netretry.Policy{MaxAttempts: 2, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, meta, err := client.GetTLSMaterial(context.Background(), CertificateCriteria{Domains: []string{"example.com"}}, RequestOptions{})
+			var apiErr *certerrors.APIError
+			if !stderrors.As(err, &apiErr) || apiErr.StatusCode != tt.status || meta.RequestID != "final-response" {
+				t.Fatalf("meta=%#v error=%#v", meta, err)
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("calls = %d; want %d", calls, tt.wantCalls)
+			}
+		})
 	}
 }
 
