@@ -1,9 +1,16 @@
 package config
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,6 +145,211 @@ func TestOutboundProxyURLReturnsNamedProxy(t *testing.T) {
 	if proxy.String() != "http://proxy.example:8080" {
 		t.Fatalf("proxy = %s", proxy)
 	}
+}
+
+func TestOutboundHTTPLoggerLogsFailureWithoutSensitiveRequestData(t *testing.T) {
+	const (
+		token       = "cth_uat_v1_SECRET_CANARY_TOKEN"
+		querySecret = "query-secret-canary"
+		bodySecret  = "body-secret-canary"
+	)
+	var logs bytes.Buffer
+	logger := NewOutboundHTTPLogger(&logs)
+	req, err := http.NewRequest(http.MethodPost, "https://api.example.com/v1/"+token+"?token="+querySecret, strings.NewReader(bodySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Request-ID", token)
+	responseBody := io.NopCloser(strings.NewReader(bodySecret))
+	transport := &outboundHTTPLoggingTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			header := make(http.Header)
+			header.Set("Retry-After", "7")
+			header.Set("X-Request-ID", token)
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: responseBody, Request: req}, nil
+		}),
+		logger:    logger,
+		proxyName: "corp_proxy",
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != bodySecret {
+		t.Fatalf("response body = %q", data)
+	}
+	for _, secret := range []string{token, querySecret, bodySecret, "Authorization", "Bearer"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("outbound log leaked %q: %s", secret, logs.String())
+		}
+	}
+	events := decodeOutboundHTTPEvents(t, logs.String())
+	if len(events) != 1 {
+		t.Fatalf("events = %#v logs=%s", events, logs.String())
+	}
+	event := events[0]
+	if event["event"] != "outbound_http_request_failed" || event["level"] != "warn" || event["method"] != http.MethodPost {
+		t.Fatalf("event = %#v", event)
+	}
+	if event["destination"] != "https://api.example.com" || event["proxy"] != "corp_proxy" {
+		t.Fatalf("event = %#v", event)
+	}
+	if event["status"] != float64(http.StatusTooManyRequests) || event["retryable"] != true || event["retry_after_seconds"] != float64(7) {
+		t.Fatalf("event = %#v", event)
+	}
+	if event["request_id"] != securityRedactedForTest || event["response_request_id"] != securityRedactedForTest {
+		t.Fatalf("request IDs were not redacted: %#v", event)
+	}
+	for _, field := range []string{"timestamp", "path", "latency_ms", "error"} {
+		if _, ok := event[field]; !ok {
+			t.Fatalf("event missing %s: %#v", field, event)
+		}
+	}
+}
+
+func TestOutboundHTTPLoggerLogsTransientTransportError(t *testing.T) {
+	const token = "cth_app_v1_SECRET_CANARY_TOKEN"
+	var logs bytes.Buffer
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://identity.example.com/.well-known/openid-configuration", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportErr := fmt.Errorf("proxy http://proxy-user:proxy-password@proxy.example:8443 Authorization: Bearer %s: %w", token, io.ErrUnexpectedEOF)
+	transport := &outboundHTTPLoggingTransport{
+		base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, transportErr
+		}),
+		logger: NewOutboundHTTPLogger(&logs),
+	}
+	if _, err := transport.RoundTrip(req); err == nil {
+		t.Fatal("transport error was lost")
+	}
+	for _, secret := range []string{token, "proxy-user", "proxy-password", "Bearer"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("transport log leaked %q: %s", secret, logs.String())
+		}
+	}
+	events := decodeOutboundHTTPEvents(t, logs.String())
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	event := events[0]
+	if event["level"] != "error" || event["status"] != float64(0) || event["proxy"] != "direct" || event["retryable"] != true {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestOutboundHTTPLoggerLogsEveryFailedRetryAttempt(t *testing.T) {
+	var logs bytes.Buffer
+	calls := 0
+	transport := &outboundHTTPLoggingTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			status := http.StatusServiceUnavailable
+			if calls == 3 {
+				status = http.StatusNoContent
+			}
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+		}),
+		logger: NewOutboundHTTPLogger(&logs),
+	}
+	client := netretry.NewClient(&http.Client{Transport: transport}, netretry.Policy{
+		MaxAttempts: 3, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond,
+	})
+	req, err := http.NewRequest(http.MethodGet, "https://api.example.com/retry", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if calls != 3 {
+		t.Fatalf("calls = %d", calls)
+	}
+	events := decodeOutboundHTTPEvents(t, logs.String())
+	if len(events) != 2 {
+		t.Fatalf("events = %#v logs=%s", events, logs.String())
+	}
+	for _, event := range events {
+		if event["status"] != float64(http.StatusServiceUnavailable) || event["retryable"] != true {
+			t.Fatalf("event = %#v", event)
+		}
+	}
+}
+
+func TestOutboundHTTPLoggerIgnoresSuccessfulAndRedirectResponses(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var logs bytes.Buffer
+			transport := &outboundHTTPLoggingTransport{
+				base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+				}),
+				logger: NewOutboundHTTPLogger(&logs),
+			}
+			req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/ok", nil)
+			if _, err := transport.RoundTrip(req); err != nil {
+				t.Fatal(err)
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("logs = %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestOutboundHTTPLoggerSerializesConcurrentFailures(t *testing.T) {
+	const requests = 32
+	var logs bytes.Buffer
+	transport := &outboundHTTPLoggingTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+		}),
+		logger: NewOutboundHTTPLogger(&logs),
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://api.example.com/failure/%d", i), nil)
+			_, _ = transport.RoundTrip(req)
+		}(i)
+	}
+	wg.Wait()
+	if events := decodeOutboundHTTPEvents(t, logs.String()); len(events) != requests {
+		t.Fatalf("event count = %d; want %d", len(events), requests)
+	}
+}
+
+const securityRedactedForTest = "[redacted]"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func decodeOutboundHTTPEvents(t *testing.T, raw string) []map[string]any {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	events := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode outbound HTTP log %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func mustURL(t *testing.T, raw string) *url.URL {

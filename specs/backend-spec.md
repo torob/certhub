@@ -3268,6 +3268,7 @@ Logging requirements:
 
 - Logs must be structured JSON.
 - Every HTTP request log must include timestamp, level, method, path template, status, latency, correlation ID, identity type, identity ID when authenticated, and error code when applicable.
+- Every server outbound HTTP transport error and HTTP `4xx`/`5xx` attempt must emit a structured `outbound_http_request_failed` log with the sanitized destination and path, method, status or error, latency, proxy name, request ID when available, retryability, and parsed `Retry-After`. Outbound logs must omit headers, bodies, credentials, query strings, and proxy URLs.
 - Worker logs must include job type, Certificate ID, CertificateVersion ID when available, issuer ID, DNS provider ID when available, result, duration, correlation ID or job ID, and error code when applicable.
 - Logs must redact private keys, raw tokens, passwords, DNS provider credentials, ACME account keys, and encrypted secret payloads.
 

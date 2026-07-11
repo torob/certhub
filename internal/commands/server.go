@@ -183,22 +183,23 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 	issuerRepo := issuers.NewRepository(resources.Storage)
 	certRepo := certificates.NewRepository(resources.Storage)
 	dnsRepo := dnsproviders.NewRepository(resources.Storage)
-	acmeHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ACMEProxy)
+	outboundLogger := config.NewOutboundHTTPLogger(r.Stderr)
+	acmeHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ACMEProxy, outboundLogger)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "outbound http validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
 	}
-	cloudflareHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.Cloudflare)
+	cloudflareHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.Cloudflare, outboundLogger)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "outbound http validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
 	}
-	arvanHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ArvanCloud)
+	arvanHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ArvanCloud, outboundLogger)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "outbound http validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
 	}
-	oidcHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.OIDCProxy)
+	oidcHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.OIDCProxy, outboundLogger)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "outbound http validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
@@ -242,7 +243,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 	})
 	cloudflareClient := dnsproviders.NewCloudflareClient(cloudflareHTTP, cfg.OutboundHTTP.Retry)
 	arvanCloudClient := dnsproviders.NewArvanCloudClient(arvanHTTP, cfg.OutboundHTTP.Retry)
-	propagationResolvers, err := buildPropagationResolvers(cfg)
+	propagationResolvers, err := buildPropagationResolvers(cfg, outboundLogger)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "dns propagation resolver validation failed: %s\n", security.RedactString(err.Error()))
 		return 1
@@ -402,7 +403,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 	}
 }
 
-func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderType]workers.TXTVisibilityChecker, error) {
+func buildPropagationResolvers(cfg *config.Config, outboundLogger *config.OutboundHTTPLogger) (map[dnsproviders.ProviderType]workers.TXTVisibilityChecker, error) {
 	out := make(map[dnsproviders.ProviderType]workers.TXTVisibilityChecker, len(cfg.DNS.PropagationResolvers))
 	for providerType, resolverCfg := range cfg.DNS.PropagationResolvers {
 		var proxyURL *url.URL
@@ -415,7 +416,7 @@ func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderTyp
 			}
 		}
 		if resolverCfg.Type == dnspropagation.TypeDoH {
-			httpClient, err = config.NewOutboundHTTPClient(cfg.OutboundHTTP, resolverCfg.Proxy)
+			httpClient, err = config.NewOutboundHTTPClient(cfg.OutboundHTTP, resolverCfg.Proxy, outboundLogger)
 			if err != nil {
 				return nil, fmt.Errorf("%s doh propagation client: %w", providerType, err)
 			}
@@ -1391,17 +1392,18 @@ func (r ServerRunner) openBootstrapServices(ctx context.Context, configPath stri
 	auditRepo := audit.NewRepository(resources.Storage)
 	issuerRepo := issuers.NewRepository(resources.Storage)
 	dnsRepo := dnsproviders.NewRepository(resources.Storage)
-	acmeHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ACMEProxy)
+	outboundLogger := config.NewOutboundHTTPLogger(r.Stderr)
+	acmeHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ACMEProxy, outboundLogger)
 	if err != nil {
 		resources.Close()
 		return nil, err
 	}
-	cloudflareHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.Cloudflare)
+	cloudflareHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.Cloudflare, outboundLogger)
 	if err != nil {
 		resources.Close()
 		return nil, err
 	}
-	arvanHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ArvanCloud)
+	arvanHTTP, err := config.NewOutboundHTTPClient(cfg.OutboundHTTP, cfg.OutboundHTTP.ArvanCloud, outboundLogger)
 	if err != nil {
 		resources.Close()
 		return nil, err
