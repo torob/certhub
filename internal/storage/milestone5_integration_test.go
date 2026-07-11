@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/torob/certhub/internal/applications"
+	"github.com/torob/certhub/internal/audit"
 	"github.com/torob/certhub/internal/certificates"
 	"github.com/torob/certhub/internal/dnsproviders"
 	"github.com/torob/certhub/internal/issuers"
 	"github.com/torob/certhub/internal/migrations"
 	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
@@ -365,5 +367,99 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	}
 	if failedCert.Status != certificates.StatusFailed || failedCert.FailureCode == nil || *failedCert.FailureCode != "dns_validation_failed" || failedCert.FailureMessage == nil || *failedCert.FailureMessage != failureMessage {
 		t.Fatalf("failed certificate = %#v", failedCert)
+	}
+
+	auditRepo := audit.NewRepository(tx)
+	preDeleteAudit, err := auditRepo.Append(ctx, audit.AppendEventParams{
+		IdentityType:       audit.IdentityTypeSystem,
+		Action:             "fixture_created",
+		TargetType:         "certificate",
+		TargetID:           &cert.ID,
+		ScopeApplicationID: &app.ID,
+		ScopeCertificateID: &cert.ID,
+		Result:             audit.ResultSuccess,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certService := certificates.NewService(certificates.ServiceConfig{
+		Repository:        certRepo,
+		ApplicationReader: appRepo,
+		IssuerReader:      issuerRepo,
+		AuditRepository:   auditRepo,
+	})
+	adminID := "80000000-0000-4000-8000-000000000001"
+	if err := certService.DeleteCertificate(ctx, certificates.Actor{ID: adminID, GlobalRole: users.GlobalRoleAdmin}, cert.ID, true, &certificates.AuditContext{CorrelationID: "m5-hard-delete"}); err != nil {
+		t.Fatalf("hard delete certificate: %v", err)
+	}
+	var certificatesRemaining, versionsRemaining, jobsRemaining, challengesRemaining, eventsRemaining int
+	if err := tx.QueryRow(ctx, `
+select
+  (select count(*) from certificates where id = $1),
+  (select count(*) from certificate_versions where certificate_id = $1),
+  (select count(*) from certificate_issuance_jobs where certificate_id = $1),
+  (select count(*) from dns_challenge_records where certificate_id = $1),
+  (select count(*) from certificate_events where certificate_id = $1)`, cert.ID).Scan(
+		&certificatesRemaining,
+		&versionsRemaining,
+		&jobsRemaining,
+		&challengesRemaining,
+		&eventsRemaining,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if certificatesRemaining != 0 || versionsRemaining != 0 || jobsRemaining != 0 || challengesRemaining != 0 || eventsRemaining != 0 {
+		t.Fatalf("hard delete leftovers certificate=%d versions=%d jobs=%d challenges=%d events=%d", certificatesRemaining, versionsRemaining, jobsRemaining, challengesRemaining, eventsRemaining)
+	}
+	var retainedCertificateScope string
+	if err := tx.QueryRow(ctx, `select scope_certificate_id::text from audit_events where id = $1`, preDeleteAudit.ID).Scan(&retainedCertificateScope); err != nil {
+		t.Fatal(err)
+	}
+	if retainedCertificateScope != cert.ID {
+		t.Fatalf("retained audit certificate scope = %s, want %s", retainedCertificateScope, cert.ID)
+	}
+	var deletionAudits int
+	if err := tx.QueryRow(ctx, `
+select count(*)
+from audit_events
+where action = 'certificate_deleted'
+  and identity_id = $1
+  and scope_application_id = $2
+  and scope_certificate_id is null
+  and metadata->>'certificate_id' = $3`, adminID, app.ID, cert.ID).Scan(&deletionAudits); err != nil {
+		t.Fatal(err)
+	}
+	if deletionAudits != 1 {
+		t.Fatalf("certificate deletion audits = %d", deletionAudits)
+	}
+	if _, err := certRepo.RecordEvent(ctx, certificates.RecordEventParams{
+		CertificateID:        failedCert.ID,
+		CertificateVersionID: &failedVersion.ID,
+		IssuanceJobID:        &failedJob.ID,
+		EventType:            "fixture_failed",
+		Result:               certificates.EventResultFailure,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := certService.DeleteCertificate(ctx, certificates.Actor{ID: adminID, GlobalRole: users.GlobalRoleAdmin}, failedCert.ID, false, nil); err != nil {
+		t.Fatalf("normal hard delete failed certificate: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `select count(*) from certificates where id = $1`, failedCert.ID).Scan(&certificatesRemaining); err != nil {
+		t.Fatal(err)
+	}
+	if certificatesRemaining != 0 {
+		t.Fatalf("normally deleted certificate remains = %d", certificatesRemaining)
+	}
+	if err := tx.QueryRow(ctx, `
+select count(*)
+from audit_events
+where action = 'certificate_deleted'
+  and identity_id = $1
+  and metadata->>'certificate_id' = $2
+  and metadata->>'force' = 'false'`, adminID, failedCert.ID).Scan(&deletionAudits); err != nil {
+		t.Fatal(err)
+	}
+	if deletionAudits != 1 {
+		t.Fatalf("normal certificate deletion audits = %d", deletionAudits)
 	}
 }

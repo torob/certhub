@@ -20,12 +20,12 @@ import (
 	migrationfs "github.com/torob/certhub/migrations/postgres"
 )
 
-func TestLatestVersionFindsCertificateHardDeleteMigration(t *testing.T) {
+func TestLatestVersionFindsAuditIndependentHardDeleteMigration(t *testing.T) {
 	latest, err := NewRunner(DefaultDir).LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != 3 {
+	if latest != 4 {
 		t.Fatalf("latest version = %d", latest)
 	}
 }
@@ -35,7 +35,7 @@ func TestEmbeddedPostgresMigrationsAreOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql"}
+	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql", "00004_audit_independence_and_hard_delete.sql"}
 	if len(matches) != len(want) {
 		t.Fatalf("embedded migrations = %#v", matches)
 	}
@@ -256,7 +256,7 @@ func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.CurrentVersion != 1 || before.LatestVersion != 3 || before.Pending != 2 || before.Compatible {
+	if before.CurrentVersion != 1 || before.LatestVersion != 4 || before.Pending != 3 || before.Compatible {
 		t.Fatalf("version 1 status = %#v", before)
 	}
 	var enabledColumns int
@@ -271,6 +271,43 @@ where table_schema = 'public'
 	if enabledColumns != 0 {
 		t.Fatalf("version 1 enabled columns = %d", enabledColumns)
 	}
+	if _, err := db.ExecContext(ctx, `
+insert into applications (id, name, display_name)
+values ('10000000-0000-4000-8000-000000000001', 'migration_app', 'Migration App');
+
+insert into users (id, email, display_name)
+values ('11000000-0000-4000-8000-000000000001', 'migration.user@example.com', 'Migration User');
+
+insert into issuers (id, name, directory_url, status, contact_email)
+values ('20000000-0000-4000-8000-000000000001', 'migration_issuer', 'https://acme.invalid/directory', 'disabled', 'migration.issuer@example.com');
+
+insert into dns_providers (id, name, type, credentials_encrypted, status)
+values ('30000000-0000-4000-8000-000000000001', 'migration_cloudflare', 'cloudflare', '{"fixture":true}', 'disabled');
+
+insert into certificates (id, normalized_sans, key_type, issuer_id, application_id, status, failure_code, deleted_at)
+values
+  ('40000000-0000-4000-8000-000000000001', array['live.example.com'], 'ecdsa-p256', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'failed', 'fixture_failure', null),
+  ('40000000-0000-4000-8000-000000000002', array['deleted.example.com'], 'ecdsa-p256', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'deleted', null, now());
+
+insert into certificate_versions (id, certificate_id, version, status, reason, started_at, completed_at, failure_code)
+values
+  ('50000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', 1, 'failed', 'initial_issue', now(), now(), 'fixture_failure'),
+  ('50000000-0000-4000-8000-000000000002', '40000000-0000-4000-8000-000000000002', 1, 'failed', 'initial_issue', now(), now(), 'fixture_failure');
+
+insert into certificate_events (id, certificate_id, certificate_version_id, event_type, result)
+values
+  ('60000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'fixture_failed', 'failure'),
+  ('60000000-0000-4000-8000-000000000002', '40000000-0000-4000-8000-000000000002', '50000000-0000-4000-8000-000000000002', 'fixture_failed', 'failure');
+
+insert into audit_events (
+  id, identity_type, action, target_type, target_id, scope_application_id,
+  scope_certificate_id, scope_user_id, scope_dns_provider_id, result, metadata
+) values
+  ('70000000-0000-4000-8000-000000000001', 'system', 'fixture_created', 'certificate', '40000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000001', 'success', '{"fixture":"live"}'),
+  ('70000000-0000-4000-8000-000000000002', 'system', 'fixture_created', 'certificate', '40000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000002', '11000000-0000-4000-8000-000000000001', '30000000-0000-4000-8000-000000000001', 'success', '{"fixture":"deleted"}');
+`); err != nil {
+		t.Fatalf("seed released baseline: %v", err)
+	}
 
 	first, err := runner.Up(ctx, db)
 	if err != nil {
@@ -283,7 +320,7 @@ where table_schema = 'public'
 	if first.LatestVersion != second.CurrentVersion || second.Pending != 0 || !second.Compatible {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
-	if first.CurrentVersion != 3 || first.Pending != 0 || !first.Compatible {
+	if first.CurrentVersion != 4 || first.Pending != 0 || !first.Compatible {
 		t.Fatalf("upgraded status = %#v", first)
 	}
 	var nullable, columnDefault string
@@ -297,6 +334,95 @@ where table_schema = 'public'
 	}
 	if nullable != "NO" || !strings.Contains(columnDefault, "true") {
 		t.Fatalf("enabled column nullable=%q default=%q", nullable, columnDefault)
+	}
+	var auditForeignKeys, auditScopeIndexes int
+	if err := db.QueryRowContext(ctx, `
+select count(*)
+from pg_catalog.pg_constraint
+where conrelid = 'public.audit_events'::regclass
+  and contype = 'f'`).Scan(&auditForeignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if auditForeignKeys != 0 {
+		t.Fatalf("audit foreign keys = %d", auditForeignKeys)
+	}
+	if _, err := db.ExecContext(ctx, `
+insert into audit_events (
+  id, identity_type, action, target_type, target_id, scope_application_id,
+  scope_certificate_id, scope_user_id, scope_dns_provider_id, result
+) values (
+  '70000000-0000-4000-8000-000000000003', 'system', 'orphan_fixture_created', 'certificate',
+  'ffffffff-ffff-4fff-8fff-fffffffffff0', 'ffffffff-ffff-4fff-8fff-fffffffffff1',
+  'ffffffff-ffff-4fff-8fff-fffffffffff2', 'ffffffff-ffff-4fff-8fff-fffffffffff3',
+  'ffffffff-ffff-4fff-8fff-fffffffffff4', 'success'
+)`); err != nil {
+		t.Fatalf("insert self-contained audit event: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+select count(*)
+from pg_catalog.pg_indexes
+where schemaname = 'public'
+  and tablename = 'audit_events'
+  and indexname in (
+    'audit_events_scope_application_created_at_idx',
+    'audit_events_scope_certificate_created_at_idx',
+    'audit_events_scope_user_created_at_idx',
+    'audit_events_scope_dns_provider_created_at_idx'
+  )`).Scan(&auditScopeIndexes); err != nil {
+		t.Fatal(err)
+	}
+	if auditScopeIndexes != 4 {
+		t.Fatalf("audit scope indexes = %d", auditScopeIndexes)
+	}
+	var deletedCertificates, deletedVersions, deletedEvents int
+	if err := db.QueryRowContext(ctx, `select count(*) from certificates where id = '40000000-0000-4000-8000-000000000002'`).Scan(&deletedCertificates); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `select count(*) from certificate_versions where certificate_id = '40000000-0000-4000-8000-000000000002'`).Scan(&deletedVersions); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `select count(*) from certificate_events where certificate_id = '40000000-0000-4000-8000-000000000002'`).Scan(&deletedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if deletedCertificates != 0 || deletedVersions != 0 || deletedEvents != 0 {
+		t.Fatalf("legacy cleanup certificate=%d versions=%d events=%d", deletedCertificates, deletedVersions, deletedEvents)
+	}
+	var appScope, certScope, userScope, dnsScope string
+	if err := db.QueryRowContext(ctx, `
+select scope_application_id::text, scope_certificate_id::text, scope_user_id::text, scope_dns_provider_id::text
+from audit_events
+where id = '70000000-0000-4000-8000-000000000002'`).Scan(&appScope, &certScope, &userScope, &dnsScope); err != nil {
+		t.Fatal(err)
+	}
+	if appScope != "10000000-0000-4000-8000-000000000001" || certScope != "40000000-0000-4000-8000-000000000002" || userScope != "11000000-0000-4000-8000-000000000001" || dnsScope != "30000000-0000-4000-8000-000000000001" {
+		t.Fatalf("retained audit scopes app=%s cert=%s user=%s dns=%s", appScope, certScope, userScope, dnsScope)
+	}
+	if _, err := db.ExecContext(ctx, `update audit_events set metadata = '{"mutated":true}' where id = '70000000-0000-4000-8000-000000000001'`); err == nil || !strings.Contains(err.Error(), "audit_events are append-only") {
+		t.Fatalf("direct audit mutation err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from audit_events where id = '70000000-0000-4000-8000-000000000001'`); err == nil || !strings.Contains(err.Error(), "audit_events are append-only") {
+		t.Fatalf("direct audit deletion err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `truncate audit_events`); err == nil || !strings.Contains(err.Error(), "audit_events are append-only") {
+		t.Fatalf("direct audit truncation err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `update certificate_events set metadata = '{"mutated":true}' where id = '60000000-0000-4000-8000-000000000001'`); err == nil || !strings.Contains(err.Error(), "certificate_events are append-only") {
+		t.Fatalf("direct certificate event mutation err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from certificate_events where id = '60000000-0000-4000-8000-000000000001'`); err == nil || !strings.Contains(err.Error(), "certificate_events are append-only") {
+		t.Fatalf("direct certificate event deletion err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `truncate certificate_events`); err == nil || !strings.Contains(err.Error(), "certificate_events are append-only") {
+		t.Fatalf("direct certificate event truncation err=%v", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from certificates where id = '40000000-0000-4000-8000-000000000001'`); err != nil {
+		t.Fatalf("hard delete live certificate: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `select scope_certificate_id::text from audit_events where id = '70000000-0000-4000-8000-000000000001'`).Scan(&certScope); err != nil {
+		t.Fatal(err)
+	}
+	if certScope != "40000000-0000-4000-8000-000000000001" {
+		t.Fatalf("live hard-delete audit scope = %s", certScope)
 	}
 }
 

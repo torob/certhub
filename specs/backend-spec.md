@@ -1779,7 +1779,7 @@ Updates the backend-owned Certificate enablement state. The JSON body is exactly
 
 Permanently deletes a Certificate and its CertificateVersions, issuance jobs, DNS challenge records, and certificate events. Global admins and Users with `manager` access to the owning Application may call it; reserved `certhub_server` Certificates return `409 system_managed_resource`.
 
-The optional JSON body is `{ "force": boolean }`, defaulting to false. Without force, any CertificateVersion in `valid` state returns `409 certificate_has_valid_versions`. Force deletion does not revoke those versions at the ACME issuer. Regardless of force, deletion returns `409 certificate_busy` while any issuance job is `pending` or `running`, any version is `issuing`, or any DNS challenge is not `cleaned`. The eligibility check and hard delete are atomic. Success returns `204 No Content` and emits `certificate_deleted`; audit history survives with its Certificate foreign-key scope cleared.
+The optional JSON body is `{ "force": boolean }`, defaulting to false. Without force, any CertificateVersion in `valid` state returns `409 certificate_has_valid_versions`. Force deletion does not revoke those versions at the ACME issuer. Regardless of force, deletion returns `409 certificate_busy` while any issuance job is `pending` or `running`, any version is `issuing`, or any DNS challenge is not `cleaned`. The eligibility check and hard delete are atomic. Success returns `204 No Content` and emits `certificate_deleted`; immutable audit history survives with its original target and scope identifiers unchanged.
 
 #### GET /v1/certificates/{certificate_id}/versions
 
@@ -3920,17 +3920,17 @@ Immutable audit log.
 | `action` | string | Required, indexed | Backend-generated event action, such as `private_key_read`. |
 | `target_type` | string | Required | Backend-generated target resource type. |
 | `target_id` | UUID | Nullable | Target resource ID when available. |
-| `scope_application_id` | UUID | Nullable, foreign key to `applications.id`, indexed | Application scope used for non-admin audit visibility when the event relates to an Application or Application-owned resource. |
-| `scope_certificate_id` | UUID | Nullable, foreign key to `certificates.id`, indexed | Certificate scope used for certificate-specific audit visibility. |
-| `scope_user_id` | UUID | Nullable, foreign key to `users.id`, indexed | User scope for User-related audit visibility. |
-| `scope_dns_provider_id` | UUID | Nullable, foreign key to `dns_providers.id`, indexed | DNS provider scope for admin troubleshooting and future scoped views. |
+| `scope_application_id` | UUID | Nullable, historical identifier, indexed | Application scope used for non-admin audit visibility when the event relates to an Application or Application-owned resource. |
+| `scope_certificate_id` | UUID | Nullable, historical identifier, indexed | Certificate scope used for certificate-specific audit visibility. |
+| `scope_user_id` | UUID | Nullable, historical identifier, indexed | User scope for User-related audit visibility. |
+| `scope_dns_provider_id` | UUID | Nullable, historical identifier, indexed | DNS provider scope for admin troubleshooting and future scoped views. |
 | `result` | enum | Required, one of `success`, `failure` | Event result. |
 | `correlation_id` | string | Nullable, format `correlation_id` | HTTP correlation ID. |
 | `source_ip` | string | Nullable | Derived effective client IP when available. |
 | `metadata` | JSON object | Required, default `{}` | Non-secret structured details. |
 | `created_at` | timestamptz | Required, indexed | Event time. |
 
-Audit events are append-only. `metadata` must not contain private keys, raw tokens, or DNS provider credentials.
+Audit events are append-only and self-contained. Identity, target, and scope UUIDs are immutable historical identifiers rather than foreign keys to live operational rows, so deleting a referenced resource never mutates or removes its audit history. `metadata` must not contain private keys, raw tokens, or DNS provider credentials.
 
 Visibility rules:
 

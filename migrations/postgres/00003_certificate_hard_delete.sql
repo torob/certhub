@@ -39,8 +39,6 @@ alter table public.dns_challenge_records
     add constraint dns_challenge_records_issuance_job_id_fkey
         foreign key (issuance_job_id) references public.certificate_issuance_jobs(id) on delete cascade;
 
-delete from public.certificates where deleted_at is not null or status = 'deleted';
-
 -- +goose Down
 alter table public.audit_events
     drop constraint audit_events_scope_certificate_id_fkey,
