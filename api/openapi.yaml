@@ -745,6 +745,11 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/CertificateStatus'
+        - name: enabled
+          in: query
+          required: false
+          schema:
+            type: boolean
         - name: expires_before
           in: query
           required: false
@@ -818,6 +823,48 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Certificates]
+      operationId: updateCertificate
+      summary: Enable or disable certificate lifecycle operations.
+      security:
+        - UserBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateUpdateRequest'
+            examples:
+              disable:
+                $ref: '#/components/examples/CertificateUpdateRequest'
+      responses:
+        '200':
+          description: Updated certificate metadata.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateResponse'
+              examples:
+                certificate:
+                  $ref: '#/components/examples/CertificateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /v1/certificates/{certificate_id}/versions:
     parameters:
       - $ref: '#/components/parameters/XRequestID'
@@ -3439,6 +3486,8 @@ components:
         - dns_provider_zone_refreshed
         - dns_zone_discovery_failed
         - certificate_created
+        - certificate_enabled
+        - certificate_disabled
         - certificate_issuance_started
         - certificate_issuance_succeeded
         - certificate_issuance_failed
@@ -3481,6 +3530,7 @@ components:
         - certificate_issuance_failed
         - certificate_revoked
         - certificate_no_active_version
+        - certificate_disabled
         - not_acceptable
         - renewal_overlap_exists
         - renewal_not_due
@@ -3536,6 +3586,7 @@ components:
         - $ref: '#/components/schemas/ValidationErrorDetails'
         - $ref: '#/components/schemas/DomainNotAuthorizedDetails'
         - $ref: '#/components/schemas/CertificateStateErrorDetails'
+        - $ref: '#/components/schemas/CertificateDisabledDetails'
         - $ref: '#/components/schemas/CertificateIssuanceFailedDetails'
         - $ref: '#/components/schemas/CertificateRevokedDetails'
         - $ref: '#/components/schemas/RenewalOverlapDetails'
@@ -3589,6 +3640,19 @@ components:
           type: string
           format: date-time
           nullable: true
+    CertificateDisabledDetails:
+      type: object
+      additionalProperties: false
+      required: [certificate_id, status, enabled]
+      properties:
+        certificate_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/CertificateStatus'
+        enabled:
+          type: boolean
+          enum: [false]
     CertificateIssuanceFailedDetails:
       type: object
       additionalProperties: false
@@ -4458,11 +4522,14 @@ components:
     Certificate:
       type: object
       additionalProperties: false
-      required: [id, application_id, normalized_sans, key_type, issuer_id, status, has_active_valid_version, has_issuing_version, created_at, updated_at]
+      required: [id, enabled, application_id, normalized_sans, key_type, issuer_id, status, has_active_valid_version, has_issuing_version, created_at, updated_at]
       properties:
         id:
           type: string
           format: uuid
+        enabled:
+          type: boolean
+          description: Whether new issuance, renewal, reissue, and key rotation may start for this Certificate.
         application_id:
           type: string
           format: uuid
@@ -4505,6 +4572,13 @@ components:
           type: string
           format: date-time
           nullable: true
+    CertificateUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
     CertificateResponse:
       type: object
       additionalProperties: false
@@ -5169,6 +5243,9 @@ components:
           $ref: '#/components/schemas/PageMeta'
 
   examples:
+    CertificateUpdateRequest:
+      value:
+        enabled: false
     HealthResponse:
       value:
         status: ok
@@ -5244,6 +5321,7 @@ components:
       value:
         certificate:
           id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
+          enabled: true
           application_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d42
           normalized_sans:
             - '*.torob.dev'
@@ -5277,6 +5355,7 @@ components:
       value:
         certificate:
           id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
+          enabled: true
           application_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d42
           normalized_sans:
             - '*.torob.dev'
@@ -5296,6 +5375,7 @@ components:
       value:
         certificates:
           - id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d41
+            enabled: true
             application_id: 018f6a8e-4f7d-7c2b-a4b9-7c771a4f1d42
             normalized_sans:
               - '*.torob.dev'

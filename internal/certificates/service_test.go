@@ -31,6 +31,47 @@ func TestStartLifecycleRenewalBeforeWindowReturnsNotDue(t *testing.T) {
 	}
 }
 
+func TestDisabledCertificateBlocksNewLifecycleButKeepsValidMaterial(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	fixture.store.cert.Enabled = false
+	fixture.store.material = validMaterialVersion(time.Now().UTC().Add(24 * time.Hour))
+	fixture.store.versions = []CertificateVersion{fixture.store.material}
+
+	for _, reason := range []IssuanceReason{IssuanceReasonRenewal, IssuanceReasonKeyRotation, IssuanceReasonReissue} {
+		_, err := fixture.service.StartLifecycle(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID, reason)
+		var state StateError
+		if !errors.As(err, &state) || !errors.Is(state.Err, ErrCertificateDisabled) {
+			t.Fatalf("reason=%s err=%v, want disabled state", reason, err)
+		}
+	}
+	if fixture.store.createVersionCalls != 0 || len(fixture.store.ensureJobCalls) != 0 {
+		t.Fatalf("disabled certificate created work: versions=%d jobs=%#v", fixture.store.createVersionCalls, fixture.store.ensureJobCalls)
+	}
+
+	result, err := fixture.service.MaterialMetadataForID(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ID)
+	if err != nil || result.MaterialETag == "" {
+		t.Fatalf("disabled valid material metadata = %#v err=%v", result, err)
+	}
+}
+
+func TestEnsureDisabledCertificateDoesNotCreateWork(t *testing.T) {
+	fixture := newLifecycleServiceFixture()
+	fixture.store.cert.Enabled = false
+	fixture.store.cert.Status = StatusPending
+
+	result, err := fixture.service.EnsureForUser(context.Background(), Actor{GlobalRole: userdomain.GlobalRoleAdmin}, fixture.store.cert.ApplicationID, Criteria{
+		Domains: fixture.store.cert.NormalizedSANs,
+		KeyType: string(fixture.store.cert.KeyType),
+		Issuer:  "letsencrypt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted || result.Certificate.Enabled || fixture.store.createVersionCalls != 0 || len(fixture.store.ensureJobCalls) != 0 {
+		t.Fatalf("disabled ensure result=%#v versions=%d jobs=%#v", result, fixture.store.createVersionCalls, fixture.store.ensureJobCalls)
+	}
+}
+
 func TestStartLifecycleRenewalInsideWindowCreatesVersionAndJob(t *testing.T) {
 	fixture := newLifecycleServiceFixture()
 	notAfter := time.Now().UTC().Add(30*24*time.Hour - time.Second)
@@ -193,6 +234,7 @@ type lifecycleServiceFixture struct {
 func newLifecycleServiceFixture() lifecycleServiceFixture {
 	cert := Certificate{
 		ID:             "12345678-1234-4234-9234-123456789abc",
+		Enabled:        true,
 		ApplicationID:  "22345678-1234-4234-9234-123456789abc",
 		IssuerID:       "32345678-1234-4234-9234-123456789abc",
 		Status:         StatusReady,
@@ -269,6 +311,12 @@ func (s *lifecycleStore) CreateOrReuse(context.Context, CreateOrReuseCertificate
 
 func (s *lifecycleStore) Get(context.Context, string) (Certificate, error) {
 	return s.cert, nil
+}
+
+func (s *lifecycleStore) UpdateEnabled(_ context.Context, params UpdateCertificateEnabledParams) (Certificate, bool, error) {
+	changed := s.cert.Enabled != params.Enabled
+	s.cert.Enabled = params.Enabled
+	return s.cert, changed, nil
 }
 
 func (s *lifecycleStore) List(context.Context, ListCertificatesParams) ([]Certificate, error) {

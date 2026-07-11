@@ -234,6 +234,7 @@ Certificate creation rules:
 Columns:
 
 - Status.
+- Lifecycle enablement.
 - Domains / SAN summary.
 - Key type.
 - Issuer.
@@ -246,6 +247,7 @@ Filters:
 
 - Domain.
 - Status.
+- Lifecycle enablement.
 - Application.
 - Issuer.
 - Expiry before.
@@ -254,6 +256,7 @@ Filters:
 Certificate detail page:
 
 - Full SAN list.
+- Backend-reported lifecycle enablement and an enable/disable control for managers and admins.
 - Certificate identity options.
 - Owning Application.
 - Validity window.
@@ -278,6 +281,7 @@ Browser downloads of the tar.gz archive must use the backend `Content-Dispositio
 
 Certificate lifecycle actions:
 
+- Enablement changes call `PATCH /v1/certificates/{certificate_id}` with `{ "enabled": boolean }`.
 - Manual renew calls `POST /v1/certificates/{certificate_id}/renew`.
 - Key rotation calls `POST /v1/certificates/{certificate_id}/rotate-key`.
 - Renew and key rotation buttons are disabled when `has_active_valid_version=false`.
@@ -286,6 +290,8 @@ Certificate lifecycle actions:
 - Revocation calls `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`.
 - CertificateVersion issuance event history calls `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`.
 - Certificate-specific audit event history calls `GET /v1/certificates/{certificate_id}/events`.
+
+Renew and rotate-key require backend `enabled=true` and `has_active_valid_version=true`. Reissue requires backend `enabled=true`, `has_active_valid_version=false`, and `has_issuing_version=false`. Revocation and downloadable-version controls remain based on backend version state and permissions even when the Certificate is disabled. After enablement or lifecycle mutations, and after a concurrent-state `409`, the UI must refresh Certificate and version metadata before recalculating controls; it must not treat optimistic local state as authoritative. While the enablement PATCH is pending, the toggle and related lifecycle controls are disabled.
 
 Lifecycle actions are visible only to Users with Application `manager` access or global `admin`.
 
@@ -575,6 +581,7 @@ Certificate inventory, archive downloads, and lifecycle management:
 - `POST /v1/applications/{application_id}/certificates`
 - `GET /v1/certificates`
 - `GET /v1/certificates/{certificate_id}`
+- `PATCH /v1/certificates/{certificate_id}`
 - `GET /v1/certificates/{certificate_id}/versions`
 - `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive`
 - `POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke`
@@ -718,6 +725,7 @@ Required frontend scenarios:
 - If forced password 2FA is configured, invite signup shows a QR code for the TOTP provisioning URI and blocks completion until the User enters a valid current TOTP code.
 - Invite links are not stored in browser persistent storage and cannot be reused after successful signup.
 - Renewal, key rotation, and reissue create a higher-numbered certificate version shown in certificate detail.
+- Disabled Certificate controls reflect backend `enabled`, active-version, issuing-version, version-status, and permission state; toggling or a lifecycle conflict refreshes authoritative metadata while download and revoke remain available when backend version state permits.
 - Admin can view and manage all Applications.
 - Admin can create, inspect, update mutable issuer fields, disable issuers through status, and sees the default issuer uniqueness constraint.
 - Admin can create DNS providers, replace credentials without reading old credentials, update mutable provider metadata, and manage provider status.

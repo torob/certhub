@@ -47,7 +47,7 @@ The backend is the only component that:
 - Talks to Let's Encrypt or any ACME CA.
 - Talks to Cloudflare, ArvanCloud, or other DNS providers.
 - Stores private keys, ACME accounts, provider credentials, tokens, Users, Applications, and audit events.
-- Decides certificate identity, reuse, renewal, key rotation, revocation, and deletion semantics.
+- Decides certificate identity, reuse, enablement, renewal, key rotation, revocation, and deletion semantics.
 
 ## Identity Model
 
@@ -87,6 +87,7 @@ Management includes:
 - Domain scopes.
 - Application-owned Certificate creation.
 - Certificate lifecycle actions.
+- Certificate enable/disable controls.
 - Issuers.
 - DNS providers and zones.
 - Audit events.

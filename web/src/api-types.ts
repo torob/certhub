@@ -406,7 +406,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /** Enable or disable certificate lifecycle operations. */
+        patch: operations["updateCertificate"];
         trace?: never;
     };
     "/v1/certificates/{certificate_id}/versions": {
@@ -1297,9 +1298,9 @@ export interface components {
         /** @enum {string} */
         AuditResult: "success" | "failure";
         /** @enum {string} */
-        AuditAction: "bootstrap_admin_created" | "user_created" | "user_invite_created" | "user_invite_signup_started" | "user_invite_consumed" | "user_updated" | "user_login_succeeded" | "user_login_failed" | "user_session_created" | "user_session_refreshed" | "user_session_revoked" | "password_2fa_setup_started" | "password_2fa_enabled" | "password_2fa_disabled" | "application_created" | "application_updated" | "application_token_created" | "application_token_rotated" | "application_token_revoked" | "domain_scope_created" | "domain_scope_deleted" | "application_access_granted" | "application_access_revoked" | "issuer_created" | "issuer_updated" | "issuer_disabled" | "acme_account_created" | "dns_provider_created" | "dns_provider_updated" | "dns_provider_credentials_replaced" | "dns_provider_zone_added" | "dns_provider_zone_removed" | "dns_provider_zone_refresh_started" | "dns_provider_zone_refreshed" | "dns_zone_discovery_failed" | "certificate_created" | "certificate_issuance_started" | "certificate_issuance_succeeded" | "certificate_issuance_failed" | "certificate_renewal_started" | "certificate_renewal_succeeded" | "certificate_renewal_failed" | "certificate_key_rotation_started" | "certificate_key_rotation_succeeded" | "certificate_key_rotation_failed" | "certificate_revoked" | "certificate_revocation_retried" | "certificate_revocation_failed" | "certificate_deleted" | "private_key_read" | "server_self_certificate_synced";
+        AuditAction: "bootstrap_admin_created" | "user_created" | "user_invite_created" | "user_invite_signup_started" | "user_invite_consumed" | "user_updated" | "user_login_succeeded" | "user_login_failed" | "user_session_created" | "user_session_refreshed" | "user_session_revoked" | "password_2fa_setup_started" | "password_2fa_enabled" | "password_2fa_disabled" | "application_created" | "application_updated" | "application_token_created" | "application_token_rotated" | "application_token_revoked" | "domain_scope_created" | "domain_scope_deleted" | "application_access_granted" | "application_access_revoked" | "issuer_created" | "issuer_updated" | "issuer_disabled" | "acme_account_created" | "dns_provider_created" | "dns_provider_updated" | "dns_provider_credentials_replaced" | "dns_provider_zone_added" | "dns_provider_zone_removed" | "dns_provider_zone_refresh_started" | "dns_provider_zone_refreshed" | "dns_zone_discovery_failed" | "certificate_created" | "certificate_enabled" | "certificate_disabled" | "certificate_issuance_started" | "certificate_issuance_succeeded" | "certificate_issuance_failed" | "certificate_renewal_started" | "certificate_renewal_succeeded" | "certificate_renewal_failed" | "certificate_key_rotation_started" | "certificate_key_rotation_succeeded" | "certificate_key_rotation_failed" | "certificate_revoked" | "certificate_revocation_retried" | "certificate_revocation_failed" | "certificate_deleted" | "private_key_read" | "server_self_certificate_synced";
         /** @enum {string} */
-        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "invalid_invite" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "certificate_no_active_version" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
+        ErrorCode: "invalid_domain" | "invalid_request" | "invalid_token" | "invalid_credentials" | "session_expired" | "invalid_2fa_code" | "oidc_auth_failed" | "application_token_required" | "user_token_required" | "application_source_ip_denied" | "application_access_denied" | "private_key_access_denied" | "domain_not_authorized" | "password_auth_disabled" | "password_2fa_required" | "user_disabled" | "user_not_provisioned" | "invalid_invite" | "certificate_not_found" | "certificate_not_ready" | "certificate_expired" | "certificate_issuance_failed" | "certificate_revoked" | "certificate_no_active_version" | "certificate_disabled" | "not_acceptable" | "renewal_overlap_exists" | "renewal_not_due" | "system_managed_resource" | "conflict" | "issuer_not_configured" | "service_unavailable" | "issuer_unavailable" | "dns_provider_not_found" | "dns_provider_zone_conflict" | "dns_provider_unavailable" | "dns_zone_discovery_failed" | "dns_validation_failed" | "rate_limited";
         ErrorResponse: {
             error: components["schemas"]["ErrorEnvelope"];
         };
@@ -1324,7 +1325,7 @@ export interface components {
             details?: components["schemas"]["ErrorDetails"];
         };
         /** @description Non-secret structured details. Shape depends on error.code. */
-        ErrorDetails: components["schemas"]["EmptyErrorDetails"] | components["schemas"]["ValidationErrorDetails"] | components["schemas"]["DomainNotAuthorizedDetails"] | components["schemas"]["CertificateStateErrorDetails"] | components["schemas"]["CertificateIssuanceFailedDetails"] | components["schemas"]["CertificateRevokedDetails"] | components["schemas"]["RenewalOverlapDetails"] | components["schemas"]["DNSProviderZoneConflictDetails"] | components["schemas"]["ReadinessErrorDetails"];
+        ErrorDetails: components["schemas"]["EmptyErrorDetails"] | components["schemas"]["ValidationErrorDetails"] | components["schemas"]["DomainNotAuthorizedDetails"] | components["schemas"]["CertificateStateErrorDetails"] | components["schemas"]["CertificateDisabledDetails"] | components["schemas"]["CertificateIssuanceFailedDetails"] | components["schemas"]["CertificateRevokedDetails"] | components["schemas"]["RenewalOverlapDetails"] | components["schemas"]["DNSProviderZoneConflictDetails"] | components["schemas"]["ReadinessErrorDetails"];
         EmptyErrorDetails: Record<string, never>;
         ValidationErrorDetails: {
             fields: {
@@ -1345,6 +1346,13 @@ export interface components {
             status: "pending" | "validating_dns" | "issuing" | "renewing" | "rotating_key" | "expired";
             /** Format: date-time */
             not_after?: string | null;
+        };
+        CertificateDisabledDetails: {
+            /** Format: uuid */
+            certificate_id: string;
+            status: components["schemas"]["CertificateStatus"];
+            /** @enum {boolean} */
+            enabled: false;
         };
         CertificateIssuanceFailedDetails: {
             /** Format: uuid */
@@ -1736,6 +1744,8 @@ export interface components {
         Certificate: {
             /** Format: uuid */
             id: string;
+            /** @description Whether new issuance, renewal, reissue, and key rotation may start for this Certificate. */
+            enabled: boolean;
             /** Format: uuid */
             application_id: string;
             normalized_sans: components["schemas"]["CertificateIdentifier"][];
@@ -1757,6 +1767,9 @@ export interface components {
             updated_at: string;
             /** Format: date-time */
             deleted_at?: string | null;
+        };
+        CertificateUpdateRequest: {
+            enabled: boolean;
         };
         CertificateResponse: {
             certificate: components["schemas"]["Certificate"];
@@ -2837,6 +2850,7 @@ export interface operations {
                 domain?: components["schemas"]["InputCertificateIdentifier"];
                 application?: string;
                 status?: components["schemas"]["CertificateStatus"];
+                enabled?: boolean;
                 expires_before?: string;
                 issuer?: components["schemas"]["MachineName"];
                 key_type?: components["schemas"]["KeyType"];
@@ -2896,6 +2910,43 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    updateCertificate: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Optional caller-provided correlation ID. Invalid values are ignored and replaced by the server. */
+                "X-Request-ID"?: components["parameters"]["XRequestID"];
+            };
+            path: {
+                certificate_id: components["parameters"]["CertificateID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertificateUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated certificate metadata. */
+            200: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    "Cache-Control": components["headers"]["CacheControlNoStore"];
+                    Pragma: components["headers"]["PragmaNoCache"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificateResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listCertificateVersions: {

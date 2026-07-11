@@ -63,6 +63,7 @@ type CertificateResponse struct {
 
 type Certificate struct {
 	ID               string     `json:"id"`
+	Enabled          bool       `json:"enabled"`
 	ApplicationID    string     `json:"application_id"`
 	NormalizedSANs   []string   `json:"normalized_sans"`
 	KeyType          string     `json:"key_type"`

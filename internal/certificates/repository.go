@@ -35,6 +35,7 @@ type ListCertificatesParams struct {
 	ApplicationIDs []string
 	IssuerID       *string
 	Status         *Status
+	Enabled        *bool
 	KeyType        *KeyType
 	NormalizedSANs []string
 	ExpiresBefore  *time.Time
@@ -113,6 +114,11 @@ type RevokeCertificateVersionParams struct {
 
 type DeleteCertificateParams struct {
 	ID string
+}
+
+type UpdateCertificateEnabledParams struct {
+	ID      string
+	Enabled bool
 }
 
 type ClaimIssuanceJobParams struct {
@@ -235,6 +241,28 @@ where c.id = $1`, id))
 	return cert, nil
 }
 
+func (r Repository) UpdateEnabled(ctx context.Context, params UpdateCertificateEnabledParams) (Certificate, bool, error) {
+	if err := storage.ValidateUUID(params.ID, "certificate_id"); err != nil {
+		return Certificate{}, false, err
+	}
+	cert, err := scanCertificate(r.db.QueryRow(ctx, `
+update certificates
+set enabled = $2,
+    updated_at = now()
+where id = $1
+  and deleted_at is null
+  and enabled is distinct from $2
+returning `+certificateReturningSQL(), params.ID, params.Enabled))
+	if errors.Is(err, storage.ErrNoRows) {
+		current, getErr := r.Get(ctx, params.ID)
+		return current, false, getErr
+	}
+	if err != nil {
+		return Certificate{}, false, fmt.Errorf("update certificate enabled state: %w", err)
+	}
+	return cert, true, nil
+}
+
 func (r Repository) List(ctx context.Context, params ListCertificatesParams) ([]Certificate, error) {
 	query, args, err := r.listQuery(params, false)
 	if err != nil {
@@ -301,6 +329,7 @@ join latest on latest.certificate_id = c.id
 join issuers i on i.id = c.issuer_id
 where c.deleted_at is null
   and c.status <> 'deleted'
+  and c.enabled
   and i.status = 'active'
   and latest.not_after <= now() + (i.renewal_window_seconds * interval '1 second')
   and not exists (
@@ -448,6 +477,7 @@ with locked_certificate as (
     from certificates
     where id = $2
       and status <> 'deleted'
+      and enabled
     for update
 ), existing as (
     select `+certificateVersionSelectSQL("v")+`
@@ -1107,6 +1137,9 @@ func (r Repository) listQuery(params ListCertificatesParams, count bool) (string
 	if params.Status != nil {
 		add("c.status = $%d", string(*params.Status))
 	}
+	if params.Enabled != nil {
+		add("c.enabled = $%d", *params.Enabled)
+	}
 	if params.KeyType != nil {
 		add("c.key_type = $%d", string(*params.KeyType))
 	}
@@ -1239,7 +1272,7 @@ func (r Repository) listEventsQuery(params ListEventsParams, count bool) (string
 }
 
 func certificateSelectSQL(prefix string) string {
-	return prefix + `.id, ` + prefix + `.normalized_sans, ` + prefix + `.key_type, ` + prefix + `.issuer_id, ` +
+	return prefix + `.id, ` + prefix + `.enabled, ` + prefix + `.normalized_sans, ` + prefix + `.key_type, ` + prefix + `.issuer_id, ` +
 		`(select i.name from issuers i where i.id = ` + prefix + `.issuer_id), ` +
 		prefix + `.application_id, ` + prefix + `.status, ` + prefix + `.failure_code, ` + prefix + `.failure_message, ` +
 		prefix + `.revocation_reason, ` + prefix + `.revoked_at, ` + prefix + `.revoked_by_user_id, ` +
@@ -1250,7 +1283,7 @@ func certificateSelectSQL(prefix string) string {
 }
 
 func certificateReturningSQL() string {
-	return `id, normalized_sans, key_type, issuer_id, (select i.name from issuers i where i.id = certificates.issuer_id), application_id, status, failure_code, failure_message,
+	return `id, enabled, normalized_sans, key_type, issuer_id, (select i.name from issuers i where i.id = certificates.issuer_id), application_id, status, failure_code, failure_message,
     revocation_reason, revoked_at, revoked_by_user_id, created_at, updated_at, deleted_at,
     (select count(*) from certificate_versions where certificate_id = certificates.id)::bigint,
     exists (select 1 from certificate_versions v where v.certificate_id = certificates.id and v.status = 'valid' and v.cert_pem is not null and v.chain_pem is not null and v.fullchain_pem is not null and v.private_key_pem is not null and v.material_etag is not null and v.not_before <= now() and v.not_after > now() and certificates.status not in ('failed', 'deleted')),
@@ -1313,6 +1346,7 @@ func scanCertificate(row scanner) (Certificate, error) {
 	var revokedAt, deletedAt sql.NullTime
 	if err := row.Scan(
 		&cert.ID,
+		&cert.Enabled,
 		&cert.NormalizedSANs,
 		&keyType,
 		&cert.IssuerID,

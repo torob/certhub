@@ -107,6 +107,7 @@ const (
 
 type Certificate struct {
 	ID                    string
+	Enabled               bool
 	NormalizedSANs        []string
 	KeyType               KeyType
 	IssuerID              string

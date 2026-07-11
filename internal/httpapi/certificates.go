@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +28,13 @@ type certificateRevokeRequest struct {
 	Note   string `json:"note"`
 }
 
+type certificateUpdateRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
 type apiCertificate struct {
 	ID                    string                 `json:"id"`
+	Enabled               bool                   `json:"enabled"`
 	ApplicationID         string                 `json:"application_id"`
 	NormalizedSANs        []string               `json:"normalized_sans"`
 	KeyType               string                 `json:"key_type"`
@@ -270,6 +276,18 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		noStoreHeaders(w.Header())
 		writeJSON(w, http.StatusOK, map[string]any{"certificate": serializeCertificate(cert)})
 		return http.StatusOK, ""
+	case r.Method == http.MethodPatch && tail == "":
+		var body certificateUpdateRequest
+		if err := decodeJSONBody(r, &body); err != nil || body.Enabled == nil {
+			return writeCertificateError(w, certdomain.ErrInvalidRequest)
+		}
+		cert, err := s.certs.UpdateCertificateEnabled(r.Context(), actor, id, *body.Enabled, certificateAuditContext(reqctx))
+		if err != nil {
+			return writeCertificateError(w, err)
+		}
+		noStoreHeaders(w.Header())
+		writeJSON(w, http.StatusOK, map[string]any{"certificate": serializeCertificate(cert)})
+		return http.StatusOK, ""
 	case r.Method == http.MethodGet && tail == "versions":
 		opts, err := parseListOptions(r)
 		if err != nil {
@@ -467,6 +485,13 @@ func parseCertificateListParams(r *http.Request) (certdomain.ListParams, error) 
 		status := certdomain.Status(raw)
 		params.Status = &status
 	}
+	if raw := query.Get("enabled"); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return certdomain.ListParams{}, err
+		}
+		params.Enabled = &enabled
+	}
 	if raw := query.Get("key_type"); raw != "" {
 		keyType := certdomain.KeyType(raw)
 		params.KeyType = &keyType
@@ -544,7 +569,11 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 			code, message = "certificate_revoked", "Certificate is revoked."
 		case errors.Is(state.Err, certdomain.ErrCertificateNoActiveVersion):
 			code, message = "certificate_no_active_version", "Certificate has no active valid version."
+		case errors.Is(state.Err, certdomain.ErrCertificateDisabled):
+			code, message = "certificate_disabled", "Certificate is disabled."
 		}
+	case errors.Is(err, certdomain.ErrCertificateDisabled):
+		status, code, message = http.StatusConflict, "certificate_disabled", "Certificate is disabled."
 	case errors.Is(err, certdomain.ErrCertificateNotReady):
 		status, code, message, retryAfter = http.StatusConflict, "certificate_not_ready", "Certificate material is not ready.", 5
 	case errors.Is(err, certdomain.ErrCertificateExpired):
@@ -575,6 +604,9 @@ func certificateStateDetails(state certdomain.StateError) map[string]any {
 	details := map[string]any{
 		"certificate_id": state.Certificate.ID,
 		"status":         string(state.Certificate.Status),
+	}
+	if errors.Is(state.Err, certdomain.ErrCertificateDisabled) {
+		details["enabled"] = state.Certificate.Enabled
 	}
 	if state.Certificate.FailureCode != nil {
 		details["failure_code"] = *state.Certificate.FailureCode
@@ -649,6 +681,7 @@ func certificateAuditContext(reqctx RequestContext) certdomain.AuditContext {
 func serializeCertificate(cert certdomain.Certificate) apiCertificate {
 	out := apiCertificate{
 		ID:                    cert.ID,
+		Enabled:               cert.Enabled,
 		ApplicationID:         cert.ApplicationID,
 		NormalizedSANs:        cert.NormalizedSANs,
 		KeyType:               string(cert.KeyType),

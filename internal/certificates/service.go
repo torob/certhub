@@ -33,11 +33,13 @@ var (
 	ErrCertificateIssuanceFailed     = errors.New("certificate issuance failed")
 	ErrCertificateRevoked            = errors.New("certificate revoked")
 	ErrCertificateNoActiveVersion    = errors.New("certificate has no active valid version")
+	ErrCertificateDisabled           = errors.New("certificate is disabled")
 )
 
 type Store interface {
 	CreateOrReuse(context.Context, CreateOrReuseCertificateParams) (Certificate, error)
 	Get(context.Context, string) (Certificate, error)
+	UpdateEnabled(context.Context, UpdateCertificateEnabledParams) (Certificate, bool, error)
 	List(context.Context, ListCertificatesParams) ([]Certificate, error)
 	Count(context.Context, ListCertificatesParams) (int64, error)
 	LatestValidVersion(context.Context, string) (CertificateVersion, error)
@@ -116,6 +118,7 @@ type ListParams struct {
 	Application   string
 	Domain        string
 	Status        *Status
+	Enabled       *bool
 	KeyType       *KeyType
 	Issuer        string
 	IssuerID      *string
@@ -297,6 +300,55 @@ func (s *Service) GetCertificateForEvents(ctx context.Context, actor Actor, id s
 	return s.visibleCertificate(ctx, actor, id, roleViewer, true)
 }
 
+func (s *Service) UpdateCertificateEnabled(ctx context.Context, actor Actor, certificateID string, enabled bool, auditCtx AuditContext) (Certificate, error) {
+	var updated Certificate
+	err := s.withWriteTx(ctx, func(txsvc *Service) error {
+		current, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, false)
+		if err != nil {
+			return err
+		}
+		app, err := txsvc.apps.Get(ctx, current.ApplicationID)
+		if err != nil {
+			return ErrNotFound
+		}
+		if systemManagedApplication(app) {
+			return ErrSystemManagedResource
+		}
+		if current.Enabled == enabled {
+			updated = current
+			return nil
+		}
+		var changed bool
+		updated, changed, err = txsvc.repo.UpdateEnabled(ctx, UpdateCertificateEnabledParams{ID: certificateID, Enabled: enabled})
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		if changed && txsvc.audit != nil {
+			action := "certificate_disabled"
+			if enabled {
+				action = "certificate_enabled"
+			}
+			_, err = txsvc.audit.Append(ctx, auditdomain.AppendEventParams{
+				IdentityType:       auditdomain.IdentityTypeUser,
+				IdentityID:         &actor.ID,
+				Action:             action,
+				TargetType:         "certificate",
+				TargetID:           &updated.ID,
+				ScopeApplicationID: &updated.ApplicationID,
+				ScopeCertificateID: &updated.ID,
+				Result:             auditdomain.ResultSuccess,
+				CorrelationID:      optionalString(auditCtx.CorrelationID),
+				SourceIP:           optionalString(auditCtx.SourceIP),
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return updated, err
+}
+
 func (s *Service) ListVersions(ctx context.Context, actor Actor, certificateID string, opts storage.ListOptions) (VersionListResult, error) {
 	cert, err := s.visibleCertificate(ctx, actor, certificateID, roleViewer, false)
 	if err != nil {
@@ -460,6 +512,9 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		if cert.Status == StatusDeleted {
 			return ErrNotFound
 		}
+		if !cert.Enabled {
+			return StateError{Err: ErrCertificateDisabled, Certificate: cert}
+		}
 		if err := txsvc.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
 			return err
 		}
@@ -517,6 +572,11 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		}
 		version, err = txsvc.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{CertificateID: certificateID, Reason: reason})
 		if err != nil {
+			if errors.Is(err, storage.ErrNoRows) {
+				if refreshed, getErr := txsvc.repo.Get(ctx, certificateID); getErr == nil && !refreshed.Enabled {
+					return StateError{Err: ErrCertificateDisabled, Certificate: refreshed}
+				}
+			}
 			return classifyWriteError(err)
 		}
 		if version.Reason != reason {
@@ -621,6 +681,9 @@ func (s *Service) ensure(ctx context.Context, applicationID string, criteria Cri
 			return classifyWriteError(err)
 		}
 		result.Certificate = cert
+		if !cert.Enabled {
+			return nil
+		}
 		if cert.Status == StatusFailed || cert.Status == StatusRevoked || cert.Status == StatusReady || cert.Status == StatusDeleted {
 			return nil
 		}
@@ -629,6 +692,12 @@ func (s *Service) ensure(ctx context.Context, applicationID string, criteria Cri
 			Reason:        IssuanceReasonInitialIssue,
 		})
 		if err != nil {
+			if errors.Is(err, storage.ErrNoRows) {
+				if refreshed, getErr := txsvc.repo.Get(ctx, cert.ID); getErr == nil && !refreshed.Enabled {
+					result.Certificate = refreshed
+					return nil
+				}
+			}
 			return classifyWriteError(err)
 		}
 		_, err = txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
@@ -713,6 +782,9 @@ func (s *Service) listParams(ctx context.Context, params ListParams) (ListCertif
 	out := ListCertificatesParams{ListOptions: params.ListOptions}
 	if params.Status != nil {
 		out.Status = params.Status
+	}
+	if params.Enabled != nil {
+		out.Enabled = params.Enabled
 	}
 	if params.KeyType != nil {
 		out.KeyType = params.KeyType
@@ -831,7 +903,7 @@ func (s *Service) materialMetadataForCertificate(ctx context.Context, cert Certi
 }
 
 func (s *Service) enqueueRenewalIfDue(ctx context.Context, cert Certificate, issuer issuerdomain.Issuer, version CertificateVersion) error {
-	if issuer.Status != issuerdomain.StatusActive || version.NotAfter == nil {
+	if !cert.Enabled || issuer.Status != issuerdomain.StatusActive || version.NotAfter == nil {
 		return nil
 	}
 	if time.Now().UTC().Before(renewalNotBefore(*version.NotAfter, issuer)) {
@@ -870,7 +942,7 @@ func (s *Service) enqueueRenewalIfDue(ctx context.Context, cert Certificate, iss
 }
 
 func (s *Service) enqueueRenewalRecovery(ctx context.Context, cert Certificate, issuer issuerdomain.Issuer) error {
-	if issuer.Status != issuerdomain.StatusActive || cert.Status == StatusRevoked || cert.Status == StatusFailed || cert.Status == StatusDeleted || cert.DeletedAt != nil {
+	if !cert.Enabled || issuer.Status != issuerdomain.StatusActive || cert.Status == StatusRevoked || cert.Status == StatusFailed || cert.Status == StatusDeleted || cert.DeletedAt != nil {
 		return nil
 	}
 	if err := s.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {

@@ -36,7 +36,7 @@ func TestCreateOrReuseNormalizesIdentityAndUsesPartialConflict(t *testing.T) {
 	}
 	for _, required := range []string{
 		"on conflict (application_id, normalized_sans, key_type, issuer_id) where deleted_at is null",
-		"returning id, normalized_sans",
+		"returning id, enabled, normalized_sans",
 	} {
 		if !strings.Contains(db.query, required) {
 			t.Fatalf("create query missing %q: %s", required, db.query)
@@ -74,6 +74,35 @@ func TestCertificateCountQuerySupportsAccessibleApplicationsAndExpiry(t *testing
 	}
 }
 
+func TestCertificateCountQueryFiltersEnabledState(t *testing.T) {
+	enabled := false
+	db := &fakeDB{row: fakeRow{values: []any{int64(1)}}}
+	repo := NewRepository(db)
+	if _, err := repo.Count(context.Background(), ListCertificatesParams{Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(db.query, "c.enabled = $1") || len(db.args) != 1 || db.args[0] != false {
+		t.Fatalf("query=%s args=%#v", db.query, db.args)
+	}
+}
+
+func TestUpdateCertificateEnabledReturnsTransition(t *testing.T) {
+	now := testTime()
+	values := certificateRowValues(now, []string{"api.example.com"}, string(StatusReady), nil, nil)
+	values[1] = false
+	db := &fakeDB{row: fakeRow{values: values}}
+	repo := NewRepository(db)
+	cert, changed, err := repo.UpdateEnabled(context.Background(), UpdateCertificateEnabledParams{
+		ID: "12345678-1234-4234-9234-123456789abc", Enabled: false,
+	})
+	if err != nil || !changed || cert.Enabled {
+		t.Fatalf("cert=%#v changed=%t err=%v", cert, changed, err)
+	}
+	if !strings.Contains(db.query, "enabled is distinct from $2") {
+		t.Fatalf("query=%s", db.query)
+	}
+}
+
 func TestLatestValidVersionSelectsNewestValidMetadata(t *testing.T) {
 	now := testTime()
 	db := &fakeDB{row: fakeRow{values: certificateVersionRowValues(now, string(VersionStatusValid), string(IssuanceReasonRenewal), nil)}}
@@ -107,7 +136,7 @@ func TestCreateIssuingVersionReusesExistingAndUpdatesParentState(t *testing.T) {
 	if version.Status != VersionStatusIssuing || version.Reason != IssuanceReasonRenewal {
 		t.Fatalf("version = %#v", version)
 	}
-	for _, required := range []string{"for update", "v.status = 'issuing'", "union all", "failure_code = null", "revocation_reason = null", "revoked_at = null", "revoked_by_user_id = null"} {
+	for _, required := range []string{"and enabled", "for update", "v.status = 'issuing'", "union all", "failure_code = null", "revocation_reason = null", "revoked_at = null", "revoked_by_user_id = null"} {
 		if !strings.Contains(db.query, required) {
 			t.Fatalf("create version query missing %q: %s", required, db.query)
 		}
@@ -254,6 +283,7 @@ func (r fakeRow) Scan(dest ...any) error {
 func certificateRowValues(now time.Time, sans []string, status string, failureCode, failureMessage *string) []any {
 	return []any{
 		"12345678-1234-4234-9234-123456789abc",
+		true,
 		sans,
 		string(KeyTypeECDSAP256),
 		"32345678-1234-4234-9234-123456789abc",

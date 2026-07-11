@@ -990,7 +990,7 @@ function HomePage(props: PageProps) {
 
 function CertificatesPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const [filters, setFilters] = useState({ domain: "", status: "", application_id: "", issuer: "", key_type: "", expires_before: "" });
+  const [filters, setFilters] = useState({ domain: "", status: "", enabled: "", application_id: "", issuer: "", key_type: "", expires_before: "" });
   const query = queryString({ ...filters, limit: "100" });
   const list = useAsync<{ certificates: any[] }> (props.session, `/v1/certificates?${query}`, [refresh, query]);
   const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
@@ -1002,6 +1002,7 @@ function CertificatesPage(props: PageProps) {
   const certificateFilterFields: FilterField[] = [
     { key: "domain", label: "Domain", placeholder: "api.example.com" },
     { key: "status", label: "Status", type: "select", options: certificateStatusOptions() },
+    { key: "enabled", label: "Lifecycle", type: "select", options: [["true", "Enabled"], ["false", "Disabled"]] },
     { key: "application_id", label: "Application", type: "select", options: rowsOf(applications).map((app) => [app.id, appLabel(app)]) },
     issuerOptions.length ? { key: "issuer", label: "Issuer", type: "select", options: issuerOptions } : { key: "issuer", label: "Issuer", placeholder: "letsencrypt_production" },
     { key: "key_type", label: "Key type", type: "select", options: keyTypeOptions() },
@@ -1021,6 +1022,7 @@ function CertificatesPage(props: PageProps) {
     ),
     table(list, [
       "status",
+      { key: "enabled", label: "Lifecycle", render: (cert) => cert.enabled ? "Enabled" : "Disabled" },
       { key: "normalized_sans", label: "Domains" },
       "key_type",
       { key: "issuer_name", label: "Issuer", render: (cert) => cert.issuer_name || "Default issuer" },
@@ -1034,21 +1036,34 @@ function CertificateDetailPage(props: PageProps) {
   const id = resourceID(props);
   const [refresh, setRefresh] = useState(0);
   const [failureMessage, setFailureMessage] = useState("");
+  const [togglePending, setTogglePending] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
   const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
   const versions = useAsync<{ versions: any[] }>(props.session, id ? `/v1/certificates/${id}/versions?limit=20` : "", [id, refresh]);
   const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/certificates/${id}/events?limit=20` : "", [id, refresh]);
-  const action = (path: string, body?: unknown, method = "POST") =>
-    api(`/v1/certificates/${id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
+  const action = (path: string, body?: unknown, method = "POST") => {
+    setActionPending(true);
+    return api(`/v1/certificates/${id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
       props.setNotice(r.error ? errorText(r) : "request accepted");
       setRefresh((value) => value + 1);
-    });
-  const versionAction = (version: any, path: string, body?: unknown) =>
-    api(`/v1/certificates/${id}/versions/${version.id}${path}`, props.session, { method: "POST", body: body ? JSON.stringify(body) : undefined }).then((r) => {
+    }).finally(() => setActionPending(false));
+  };
+  const versionAction = (version: any, path: string, body?: unknown) => {
+    setActionPending(true);
+    return api(`/v1/certificates/${id}/versions/${version.id}${path}`, props.session, { method: "POST", body: body ? JSON.stringify(body) : undefined }).then((r) => {
       props.setNotice(r.error ? errorText(r) : "request accepted");
       setRefresh((value) => value + 1);
-    });
+    }).finally(() => setActionPending(false));
+  };
+  const toggleEnabled = () => {
+    setTogglePending(true);
+    api(`/v1/certificates/${id}`, props.session, { method: "PATCH", body: JSON.stringify({ enabled: !cert.enabled }) }).then((r) => {
+      props.setNotice(r.error ? errorText(r) : `certificate ${cert.enabled ? "disabled" : "enabled"}`);
+      setRefresh((value) => value + 1);
+    }).finally(() => setTogglePending(false));
+  };
   const expired = cert.status === "expired";
   const appRole = appAccess.data?.application?.current_user_role;
   const applicationLabel = appLabel(appAccess.data?.application) || "Application not visible";
@@ -1058,24 +1073,29 @@ function CertificateDetailPage(props: PageProps) {
   const canLifecycle = appLoaded && !appReserved && (isAdmin(props.session) || appRole === "manager");
   const hasActiveValidVersion = cert.has_active_valid_version === true;
   const hasIssuingVersion = cert.has_issuing_version === true;
+  const certificateEnabled = cert.enabled === true;
+  const lifecycleDisabledReason = "Certificate lifecycle is disabled";
   const activeVersionRequired = "Requires an active valid certificate version";
   const reissueUnavailable = hasActiveValidVersion ? "Reissue is only available when there is no active valid certificate version" : "Reissue is unavailable while a certificate version is issuing";
   const refreshing = loadingAny(detail, appAccess, versions, events);
+  const controlsBusy = togglePending || actionPending || refreshing;
   return pageFrame(
     "Certificate",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/certificates") }, "Back"),
       refreshButton(refreshing, () => setRefresh((value) => value + 1)),
       canDownloadArchive && !expired ? createElement("button", { onClick: () => downloadArchive(props.session, cert.id, props.setNotice) }, createElement(Download, { size: 16 }), "Download") : null,
-      canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
-      canLifecycle ? createElement("button", { disabled: !hasActiveValidVersion, title: !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/rotate-key") }, "Rotate key") : null,
-      canLifecycle ? createElement("button", { disabled: hasActiveValidVersion || hasIssuingVersion, title: hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null
+      canLifecycle ? createElement("button", { disabled: controlsBusy, onClick: toggleEnabled }, certificateEnabled ? "Disable" : "Enable") : null,
+      canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || !hasActiveValidVersion, title: !certificateEnabled ? lifecycleDisabledReason : !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/renew") }, createElement(RefreshCw, { size: 16 }), "Renew") : null,
+      canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || !hasActiveValidVersion, title: !certificateEnabled ? lifecycleDisabledReason : !hasActiveValidVersion ? activeVersionRequired : undefined, onClick: () => action("/rotate-key") }, "Rotate key") : null,
+      canLifecycle ? createElement("button", { disabled: controlsBusy || !certificateEnabled || hasActiveValidVersion || hasIssuingVersion, title: !certificateEnabled ? lifecycleDisabledReason : hasActiveValidVersion || hasIssuingVersion ? reissueUnavailable : undefined, onClick: () => action("/reissue") }, createElement(RefreshCw, { size: 16 }), "Reissue") : null
     ),
     initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("section", { className: "detail" },
       createElement("h2", null, certificateLabel(cert)),
       kv("Application", applicationLabel),
       kv("Domains", (cert.normalized_sans || []).join(", ")),
       kv("Status", cert.status),
+      kv("Lifecycle", certificateEnabled ? "Enabled" : "Disabled"),
       kv("Key type", cert.key_type),
       kv("Issuer", cert.issuer_name || "Default issuer"),
       cert.failure_code ? kv("Failure code", cert.failure_code) : null,
@@ -2604,6 +2624,8 @@ function auditActionOptions(): FilterOption[] {
     "dns_provider_zone_refreshed",
     "dns_zone_discovery_failed",
     "certificate_created",
+    "certificate_enabled",
+    "certificate_disabled",
     "certificate_issuance_started",
     "certificate_issuance_succeeded",
     "certificate_issuance_failed",

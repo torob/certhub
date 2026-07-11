@@ -119,6 +119,32 @@ func TestIDTLSMaterialEndpointReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestPatchCertificateEnabledReturnsBackendStateAndAudit(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	auditStore := &certificateHTTPAuditStore{}
+	handler, userToken := newCertificateHTTPUserHandler(t, fixture, auditStore)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/certificates/"+fixture.cert.ID, strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auditStore.events) != 1 || auditStore.events[0].Action != "certificate_disabled" {
+		t.Fatalf("audit=%#v", auditStore.events)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/v1/certificates/"+fixture.cert.ID, strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || len(auditStore.events) != 1 {
+		t.Fatalf("idempotent status=%d audit=%#v body=%s", rec.Code, auditStore.events, rec.Body.String())
+	}
+}
+
 func TestListCertificateVersionEventsReturnsOperationalTimeline(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	message := "TXT record propagated"
@@ -234,6 +260,18 @@ func TestParseCertificateListParamsExpiresBefore(t *testing.T) {
 	}
 }
 
+func TestParseCertificateListParamsEnabled(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/certificates?enabled=false", nil)
+	params, err := parseCertificateListParams(req)
+	if err != nil || params.Enabled == nil || *params.Enabled {
+		t.Fatalf("params=%#v err=%v", params, err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/certificates?enabled=disabled", nil)
+	if _, err := parseCertificateListParams(req); err == nil {
+		t.Fatal("invalid enabled filter was accepted")
+	}
+}
+
 func TestSerializeCertificateIncludesLatestVersion(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	cert := fixture.cert
@@ -268,6 +306,16 @@ func TestWriteCertificateErrorRenewalNotDue(t *testing.T) {
 		if !strings.Contains(body, required) {
 			t.Fatalf("body missing %q: %s", required, body)
 		}
+	}
+}
+
+func TestWriteCertificateErrorDisabled(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	fixture.cert.Enabled = false
+	rec := httptest.NewRecorder()
+	status, code := writeCertificateError(rec, certdomain.StateError{Err: certdomain.ErrCertificateDisabled, Certificate: fixture.cert})
+	if status != http.StatusConflict || code != "certificate_disabled" || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Fatalf("status/code=%d %q body=%s", status, code, rec.Body.String())
 	}
 }
 
@@ -511,6 +559,7 @@ func newCertificateHTTPFixture(t *testing.T) certificateHTTPFixture {
 	}
 	cert := certdomain.Certificate{
 		ID:                    "72345678-1234-4234-9234-123456789abc",
+		Enabled:               true,
 		ApplicationID:         "22345678-1234-4234-9234-123456789abc",
 		IssuerID:              "32345678-1234-4234-9234-123456789abc",
 		NormalizedSANs:        []string{"api.example.com"},
@@ -597,6 +646,12 @@ func (s *certificateHTTPCertStore) CreateOrReuse(_ context.Context, params certd
 
 func (s *certificateHTTPCertStore) Get(context.Context, string) (certdomain.Certificate, error) {
 	return s.cert, nil
+}
+
+func (s *certificateHTTPCertStore) UpdateEnabled(_ context.Context, params certdomain.UpdateCertificateEnabledParams) (certdomain.Certificate, bool, error) {
+	changed := s.cert.Enabled != params.Enabled
+	s.cert.Enabled = params.Enabled
+	return s.cert, changed, nil
 }
 
 func (s *certificateHTTPCertStore) List(_ context.Context, params certdomain.ListCertificatesParams) ([]certdomain.Certificate, error) {

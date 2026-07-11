@@ -851,7 +851,10 @@ A Certificate stores stable metadata:
 - Key type.
 - Issuer.
 - Application ID.
+- Whether new lifecycle issuance is enabled.
 - Status and lifecycle metadata.
+
+Certificate enablement is independent from operational `status`. A disabled Certificate keeps all CertificateVersions and may continue serving any active valid version until expiry. Disabling does not revoke CA material and does not block explicit per-version revocation. It prevents new initial issuance, renewal, reissue, and key rotation from starting.
 
 ## Certificate Identity and Reuse
 
@@ -901,6 +904,15 @@ Reissue rules:
 - `POST /v1/certificates/{certificate_id}/renew` and `POST /v1/certificates/{certificate_id}/rotate-key` must return `409 certificate_no_active_version` when no active valid CertificateVersion exists.
 - `POST /v1/certificates/{certificate_id}/reissue` must return `409 conflict` when an active valid CertificateVersion exists or any CertificateVersion is currently issuing.
 - Certificates are never deleted through public APIs. Reissue keeps the same Certificate identity and creates a new CertificateVersion.
+
+Enablement rules:
+
+- New Certificates default to `enabled=true`.
+- Application `manager` Users and global admins may change enablement; public writes to a reserved `certhub_server` Certificate return `409 system_managed_resource`.
+- `POST /v1/sync/certificates` and `POST /v1/applications/{application_id}/certificates` return existing disabled Certificate metadata without creating a CertificateVersion or issuance job.
+- Manual renew, key rotation, and reissue on a disabled Certificate return non-retryable `409 certificate_disabled`.
+- Work already pending or running when disablement commits may finish, including its existing retries. Disablement prevents only later work from starting.
+- Re-enabling does not enqueue work immediately. Later normal sync, manual lifecycle, or periodic renewal triggers may start work.
 
 When explicit User lifecycle reissue starts, Certhub must transition the parent Certificate to an issuing state before creating the new issuing CertificateVersion. This transition clears parent Certificate failure and revocation metadata so parent status constraints remain valid. CertificateVersion revocation metadata remains preserved. When that reissue succeeds, the parent Certificate becomes `ready`.
 
@@ -1037,8 +1049,9 @@ Rules:
 | `POST` | `/v1/sync/certificates` | Ensure a Certificate exists for criteria and start issuance when needed. |
 | `POST` | `/v1/sync/certificates/tls-material` | Return current TLS material as JSON for an exact criteria match using an Application token. |
 | `POST` | `/v1/sync/certificates/tls-archive` | Return current TLS material as a tar.gz archive for an exact criteria match using an Application token. |
-| `GET` | `/v1/certificates` | List certificate metadata with optional filters such as domain, Application, status, and expiry. |
+| `GET` | `/v1/certificates` | List certificate metadata with optional filters such as domain, Application, status, enablement, and expiry. |
 | `GET` | `/v1/certificates/{certificate_id}` | Return certificate metadata by ID for human/web-console workflows. |
+| `PATCH` | `/v1/certificates/{certificate_id}` | Enable or disable new lifecycle issuance for a Certificate. |
 | `GET` | `/v1/certificates/{certificate_id}/versions` | List CertificateVersion metadata for one certificate. |
 | `GET` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/events` | List operational issuance events for one CertificateVersion. |
 | `GET` | `/v1/certificates/{certificate_id}/versions/{certificate_version_id}/tls-archive` | Return TLS material for a specific downloadable CertificateVersion as a tar.gz archive. |
@@ -1757,6 +1770,10 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: token is not a User access token.
 - `404 Not Found`: certificate does not exist or is not visible to the User.
+
+#### PATCH /v1/certificates/{certificate_id}
+
+Updates the backend-owned Certificate enablement state. The JSON body is exactly `{ "enabled": boolean }`; empty bodies and unknown fields return `400 invalid_request`. Global admins and Users with `manager` access to the owning Application may call it. The operation is idempotent, returns updated Certificate metadata, changes `updated_at` only on a transition, and emits `certificate_enabled` or `certificate_disabled` only on a transition. It does not revoke or delete existing CertificateVersions.
 
 #### GET /v1/certificates/{certificate_id}/versions
 
@@ -3210,7 +3227,7 @@ Material/archive endpoints expose reconciliation state only as normal lookup res
 ## Auto Renewal Process
 
 1. Certhub must evaluate Certificates for renewal before expiry using the selected issuer's `renewal_window_seconds`.
-2. When the latest valid CertificateVersion enters the renewal window, Certhub must enqueue renewal automatically when the issuer is active, current Application domain scopes still cover every SAN, no issuing CertificateVersion exists, and replacement-overlap constraints allow it.
+2. When the latest valid CertificateVersion enters the renewal window, Certhub must enqueue renewal automatically when the Certificate is enabled, the issuer is active, current Application domain scopes still cover every SAN, no issuing CertificateVersion exists, and replacement-overlap constraints allow it.
 3. Auto renewal must be idempotent. For one Certificate, there must be at most one in-progress CertificateVersion with `status=issuing` at any time, including initial issuance, renewal, and key rotation.
 4. Renewal creates a higher-numbered CertificateVersion for the same Certificate identity. It does not create a new Certificate row.
 5. Every newly created CertificateVersion gets a fresh private key. Retrying the same in-progress issuing CertificateVersion reuses that version's already persisted private key.
@@ -3579,6 +3596,7 @@ Stable logical certificate identities.
 | Field | Type | Constraints | Description |
 | --- | --- | --- | --- |
 | `id` | UUID | Primary key | Stable Certificate ID. |
+| `enabled` | boolean | Required, default `true` | Whether new initial issuance, renewal, reissue, and key rotation may start. Independent from operational status and validity. |
 | `normalized_sans` | string array | Required, non-empty, sorted, deduplicated | Canonical SAN set. |
 | `key_type` | enum | Required, one of `key_type` enum values | Key type used for the private key. |
 | `issuer_id` | UUID | Required, foreign key to `issuers.id` | Issuer used. |
@@ -3954,6 +3972,8 @@ Required audit actions include:
 - `dns_provider_zone_refreshed`
 - `dns_zone_discovery_failed`
 - `certificate_created`
+- `certificate_enabled`
+- `certificate_disabled`
 - `certificate_issuance_started`
 - `certificate_issuance_succeeded`
 - `certificate_issuance_failed`
@@ -4073,6 +4093,7 @@ Rules:
 | `certificate_issuance_failed` | `409` | No | `7` | Stop polling and show failure metadata. `details.failure_code` may contain a stable underlying cause such as `dns_provider_not_found` or `dns_validation_failed`. |
 | `certificate_revoked` | `409` | No | `7` | Deprecated compatibility code for older clients; version revocation metadata is exposed on CertificateVersion responses. |
 | `certificate_no_active_version` | `409` | No | `7` | Stop polling current material and require a User `reissue` lifecycle action. |
+| `certificate_disabled` | `409` | No | `1` | Refresh Certificate metadata and keep lifecycle controls disabled until an authorized User re-enables it. |
 | `not_acceptable` | `406` | No | `2` | Request an accepted response media type. |
 | `renewal_overlap_exists` | `409` | No | `1` | Show lifecycle conflict and current valid versions. |
 | `renewal_not_due` | `409` | No | `1` | Manual renewal was requested before the active CertificateVersion entered the issuer renewal window. |

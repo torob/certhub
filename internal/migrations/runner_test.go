@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -15,25 +16,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
 	migrationfs "github.com/torob/certhub/migrations/postgres"
 )
 
-func TestLatestVersionFindsInitialSchemaBaseline(t *testing.T) {
+func TestLatestVersionFindsCertificateEnabledMigration(t *testing.T) {
 	latest, err := NewRunner(DefaultDir).LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != 1 {
+	if latest != 2 {
 		t.Fatalf("latest version = %d", latest)
 	}
 }
 
-func TestEmbeddedPostgresMigrationsContainSingleBaseline(t *testing.T) {
+func TestEmbeddedPostgresMigrationsAreOrdered(t *testing.T) {
 	matches, err := fs.Glob(migrationfs.FS, "*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 1 || matches[0] != "00001_initial_schema.sql" {
+	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql"}
+	if len(matches) != len(want) || matches[0] != want[0] || matches[1] != want[1] {
 		t.Fatalf("embedded migrations = %#v", matches)
 	}
 }
@@ -203,19 +206,67 @@ func TestValidationCatalogQueriesPinCurrentSchemaObjects(t *testing.T) {
 }
 
 func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
-	url := os.Getenv("CERTHUB_TEST_DATABASE_URL")
-	if url == "" {
+	databaseURL := os.Getenv("CERTHUB_TEST_DATABASE_URL")
+	if databaseURL == "" {
 		t.Skip("CERTHUB_TEST_DATABASE_URL is not set; skipping PostgreSQL migration integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	db, err := OpenDB(url)
+	adminDB, err := OpenDB(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer adminDB.Close()
+	databaseName := fmt.Sprintf("certhub_migration_upgrade_%d_%d", os.Getpid(), upgradeDatabaseSeq.Add(1))
+	if _, err := adminDB.ExecContext(ctx, "create database "+databaseName); err != nil {
+		t.Fatalf("create migration certification database: %v", err)
+	}
+	parsedURL, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedURL.Path = "/" + databaseName
+	db, err := OpenDB(parsedURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = db.Close()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = adminDB.ExecContext(cleanupCtx, `select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`, databaseName)
+		if _, err := adminDB.ExecContext(cleanupCtx, "drop database if exists "+databaseName); err != nil {
+			t.Errorf("drop migration certification database: %v", err)
+		}
+	}()
+
+	if err := withGoose(migrationfs.FS, func() error {
+		return goose.UpToContext(ctx, db, ".", 1)
+	}); err != nil {
+		t.Fatalf("apply released baseline: %v", err)
+	}
 
 	runner := NewRunner(DefaultDir)
+	before, err := runner.Status(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.CurrentVersion != 1 || before.LatestVersion != 2 || before.Pending != 1 || before.Compatible {
+		t.Fatalf("version 1 status = %#v", before)
+	}
+	var enabledColumns int
+	if err := db.QueryRowContext(ctx, `
+select count(*)
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'certificates'
+  and column_name = 'enabled'`).Scan(&enabledColumns); err != nil {
+		t.Fatal(err)
+	}
+	if enabledColumns != 0 {
+		t.Fatalf("version 1 enabled columns = %d", enabledColumns)
+	}
+
 	first, err := runner.Up(ctx, db)
 	if err != nil {
 		t.Fatal(err)
@@ -227,10 +278,26 @@ func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
 	if first.LatestVersion != second.CurrentVersion || second.Pending != 0 || !second.Compatible {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
+	if first.CurrentVersion != 2 || first.Pending != 0 || !first.Compatible {
+		t.Fatalf("upgraded status = %#v", first)
+	}
+	var nullable, columnDefault string
+	if err := db.QueryRowContext(ctx, `
+select is_nullable, column_default
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'certificates'
+  and column_name = 'enabled'`).Scan(&nullable, &columnDefault); err != nil {
+		t.Fatal(err)
+	}
+	if nullable != "NO" || !strings.Contains(columnDefault, "true") {
+		t.Fatalf("enabled column nullable=%q default=%q", nullable, columnDefault)
+	}
 }
 
 var migrationLockDriverSeq atomic.Uint64
 var validationDriverSeq atomic.Uint64
+var upgradeDatabaseSeq atomic.Uint64
 
 type migrationLockTestState struct {
 	mu              sync.Mutex
