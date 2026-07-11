@@ -236,6 +236,7 @@ If backend returns `domain_not_authorized`:
 - Set condition `AuthorizationFailed=True`.
 - Set phase `Failed`.
 - Do not retry aggressively.
+- Replay-safe Certhub and Kubernetes reads use configurable per-request retries (`CERTHUB_HTTP_RETRY_MAX_ATTEMPTS`, `CERTHUB_HTTP_RETRY_INITIAL_BACKOFF`, and `CERTHUB_HTTP_RETRY_MAX_BACKOFF`) defaulting to five attempts with 1s-to-8s jittered exponential backoff. Ambiguous mutations remain reconciliation-driven.
 
 If backend returns transient errors:
 

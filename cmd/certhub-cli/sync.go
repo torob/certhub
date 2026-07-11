@@ -59,6 +59,7 @@ func NewSyncRunner(cfg Config, plan []PlanItem) (*SyncRunner, error) {
 		cfg.Token,
 		certhubclient.WithUserAgent("certhub-cli"),
 		certhubclient.WithHTTPClient(&http.Client{Timeout: cfg.Sync.RequestTimeout}),
+		certhubclient.WithRetryPolicy(cfg.Sync.RetryPolicy()),
 	)
 	if err != nil {
 		return nil, err

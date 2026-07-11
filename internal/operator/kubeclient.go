@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 const (
@@ -36,6 +38,8 @@ type RESTKubeClient struct {
 	token            string
 	defaultNamespace string
 	httpClient       *http.Client
+	retry            netretry.Policy
+	client           netretry.Doer
 }
 
 func NewInClusterRESTKubeClient() (*RESTKubeClient, error) {
@@ -64,6 +68,7 @@ func NewInClusterRESTKubeClient() (*RESTKubeClient, error) {
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    caPool,
 		}}, Timeout: 30 * time.Second},
+		retry: netretry.DefaultPolicy(),
 	}, nil
 }
 
@@ -210,7 +215,7 @@ func (c *RESTKubeClient) WatchCertificateChanges(ctx context.Context, namespace 
 			if c.token != "" {
 				req.Header.Set("Authorization", "Bearer "+c.token)
 			}
-			resp, err := c.httpClient.Do(req)
+			resp, err := c.retryClient().Do(req)
 			if err != nil {
 				sleepWatchRetry(ctx)
 				continue
@@ -281,7 +286,7 @@ func (c *RESTKubeClient) doWithContentType(ctx context.Context, method, requestP
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.retryClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -301,6 +306,13 @@ func (c *RESTKubeClient) doWithContentType(ctx context.Context, method, requestP
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return fmt.Errorf("Kubernetes API %s %s failed: status=%d body=%s", method, requestPath, resp.StatusCode, Sanitize(string(data)))
+}
+
+func (c *RESTKubeClient) retryClient() netretry.Doer {
+	if c.client != nil {
+		return c.client
+	}
+	return netretry.NewClient(c.httpClient, c.retry)
 }
 
 func (c *RESTKubeClient) resolveNamespace(namespace string) string {

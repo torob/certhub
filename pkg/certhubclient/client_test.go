@@ -11,9 +11,36 @@ import (
 	"time"
 
 	certerrors "github.com/torob/certhub/pkg/errors"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 const validAppToken = ApplicationTokenPrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+func TestClientRetriesTransientStatusAndPreservesRequestID(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Header.Get("X-Request-ID") != "stable-request" {
+			t.Fatalf("request ID = %q", r.Header.Get("X-Request-ID"))
+		}
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"certificate": map[string]any{}})
+	}))
+	defer server.Close()
+	client, err := New(server.URL, validAppToken, WithHTTPClient(server.Client()), WithRetryPolicy(netretry.Policy{MaxAttempts: 5, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.EnsureCertificate(context.Background(), CertificateCriteria{Domains: []string{"example.com"}}, RequestOptions{RequestID: "stable-request"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d; want 3", attempts)
+	}
+}
 
 func TestValidateApplicationTokenRejectsUserTokens(t *testing.T) {
 	tests := []struct {

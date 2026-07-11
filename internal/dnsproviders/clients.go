@@ -5,13 +5,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 	"strings"
 
 	"github.com/torob/certhub/internal/storage"
 )
+
+type providerRequestError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+func (e providerRequestError) Error() string {
+	return fmt.Sprintf("DNS provider request failed with status %d", e.status)
+}
+
+func providerRetry(ctx context.Context, err error) (bool, time.Duration, error) {
+	var responseErr providerRequestError
+	if errors.As(err, &responseErr) && netretry.RetryableStatus(responseErr.status) {
+		return true, responseErr.retryAfter, err
+	}
+	return netretry.IsTransientForContext(ctx, err), 0, err
+}
 
 var (
 	ErrZoneDiscoveryFailed     = errors.New("dns zone discovery failed")

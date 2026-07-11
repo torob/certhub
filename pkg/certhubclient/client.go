@@ -15,6 +15,7 @@ import (
 
 	certerrors "github.com/torob/certhub/pkg/errors"
 	"github.com/torob/certhub/pkg/material"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 const (
@@ -84,7 +85,9 @@ type Client struct {
 	baseURL    *url.URL
 	token      string
 	httpClient *http.Client
+	doer       netretry.Doer
 	userAgent  string
+	retry      netretry.Policy
 }
 
 type Option func(*Client)
@@ -103,6 +106,10 @@ func WithUserAgent(userAgent string) Option {
 	}
 }
 
+func WithRetryPolicy(policy netretry.Policy) Option {
+	return func(c *Client) { c.retry = policy }
+}
+
 func New(baseURL, token string, opts ...Option) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
@@ -119,11 +126,13 @@ func New(baseURL, token string, opts ...Option) (*Client, error) {
 		token:      token,
 		httpClient: http.DefaultClient,
 		userAgent:  "certhub-go-client",
+		retry:      netretry.DefaultPolicy(),
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	c.httpClient = clientWithSafeRedirects(c.httpClient)
+	c.doer = netretry.NewClient(c.httpClient, c.retry, netretry.WithRetryableMethods(http.MethodPost))
 	return c, nil
 }
 
@@ -185,7 +194,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, opts
 	if err := enc.Encode(body); err != nil {
 		return ResponseMeta{}, fmt.Errorf("encode request body: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.endpoint(path), &payload)
+	req, err := http.NewRequestWithContext(ctx, method, c.endpoint(path), bytes.NewReader(payload.Bytes()))
 	if err != nil {
 		return ResponseMeta{}, fmt.Errorf("build request: %w", err)
 	}
@@ -201,8 +210,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, opts
 	if opts.IfNoneMatch != "" {
 		req.Header.Set("If-None-Match", opts.IfNoneMatch)
 	}
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doer.Do(req)
 	if err != nil {
 		return ResponseMeta{}, err
 	}

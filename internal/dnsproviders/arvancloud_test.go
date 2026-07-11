@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 func TestArvanCloudPresentAndCleanUpExactTXTValue(t *testing.T) {
@@ -93,7 +95,7 @@ func TestArvanCloudChallengeErrorsAreSanitized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewArvanCloudClient(server.Client())
+	client := NewArvanCloudClient(server.Client(), netretry.Policy{})
 	client.BaseURL = server.URL
 	err := client.Present(context.Background(), ArvanCloudCredentials{APIKey: apiKey}, DNS01ChallengeOperation{
 		ZoneName:   "example.com",

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/torob/certhub/pkg/netretry"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -39,6 +40,7 @@ type Config struct {
 	HTTPClient     *http.Client
 	TLSConfig      *tls.Config
 	ProxyTLSConfig *tls.Config
+	Retry          netretry.Policy
 }
 
 type Checker struct {
@@ -56,6 +58,10 @@ func NewChecker(cfg Config) (*Checker, error) {
 		resolverType = TypeSystem
 	}
 	metadata := map[string]any{"dns_propagation_resolver_type": resolverType}
+	policy := cfg.Retry
+	if policy == (netretry.Policy{}) {
+		policy = netretry.DefaultPolicy()
+	}
 	var r resolver
 	switch resolverType {
 	case TypeSystem:
@@ -80,7 +86,7 @@ func NewChecker(cfg Config) (*Checker, error) {
 		if client == nil {
 			client = directHTTPClient()
 		}
-		r = dohResolver{endpoint: cfg.Endpoint, client: client}
+		r = dohResolver{endpoint: cfg.Endpoint, client: netretry.NewClient(client, policy, netretry.WithRetryableMethods(http.MethodPost))}
 		metadata["dns_propagation_resolver_endpoint"] = cfg.Endpoint
 		if cfg.ProxyName != "" {
 			metadata["dns_propagation_resolver_proxy"] = cfg.ProxyName
@@ -106,7 +112,23 @@ func NewChecker(cfg Config) (*Checker, error) {
 	default:
 		return nil, fmt.Errorf("unsupported dns propagation resolver type %s", resolverType)
 	}
+	r = retryResolver{resolver: r, policy: policy}
 	return &Checker{resolver: r, metadata: metadata}, nil
+}
+
+type retryResolver struct {
+	resolver resolver
+	policy   netretry.Policy
+}
+
+func (r retryResolver) LookupTXT(ctx context.Context, recordName string) ([]string, error) {
+	var values []string
+	err := netretry.Do(ctx, r.policy, func() (bool, error) {
+		var err error
+		values, err = r.resolver.LookupTXT(ctx, recordName)
+		return netretry.IsTransientForContext(ctx, err), err
+	})
+	return values, err
 }
 
 func (c *Checker) TXTVisible(ctx context.Context, recordName, txtValue string) (bool, error) {
@@ -252,7 +274,7 @@ func (r wireResolver) queryTLS(ctx context.Context, msg []byte, id uint16) (dnsA
 
 type dohResolver struct {
 	endpoint string
-	client   *http.Client
+	client   netretry.Doer
 }
 
 func (r dohResolver) LookupTXT(ctx context.Context, recordName string) ([]string, error) {

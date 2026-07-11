@@ -565,15 +565,21 @@ func TestConfigAndTokenLoading(t *testing.T) {
 	}
 	cfg, err := LoadConfig(func(key string) string {
 		values := map[string]string{
-			"CERTHUB_URL":                    "https://certhub.example",
-			"CERTHUB_TOKEN_SECRET_NAMESPACE": "ops",
-			"CERTHUB_TOKEN_SECRET_NAME":      "app-token",
-			"CERTHUB_TOKEN_SECRET_KEY":       "token",
+			"CERTHUB_URL":                        "https://certhub.example",
+			"CERTHUB_TOKEN_SECRET_NAMESPACE":     "ops",
+			"CERTHUB_TOKEN_SECRET_NAME":          "app-token",
+			"CERTHUB_TOKEN_SECRET_KEY":           "token",
+			"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS":    "3",
+			"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "2s",
+			"CERTHUB_HTTP_RETRY_MAX_BACKOFF":     "6s",
 		}
 		return values[key]
 	})
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+	if cfg.RetryPolicy.MaxAttempts != 3 || cfg.RetryPolicy.InitialBackoff != 2*time.Second || cfg.RetryPolicy.MaxBackoff != 6*time.Second {
+		t.Fatalf("retry policy = %#v", cfg.RetryPolicy)
 	}
 	kube := newFakeKube()
 	kube.secrets["ops/app-token"] = &Secret{Data: map[string][]byte{"token": []byte("cth_app_v1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ")}}

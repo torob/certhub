@@ -12,8 +12,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	security "github.com/torob/certhub/internal/crypto"
+	"github.com/torob/certhub/pkg/netretry"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -104,6 +106,7 @@ type OutboundHTTPConfig struct {
 	Cloudflare string
 	ArvanCloud string
 	OIDCProxy  string
+	Retry      netretry.Policy
 }
 
 type ProxyConfig struct {
@@ -232,6 +235,13 @@ type rawOutboundHTTP struct {
 	ACME         rawProxyRef         `yaml:"acme"`
 	DNSProviders rawDNSProviders     `yaml:"dns_providers"`
 	OIDC         rawProxyRef         `yaml:"oidc"`
+	Retry        rawRetryPolicy      `yaml:"retry"`
+}
+
+type rawRetryPolicy struct {
+	MaxAttempts           *int `yaml:"max_attempts"`
+	InitialBackoffSeconds *int `yaml:"initial_backoff_seconds"`
+	MaxBackoffSeconds     *int `yaml:"max_backoff_seconds"`
 }
 
 type rawProxy struct {
@@ -340,7 +350,7 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 				"arvancloud": {Type: "system"},
 			},
 		},
-		OutboundHTTP: OutboundHTTPConfig{Proxies: map[string]ProxyConfig{}},
+		OutboundHTTP: OutboundHTTPConfig{Proxies: map[string]ProxyConfig{}, Retry: netretry.DefaultPolicy()},
 		Auth: AuthConfig{
 			Password:                  PasswordConfig{Enabled: true, TwoFARequired: true},
 			UserAccessTokenTTLSeconds: 300,
@@ -472,6 +482,18 @@ func normalize(raw rawConfig, path string, env func(string) (string, bool)) (*Co
 	cfg.OutboundHTTP.Cloudflare = raw.OutboundHTTP.DNSProviders.Cloudflare.Proxy
 	cfg.OutboundHTTP.ArvanCloud = raw.OutboundHTTP.DNSProviders.ArvanCloud.Proxy
 	cfg.OutboundHTTP.OIDCProxy = raw.OutboundHTTP.OIDC.Proxy
+	if raw.OutboundHTTP.Retry.MaxAttempts != nil {
+		cfg.OutboundHTTP.Retry.MaxAttempts = *raw.OutboundHTTP.Retry.MaxAttempts
+	}
+	if raw.OutboundHTTP.Retry.InitialBackoffSeconds != nil {
+		cfg.OutboundHTTP.Retry.InitialBackoff = time.Duration(*raw.OutboundHTTP.Retry.InitialBackoffSeconds) * time.Second
+	}
+	if raw.OutboundHTTP.Retry.MaxBackoffSeconds != nil {
+		cfg.OutboundHTTP.Retry.MaxBackoff = time.Duration(*raw.OutboundHTTP.Retry.MaxBackoffSeconds) * time.Second
+	}
+	if err := cfg.OutboundHTTP.Retry.Validate(); err != nil {
+		return nil, fieldError("outbound_http.retry", err.Error())
+	}
 	for field, ref := range map[string]string{
 		"outbound_http.acme.proxy":                     cfg.OutboundHTTP.ACMEProxy,
 		"outbound_http.dns_providers.cloudflare.proxy": cfg.OutboundHTTP.Cloudflare,

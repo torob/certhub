@@ -15,6 +15,7 @@ import (
 
 	"github.com/torob/certhub/pkg/certcriteria"
 	"github.com/torob/certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/netretry"
 
 	"go.yaml.in/yaml/v4"
 )
@@ -44,6 +45,9 @@ type SyncConfig struct {
 	RequestTimeout        time.Duration `yaml:"request_timeout"`
 	Force                 bool          `yaml:"force"`
 	FailFast              bool          `yaml:"fail_fast"`
+	RetryMaxAttempts      int           `yaml:"retry_max_attempts"`
+	RetryInitialBackoff   time.Duration `yaml:"retry_initial_backoff"`
+	RetryMaxBackoff       time.Duration `yaml:"retry_max_backoff"`
 }
 
 type SchedulerConfig struct {
@@ -119,6 +123,9 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	defaultSync(&cfg)
+	if err := cfg.Sync.RetryPolicy().Validate(); err != nil {
+		return Config{}, fmt.Errorf("sync retry configuration: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -169,6 +176,20 @@ func defaultSync(cfg *Config) {
 	if cfg.Sync.RequestTimeout == 0 {
 		cfg.Sync.RequestTimeout = 30 * time.Second
 	}
+	defaults := netretry.DefaultPolicy()
+	if cfg.Sync.RetryMaxAttempts == 0 {
+		cfg.Sync.RetryMaxAttempts = defaults.MaxAttempts
+	}
+	if cfg.Sync.RetryInitialBackoff == 0 {
+		cfg.Sync.RetryInitialBackoff = defaults.InitialBackoff
+	}
+	if cfg.Sync.RetryMaxBackoff == 0 {
+		cfg.Sync.RetryMaxBackoff = defaults.MaxBackoff
+	}
+}
+
+func (c SyncConfig) RetryPolicy() netretry.Policy {
+	return netretry.Policy{MaxAttempts: c.RetryMaxAttempts, InitialBackoff: c.RetryInitialBackoff, MaxBackoff: c.RetryMaxBackoff}
 }
 
 func (c SchedulerConfig) RunOnStartValue() bool {

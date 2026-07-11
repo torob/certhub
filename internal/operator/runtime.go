@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 type Runtime struct {
@@ -28,6 +30,8 @@ func NewInClusterRuntime(ctx context.Context, cfg Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	kube.retry = cfg.RetryPolicy
+	kube.client = netretry.NewClient(kube.httpClient, cfg.RetryPolicy)
 	if cfg.TokenNamespace == "" {
 		cfg.TokenNamespace = kube.DefaultNamespace()
 	}

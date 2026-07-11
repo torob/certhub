@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/torob/certhub/pkg/certhubclient"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 type Config struct {
@@ -24,6 +26,7 @@ type Config struct {
 	ResyncInterval     time.Duration
 	ReconcileBackoff   time.Duration
 	HTTPTimeout        time.Duration
+	RetryPolicy        netretry.Policy
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -42,6 +45,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		ResyncInterval:     6 * time.Hour,
 		ReconcileBackoff:   time.Minute,
 		HTTPTimeout:        30 * time.Second,
+		RetryPolicy:        netretry.DefaultPolicy(),
 	}
 	if cfg.TokenSecretKey == "" {
 		cfg.TokenSecretKey = "token"
@@ -85,6 +89,30 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			return Config{}, errors.New("CERTHUB_HTTP_TIMEOUT must be a duration of at least 1s")
 		}
 		cfg.HTTPTimeout = timeout
+	}
+	if value := strings.TrimSpace(getenv("CERTHUB_HTTP_RETRY_MAX_ATTEMPTS")); value != "" {
+		attempts, err := strconv.Atoi(value)
+		if err != nil {
+			return Config{}, errors.New("CERTHUB_HTTP_RETRY_MAX_ATTEMPTS must be an integer")
+		}
+		cfg.RetryPolicy.MaxAttempts = attempts
+	}
+	if value := strings.TrimSpace(getenv("CERTHUB_HTTP_RETRY_INITIAL_BACKOFF")); value != "" {
+		delay, err := time.ParseDuration(value)
+		if err != nil {
+			return Config{}, errors.New("CERTHUB_HTTP_RETRY_INITIAL_BACKOFF must be a duration")
+		}
+		cfg.RetryPolicy.InitialBackoff = delay
+	}
+	if value := strings.TrimSpace(getenv("CERTHUB_HTTP_RETRY_MAX_BACKOFF")); value != "" {
+		delay, err := time.ParseDuration(value)
+		if err != nil {
+			return Config{}, errors.New("CERTHUB_HTTP_RETRY_MAX_BACKOFF must be a duration")
+		}
+		cfg.RetryPolicy.MaxBackoff = delay
+	}
+	if err := cfg.RetryPolicy.Validate(); err != nil {
+		return Config{}, fmt.Errorf("operator HTTP retry configuration: %w", err)
 	}
 	return cfg, nil
 }

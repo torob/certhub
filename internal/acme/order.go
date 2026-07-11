@@ -10,7 +10,9 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/torob/certhub/pkg/netretry"
 	xacme "golang.org/x/crypto/acme"
 )
 
@@ -106,13 +108,18 @@ type OrderManager interface {
 
 type OrderClient struct {
 	HTTPClient *http.Client
+	Retry      netretry.Policy
 }
 
-func NewOrderClient(client *http.Client) *OrderClient {
+func NewOrderClient(client *http.Client, policies ...netretry.Policy) *OrderClient {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &OrderClient{HTTPClient: client}
+	policy := netretry.DefaultPolicy()
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	return &OrderClient{HTTPClient: client, Retry: policy}
 }
 
 func (c *OrderClient) CreateOrder(ctx context.Context, params CreateOrderParams) (Order, error) {
@@ -243,6 +250,13 @@ func (c *OrderClient) acmeClient(params OrderClientParams) (*xacme.Client, error
 		HTTPClient:   c.HTTPClient,
 		DirectoryURL: params.DirectoryURL,
 		UserAgent:    "certhub",
+		RetryBackoff: func(n int, _ *http.Request, resp *http.Response) time.Duration {
+			retryAfter := time.Duration(0)
+			if resp != nil {
+				retryAfter = netretry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now().UTC())
+			}
+			return netretry.Backoff(c.Retry, n, retryAfter)
+		},
 	}
 	if params.AccountURL != "" {
 		client.KID = xacme.KeyID(params.AccountURL)

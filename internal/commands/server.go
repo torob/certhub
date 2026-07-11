@@ -219,6 +219,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 		Config:          cfg.Auth,
 		Storage:         resources.Storage,
 		HTTPClient:      oidcHTTP,
+		RetryPolicy:     cfg.OutboundHTTP.Retry,
 	})
 	userService := users.NewService(users.ServiceConfig{
 		Repository:      userRepo,
@@ -235,12 +236,12 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 	issuerService := issuers.NewService(issuers.ServiceConfig{
 		Repository:       issuerRepo,
 		AuditRepository:  auditRepo,
-		AccountRegistrar: acmedomain.NewAccountClient(acmeHTTP),
+		AccountRegistrar: acmedomain.NewAccountClient(acmeHTTP, cfg.OutboundHTTP.Retry),
 		KeySet:           resources.KeySet,
 		Storage:          resources.Storage,
 	})
-	cloudflareClient := dnsproviders.NewCloudflareClient(cloudflareHTTP)
-	arvanCloudClient := dnsproviders.NewArvanCloudClient(arvanHTTP)
+	cloudflareClient := dnsproviders.NewCloudflareClient(cloudflareHTTP, cfg.OutboundHTTP.Retry)
+	arvanCloudClient := dnsproviders.NewArvanCloudClient(arvanHTTP, cfg.OutboundHTTP.Retry)
 	propagationResolvers, err := buildPropagationResolvers(cfg)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "dns propagation resolver validation failed: %s\n", security.RedactString(err.Error()))
@@ -319,7 +320,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 			Certificates:         certRepo,
 			Issuers:              issuerRepo,
 			DNSProviders:         dnsRepo,
-			OrderManager:         acmedomain.NewOrderClient(acmeHTTP),
+			OrderManager:         acmedomain.NewOrderClient(acmeHTTP, cfg.OutboundHTTP.Retry),
 			Cloudflare:           cloudflareClient,
 			ArvanCloud:           arvanCloudClient,
 			KeySet:               resources.KeySet,
@@ -426,6 +427,7 @@ func buildPropagationResolvers(cfg *config.Config) (map[dnsproviders.ProviderTyp
 			ProxyName:     resolverCfg.Proxy,
 			ProxyURL:      proxyURL,
 			HTTPClient:    httpClient,
+			Retry:         cfg.OutboundHTTP.Retry,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("%s propagation resolver: %w", providerType, err)
@@ -1415,7 +1417,7 @@ func (r ServerRunner) openBootstrapServices(ctx context.Context, configPath stri
 	issuerService := issuers.NewService(issuers.ServiceConfig{
 		Repository:       issuerRepo,
 		AuditRepository:  auditRepo,
-		AccountRegistrar: acmedomain.NewAccountClient(acmeHTTP),
+		AccountRegistrar: acmedomain.NewAccountClient(acmeHTTP, cfg.OutboundHTTP.Retry),
 		KeySet:           resources.KeySet,
 		Storage:          resources.Storage,
 	})
@@ -1424,8 +1426,8 @@ func (r ServerRunner) openBootstrapServices(ctx context.Context, configPath stri
 		AuditRepository: auditRepo,
 		KeySet:          resources.KeySet,
 		ZoneListers: dnsproviders.ZoneListerRegistry{
-			dnsproviders.ProviderTypeCloudflare: dnsproviders.NewCloudflareClient(cloudflareHTTP),
-			dnsproviders.ProviderTypeArvanCloud: dnsproviders.NewArvanCloudClient(arvanHTTP),
+			dnsproviders.ProviderTypeCloudflare: dnsproviders.NewCloudflareClient(cloudflareHTTP, cfg.OutboundHTTP.Retry),
+			dnsproviders.ProviderTypeArvanCloud: dnsproviders.NewArvanCloudClient(arvanHTTP, cfg.OutboundHTTP.Retry),
 		},
 		Storage: resources.Storage,
 	})

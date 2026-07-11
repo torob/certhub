@@ -4,7 +4,18 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 )
+
+func TestDefaultOutboundRetryPolicy(t *testing.T) {
+	cfg, err := normalize(rawConfig{Database: rawDatabase{URL: "postgres://user:pass@localhost/db"}, Encryption: rawEncryption{Key: validKey()}}, "test.yaml", func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OutboundHTTP.Retry.MaxAttempts != 5 || cfg.OutboundHTTP.Retry.InitialBackoff != time.Second || cfg.OutboundHTTP.Retry.MaxBackoff != 8*time.Second {
+		t.Fatalf("retry policy = %#v", cfg.OutboundHTTP.Retry)
+	}
+}
 
 func TestOutboundHTTPTransportIgnoresAmbientProxyWhenDirect(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://ambient.example:8080")

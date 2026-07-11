@@ -121,6 +121,9 @@ Configuration keys:
 | `outbound_http.dns_providers.cloudflare.proxy` | No | machine_name or empty string | Empty | Named proxy used for Cloudflare DNS API requests. Empty means direct. |
 | `outbound_http.dns_providers.arvancloud.proxy` | No | machine_name or empty string | Empty | Named proxy used for ArvanCloud DNS API requests. Empty means direct. |
 | `outbound_http.oidc.proxy` | No | machine_name or empty string | Empty | Named proxy used for OIDC discovery, authorization metadata, token exchange, and userinfo requests. Empty means direct. |
+| `outbound_http.retry.max_attempts` | No | integer 1-10 | `5` | Total attempts for replay-safe outbound network operations; `1` disables retries. |
+| `outbound_http.retry.initial_backoff_seconds` | No | positive integer | `1` | Initial retry backoff before jitter. |
+| `outbound_http.retry.max_backoff_seconds` | No | positive integer | `8` | Maximum generated retry backoff; must not be lower than the initial backoff. |
 | `auth.password.enabled` | No | boolean | `true` | Enables `POST /v1/auth/login` with User email and password. |
 | `auth.password.2fa_required` | No | boolean | `true` | Requires native Certhub 2FA for password login. Applies only to password auth, not OIDC. |
 | `auth.oidc.enabled` | No | boolean | `false` | Enables OIDC browser login endpoints. |

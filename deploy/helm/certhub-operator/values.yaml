@@ -18,6 +18,9 @@ certhub:
   resyncInterval: 6h
   reconcileBackoff: 1m
   httpTimeout: 30s
+  httpRetryMaxAttempts: 5
+  httpRetryInitialBackoff: 1s
+  httpRetryMaxBackoff: 8s
 
 metrics:
   service:

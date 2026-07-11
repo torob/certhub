@@ -45,6 +45,12 @@ spec:
               value: {{ .Values.certhub.reconcileBackoff | quote }}
             - name: CERTHUB_HTTP_TIMEOUT
               value: {{ default "30s" .Values.certhub.httpTimeout | quote }}
+            - name: CERTHUB_HTTP_RETRY_MAX_ATTEMPTS
+              value: {{ default 5 .Values.certhub.httpRetryMaxAttempts | quote }}
+            - name: CERTHUB_HTTP_RETRY_INITIAL_BACKOFF
+              value: {{ default "1s" .Values.certhub.httpRetryInitialBackoff | quote }}
+            - name: CERTHUB_HTTP_RETRY_MAX_BACKOFF
+              value: {{ default "8s" .Values.certhub.httpRetryMaxBackoff | quote }}
             - name: CERTHUB_ALLOWED_SECRET_NAMES
               value: {{ join "," .Values.managedSecretNames | quote }}
           ports:

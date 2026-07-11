@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 func TestCloudflarePresentAndCleanUpExactTXTValue(t *testing.T) {
@@ -88,6 +91,40 @@ func TestCloudflarePresentAndCleanUpExactTXTValue(t *testing.T) {
 	}
 }
 
+func TestCloudflarePresentVerifiesAmbiguousCreateBeforeRetry(t *testing.T) {
+	created := false
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []map[string]string{{"id": "zone-id", "name": "example.com"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/zone-id/dns_records":
+			result := []map[string]string{}
+			if created {
+				result = append(result, map[string]string{"id": "record-id", "type": "TXT", "name": "_acme-challenge.example.com", "content": "value"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": result})
+		case r.Method == http.MethodPost:
+			posts++
+			created = true
+			w.WriteHeader(http.StatusServiceUnavailable) // Simulate a committed mutation with a lost success response.
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	policy := netretry.Policy{MaxAttempts: 5, InitialBackoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+	client := NewCloudflareClient(server.Client(), policy)
+	client.BaseURL = server.URL
+	err := client.Present(context.Background(), CloudflareCredentials{APIToken: "token"}, DNS01ChallengeOperation{ZoneName: "example.com", RecordName: "_acme-challenge.example.com", TXTValue: "value", TTL: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 {
+		t.Fatalf("create requests = %d; want 1", posts)
+	}
+}
+
 func TestCloudflareChallengeErrorsAreSanitized(t *testing.T) {
 	const (
 		token    = "CF-TOKEN-CANARY"
@@ -99,7 +136,7 @@ func TestCloudflareChallengeErrorsAreSanitized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewCloudflareClient(server.Client())
+	client := NewCloudflareClient(server.Client(), netretry.Policy{})
 	client.BaseURL = server.URL
 	err := client.Present(context.Background(), CloudflareCredentials{APIToken: token}, DNS01ChallengeOperation{
 		ZoneName:   "example.com",

@@ -149,6 +149,9 @@ func TestLoadConfigAcceptsCustomRequestTimeout(t *testing.T) {
 url: https://certhub.example.com
 sync:
   request_timeout: 2s
+  retry_max_attempts: 3
+  retry_initial_backoff: 2s
+  retry_max_backoff: 6s
 domains:
   - api.example.com
 out_dir: /tmp/out
@@ -162,6 +165,9 @@ out_dir: /tmp/out
 	}
 	if cfg.Sync.RequestTimeout != 2*time.Second {
 		t.Fatalf("request timeout = %s; want 2s", cfg.Sync.RequestTimeout)
+	}
+	if policy := cfg.Sync.RetryPolicy(); policy.MaxAttempts != 3 || policy.InitialBackoff != 2*time.Second || policy.MaxBackoff != 6*time.Second {
+		t.Fatalf("retry policy = %#v", policy)
 	}
 }
 

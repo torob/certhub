@@ -109,6 +109,7 @@ Rules:
 - Top-level `sync` contains default sync behavior for every configured certificate.
 - `sync.per_certificate_timeout` defaults to `5m` and bounds each configured certificate entry's full sync workflow within a cycle.
 - `sync.request_timeout` defaults to `30s` and bounds each individual backend HTTP request attempt, including connection setup and response header wait.
+- `sync.retry_max_attempts`, `sync.retry_initial_backoff`, and `sync.retry_max_backoff` default to `5`, `1s`, and `8s`. Retries use jittered exponential backoff and honor `Retry-After`; `retry_max_attempts: 1` disables per-request retries.
 - Top-level `scheduler` contains scheduler behavior for `certhub-cli run` when `--once` is not set.
 - `scheduler.interval` is required for scheduler mode and must be positive. One-shot mode does not require a `scheduler` block.
 - `scheduler.jitter` is optional, defaults to `0`, and adds a random delay up to the configured duration before each scheduled cycle to avoid synchronized fleet traffic.

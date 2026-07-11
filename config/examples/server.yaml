@@ -8,6 +8,11 @@ http:
   trusted_proxy_cidrs: []
 self_certificate:
   sync_enabled: false
+outbound_http:
+  retry:
+    max_attempts: 5
+    initial_backoff_seconds: 1
+    max_backoff_seconds: 8
 auth:
   password:
     enabled: true

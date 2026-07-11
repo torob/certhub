@@ -75,7 +75,7 @@ func NewHTTPBackendFromConfig(ctx context.Context, kube KubernetesClient, cfg Co
 	if err != nil {
 		return nil, err
 	}
-	return certhubclient.New(cfg.CerthubURL, token, certhubclient.WithUserAgent("certhub-operator"), certhubclient.WithHTTPClient(BackendHTTPClient(cfg)))
+	return certhubclient.New(cfg.CerthubURL, token, certhubclient.WithUserAgent("certhub-operator"), certhubclient.WithHTTPClient(BackendHTTPClient(cfg)), certhubclient.WithRetryPolicy(cfg.RetryPolicy))
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (Result, error) {

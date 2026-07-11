@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 type CloudflareCredentials struct {
@@ -29,13 +31,19 @@ var (
 type CloudflareClient struct {
 	HTTPClient *http.Client
 	BaseURL    string
+	Retry      netretry.Policy
+	client     netretry.Doer
 }
 
-func NewCloudflareClient(client *http.Client) *CloudflareClient {
+func NewCloudflareClient(client *http.Client, policies ...netretry.Policy) *CloudflareClient {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &CloudflareClient{HTTPClient: client, BaseURL: "https://api.cloudflare.com/client/v4"}
+	policy := netretry.DefaultPolicy()
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	return &CloudflareClient{HTTPClient: client, BaseURL: "https://api.cloudflare.com/client/v4", Retry: policy, client: netretry.NewClient(client, policy)}
 }
 
 func (c *CloudflareClient) ListZones(ctx context.Context, raw json.RawMessage) ([]string, error) {
@@ -51,7 +59,7 @@ func (c *CloudflareClient) ListZones(ctx context.Context, raw json.RawMessage) (
 		return nil, ErrZoneDiscoveryFailed
 	}
 	req.Header.Set("Authorization", "Bearer "+creds.APIToken)
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
@@ -91,22 +99,26 @@ func (c *CloudflareClient) Present(ctx context.Context, creds CloudflareCredenti
 	if err != nil {
 		return ErrDNSChallengeOperation
 	}
-	records, err := c.cloudflareTXTRecords(ctx, creds, zoneID, normalized.RecordName)
-	if err != nil {
-		return ErrDNSChallengeOperation
-	}
-	for _, record := range records {
-		if record.Content == normalized.TXTValue {
-			return nil
-		}
-	}
 	body := map[string]any{
 		"type":    "TXT",
 		"name":    normalized.RecordName,
 		"content": normalized.TXTValue,
 		"ttl":     normalized.TTL,
 	}
-	if err := c.cloudflareRequest(ctx, creds, http.MethodPost, "/zones/"+url.PathEscape(zoneID)+"/dns_records", nil, body); err != nil {
+	err = netretry.DoWithRetryAfter(ctx, c.Retry, func() (bool, time.Duration, error) {
+		records, err := c.cloudflareTXTRecords(ctx, creds, zoneID, normalized.RecordName)
+		if err != nil {
+			return providerRetry(ctx, err)
+		}
+		for _, record := range records {
+			if record.Content == normalized.TXTValue {
+				return false, 0, nil
+			}
+		}
+		err = c.cloudflareRequest(ctx, creds, http.MethodPost, "/zones/"+url.PathEscape(zoneID)+"/dns_records", nil, body)
+		return providerRetry(ctx, err)
+	})
+	if err != nil {
 		return ErrDNSChallengeOperation
 	}
 	return nil
@@ -124,17 +136,23 @@ func (c *CloudflareClient) CleanUp(ctx context.Context, creds CloudflareCredenti
 	if err != nil {
 		return ErrDNSChallengeOperation
 	}
-	records, err := c.cloudflareTXTRecords(ctx, creds, zoneID, normalized.RecordName)
+	err = netretry.DoWithRetryAfter(ctx, c.Retry, func() (bool, time.Duration, error) {
+		records, err := c.cloudflareTXTRecords(ctx, creds, zoneID, normalized.RecordName)
+		if err != nil {
+			return providerRetry(ctx, err)
+		}
+		for _, record := range records {
+			if record.Content != normalized.TXTValue {
+				continue
+			}
+			if err := c.cloudflareRequest(ctx, creds, http.MethodDelete, "/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(record.ID), nil, nil); err != nil {
+				return providerRetry(ctx, err)
+			}
+		}
+		return false, 0, nil
+	})
 	if err != nil {
 		return ErrDNSChallengeOperation
-	}
-	for _, record := range records {
-		if record.Content != normalized.TXTValue {
-			continue
-		}
-		if err := c.cloudflareRequest(ctx, creds, http.MethodDelete, "/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(record.ID), nil, nil); err != nil {
-			return ErrDNSChallengeOperation
-		}
 	}
 	return nil
 }
@@ -197,13 +215,13 @@ func (c *CloudflareClient) cloudflareRequest(ctx context.Context, creds Cloudfla
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+creds.APIToken)
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("cloudflare request failed")
+		return providerRequestError{status: resp.StatusCode, retryAfter: netretry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now().UTC())}
 	}
 	if len(responseBody) == 0 || responseBody[0] == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDNSProviderResponseSize))

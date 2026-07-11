@@ -23,6 +23,7 @@ import (
 	security "github.com/torob/certhub/internal/crypto"
 	"github.com/torob/certhub/internal/storage"
 	"github.com/torob/certhub/internal/users"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 const (
@@ -102,6 +103,8 @@ type Service struct {
 	cfg       config.AuthConfig
 	tx        storage.Beginner
 	http      *http.Client
+	retry     netretry.Policy
+	client    netretry.Doer
 }
 
 type ServiceConfig struct {
@@ -112,6 +115,7 @@ type ServiceConfig struct {
 	Config          config.AuthConfig
 	Storage         storage.Beginner
 	HTTPClient      *http.Client
+	RetryPolicy     netretry.Policy
 }
 
 type AuditContext struct {
@@ -187,10 +191,12 @@ func NewService(cfg ServiceConfig, opts ...ServiceOption) *Service {
 		cfg:       cfg.Config,
 		tx:        cfg.Storage,
 		http:      cfg.HTTPClient,
+		retry:     cfg.RetryPolicy,
 	}
 	if s.http == nil {
 		s.http = http.DefaultClient
 	}
+	s.client = netretry.NewClient(s.http, s.retry)
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -1216,7 +1222,7 @@ func (s *Service) validateOIDCCode(ctx context.Context, code, codeVerifier, nonc
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := s.http.Do(req)
+	resp, err := s.client.Do(req) // Authorization codes are one-use; POST is not configured as replay-safe.
 	if err != nil {
 		return oidcClaims{}, ErrOIDCValidationFailed
 	}
@@ -1243,7 +1249,7 @@ func (s *Service) fetchOIDCDiscovery(ctx context.Context) (oidcDiscovery, error)
 		return oidcDiscovery{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := s.http.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return oidcDiscovery{}, ErrOIDCValidationFailed
 	}
@@ -1324,7 +1330,7 @@ func (s *Service) fetchRS256Key(ctx context.Context, jwksURI, keyID string) (*rs
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := s.http.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, ErrOIDCValidationFailed
 	}

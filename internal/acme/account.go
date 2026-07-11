@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/torob/certhub/pkg/netretry"
 	xacme "golang.org/x/crypto/acme"
 )
 
@@ -36,13 +38,18 @@ type AccountRegistrar interface {
 
 type AccountClient struct {
 	HTTPClient *http.Client
+	Retry      netretry.Policy
 }
 
-func NewAccountClient(client *http.Client) *AccountClient {
+func NewAccountClient(client *http.Client, policies ...netretry.Policy) *AccountClient {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &AccountClient{HTTPClient: client}
+	policy := netretry.DefaultPolicy()
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	return &AccountClient{HTTPClient: client, Retry: policy}
 }
 
 func (c *AccountClient) RegisterOrReuseAccount(ctx context.Context, params AccountRegistrationParams) (AccountRegistration, error) {
@@ -61,6 +68,13 @@ func (c *AccountClient) RegisterOrReuseAccount(ctx context.Context, params Accou
 		HTTPClient:   c.HTTPClient,
 		DirectoryURL: params.DirectoryURL,
 		UserAgent:    "certhub",
+		RetryBackoff: func(n int, _ *http.Request, resp *http.Response) time.Duration {
+			retryAfter := time.Duration(0)
+			if resp != nil {
+				retryAfter = netretry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now().UTC())
+			}
+			return netretry.Backoff(c.Retry, n, retryAfter)
+		},
 	}
 	account, err := client.Register(ctx, &xacme.Account{Contact: []string{"mailto:" + strings.TrimSpace(params.Email)}}, xacme.AcceptTOS)
 	if err != nil {

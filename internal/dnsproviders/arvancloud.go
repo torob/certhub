@@ -3,13 +3,14 @@ package dnsproviders
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/pkg/netretry"
 )
 
 type ArvanCloudCredentials struct {
@@ -29,13 +30,19 @@ var (
 type ArvanCloudClient struct {
 	HTTPClient *http.Client
 	BaseURL    string
+	Retry      netretry.Policy
+	client     netretry.Doer
 }
 
-func NewArvanCloudClient(client *http.Client) *ArvanCloudClient {
+func NewArvanCloudClient(client *http.Client, policies ...netretry.Policy) *ArvanCloudClient {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &ArvanCloudClient{HTTPClient: client, BaseURL: "https://napi.arvancloud.ir/cdn/4.0"}
+	policy := netretry.DefaultPolicy()
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	return &ArvanCloudClient{HTTPClient: client, BaseURL: "https://napi.arvancloud.ir/cdn/4.0", Retry: policy, client: netretry.NewClient(client, policy)}
 }
 
 func (c *ArvanCloudClient) ListZones(ctx context.Context, raw json.RawMessage) ([]string, error) {
@@ -51,7 +58,7 @@ func (c *ArvanCloudClient) ListZones(ctx context.Context, raw json.RawMessage) (
 		return nil, ErrZoneDiscoveryFailed
 	}
 	req.Header.Set("Authorization", creds.APIKey)
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
@@ -91,16 +98,7 @@ func (c *ArvanCloudClient) Present(ctx context.Context, creds ArvanCloudCredenti
 	if c == nil || c.HTTPClient == nil {
 		return ErrDNSProviderUnavailable
 	}
-	records, err := c.arvanCloudTXTRecords(ctx, creds, normalized.ZoneName)
-	if err != nil {
-		return ErrDNSChallengeOperation
-	}
 	relativeName := relativeTXTRecordName(normalized.RecordName, normalized.ZoneName)
-	for _, record := range records {
-		if normalizeArvanRecordName(record.Name) == relativeName && record.Text == normalized.TXTValue {
-			return nil
-		}
-	}
 	body := map[string]any{
 		"type": "txt",
 		"name": relativeName,
@@ -109,7 +107,20 @@ func (c *ArvanCloudClient) Present(ctx context.Context, creds ArvanCloudCredenti
 		},
 		"ttl": normalized.TTL,
 	}
-	if err := c.arvanCloudRequest(ctx, creds, http.MethodPost, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records", body, nil); err != nil {
+	err = netretry.DoWithRetryAfter(ctx, c.Retry, func() (bool, time.Duration, error) {
+		records, err := c.arvanCloudTXTRecords(ctx, creds, normalized.ZoneName)
+		if err != nil {
+			return providerRetry(ctx, err)
+		}
+		for _, record := range records {
+			if normalizeArvanRecordName(record.Name) == relativeName && record.Text == normalized.TXTValue {
+				return false, 0, nil
+			}
+		}
+		err = c.arvanCloudRequest(ctx, creds, http.MethodPost, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records", body, nil)
+		return providerRetry(ctx, err)
+	})
+	if err != nil {
 		return ErrDNSChallengeOperation
 	}
 	return nil
@@ -123,18 +134,24 @@ func (c *ArvanCloudClient) CleanUp(ctx context.Context, creds ArvanCloudCredenti
 	if c == nil || c.HTTPClient == nil {
 		return ErrDNSProviderUnavailable
 	}
-	records, err := c.arvanCloudTXTRecords(ctx, creds, normalized.ZoneName)
+	relativeName := relativeTXTRecordName(normalized.RecordName, normalized.ZoneName)
+	err = netretry.DoWithRetryAfter(ctx, c.Retry, func() (bool, time.Duration, error) {
+		records, err := c.arvanCloudTXTRecords(ctx, creds, normalized.ZoneName)
+		if err != nil {
+			return providerRetry(ctx, err)
+		}
+		for _, record := range records {
+			if normalizeArvanRecordName(record.Name) != relativeName || record.Text != normalized.TXTValue {
+				continue
+			}
+			if err := c.arvanCloudRequest(ctx, creds, http.MethodDelete, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records/"+url.PathEscape(record.ID), nil, nil); err != nil {
+				return providerRetry(ctx, err)
+			}
+		}
+		return false, 0, nil
+	})
 	if err != nil {
 		return ErrDNSChallengeOperation
-	}
-	relativeName := relativeTXTRecordName(normalized.RecordName, normalized.ZoneName)
-	for _, record := range records {
-		if normalizeArvanRecordName(record.Name) != relativeName || record.Text != normalized.TXTValue {
-			continue
-		}
-		if err := c.arvanCloudRequest(ctx, creds, http.MethodDelete, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records/"+url.PathEscape(record.ID), nil, nil); err != nil {
-			return ErrDNSChallengeOperation
-		}
 	}
 	return nil
 }
@@ -216,13 +233,13 @@ func (c *ArvanCloudClient) arvanCloudRequest(ctx context.Context, creds ArvanClo
 		return err
 	}
 	req.Header.Set("Authorization", creds.APIKey)
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("arvancloud request failed")
+		return providerRequestError{status: resp.StatusCode, retryAfter: netretry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now().UTC())}
 	}
 	if responseBody == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDNSProviderResponseSize))
