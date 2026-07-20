@@ -20,12 +20,12 @@ import (
 	migrationfs "github.com/torob/certhub/migrations/postgres"
 )
 
-func TestLatestVersionFindsAuditIndependentHardDeleteMigration(t *testing.T) {
+func TestLatestVersionFindsApplicationHardDeleteMigration(t *testing.T) {
 	latest, err := NewRunner(DefaultDir).LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != 4 {
+	if latest != 5 {
 		t.Fatalf("latest version = %d", latest)
 	}
 }
@@ -35,7 +35,7 @@ func TestEmbeddedPostgresMigrationsAreOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql", "00004_audit_independence_and_hard_delete.sql"}
+	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql", "00004_audit_independence_and_hard_delete.sql", "00005_application_hard_delete.sql"}
 	if len(matches) != len(want) {
 		t.Fatalf("embedded migrations = %#v", matches)
 	}
@@ -256,7 +256,7 @@ func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.CurrentVersion != 1 || before.LatestVersion != 4 || before.Pending != 3 || before.Compatible {
+	if before.CurrentVersion != 1 || before.LatestVersion != 5 || before.Pending != 4 || before.Compatible {
 		t.Fatalf("version 1 status = %#v", before)
 	}
 	var enabledColumns int
@@ -320,7 +320,7 @@ insert into audit_events (
 	if first.LatestVersion != second.CurrentVersion || second.Pending != 0 || !second.Compatible {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
-	if first.CurrentVersion != 4 || first.Pending != 0 || !first.Compatible {
+	if first.CurrentVersion != 5 || first.Pending != 0 || !first.Compatible {
 		t.Fatalf("upgraded status = %#v", first)
 	}
 	var nullable, columnDefault string

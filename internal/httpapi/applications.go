@@ -119,6 +119,8 @@ func (s *Server) serveApplications(w http.ResponseWriter, r *http.Request, reqct
 		return s.handleGetApplication(w, r, reqctx, applicationID)
 	case len(parts) == 1 && r.Method == http.MethodPatch:
 		return s.handlePatchApplication(w, r, reqctx, applicationID)
+	case len(parts) == 1 && r.Method == http.MethodDelete:
+		return s.handleDeleteApplication(w, r, reqctx, applicationID)
 	case len(parts) == 2 && parts[1] == "tokens" && r.Method == http.MethodGet:
 		return s.handleListApplicationTokens(w, r, reqctx, applicationID)
 	case len(parts) == 2 && parts[1] == "tokens" && r.Method == http.MethodPost:
@@ -230,6 +232,19 @@ func (s *Server) handlePatchApplication(w http.ResponseWriter, r *http.Request, 
 	noStoreHeaders(w.Header())
 	writeJSON(w, http.StatusOK, map[string]any{"application": serializeApplication(app)})
 	return http.StatusOK, ""
+}
+
+func (s *Server) handleDeleteApplication(w http.ResponseWriter, r *http.Request, reqctx RequestContext, applicationID string) (int, string) {
+	current, status, code, ok := s.authenticateUser(w, r)
+	if !ok {
+		return status, code
+	}
+	if err := s.apps.DeleteApplication(r.Context(), applicationActor(current), applicationID, applicationAuditContext(reqctx)); err != nil {
+		return writeApplicationError(w, err)
+	}
+	noStoreHeaders(w.Header())
+	w.WriteHeader(http.StatusNoContent)
+	return http.StatusNoContent, ""
 }
 
 func (s *Server) handleListApplicationTokens(w http.ResponseWriter, r *http.Request, _ RequestContext, applicationID string) (int, string) {
@@ -485,6 +500,9 @@ func writeApplicationError(w http.ResponseWriter, err error) (int, string) {
 	code := "internal_error"
 	message := "Internal server error."
 	retryAfter := 0
+	details := map[string]any{}
+	var busy appdomain.ApplicationBusyError
+	var activeCertificates appdomain.ApplicationHasActiveCertificatesError
 	switch {
 	case errors.Is(err, appdomain.ErrApplicationServiceUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "service_unavailable", "Backend is not ready."
@@ -504,10 +522,20 @@ func writeApplicationError(w http.ResponseWriter, err error) (int, string) {
 	case errors.Is(err, appdomain.ErrSystemManagedResource):
 		status, code, message = http.StatusConflict, "system_managed_resource", "Resource is owned by backend process configuration."
 		retryAfter = 1
+	case errors.As(err, &busy):
+		status, code, message = http.StatusConflict, "application_busy", "Application has active certificate work or DNS challenges that are not cleaned."
+		details = map[string]any{
+			"active_jobs":            busy.ActiveJobs,
+			"issuing_versions":       busy.IssuingVersions,
+			"unclean_dns_challenges": busy.UncleanChallenges,
+		}
+	case errors.As(err, &activeCertificates):
+		status, code, message = http.StatusConflict, "application_has_active_certificates", "Application has certificates with currently usable active material."
+		details = map[string]any{"active_certificates": activeCertificates.Count}
 	case errors.Is(err, appdomain.ErrInvalidRequest):
 		status, code, message = http.StatusBadRequest, "invalid_request", "Request body or query parameters are invalid."
 	}
-	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: map[string]any{}})
+	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: details})
 }
 
 func writeAuditError(w http.ResponseWriter, err error) (int, string) {

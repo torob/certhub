@@ -59,6 +59,7 @@ const expectedOperations = new Set([
   'POST /v1/applications',
   'GET /v1/applications/{application_id}',
   'PATCH /v1/applications/{application_id}',
+  'DELETE /v1/applications/{application_id}',
   'POST /v1/applications/{application_id}/certificates',
   'GET /v1/applications/{application_id}/tokens',
   'POST /v1/applications/{application_id}/tokens',

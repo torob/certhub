@@ -24,16 +24,36 @@ const (
 )
 
 var (
-	ErrApplicationServiceUnavailable = errors.New("application service unavailable")
-	ErrInvalidToken                  = errors.New("invalid token")
-	ErrApplicationTokenRequired      = errors.New("application token required")
-	ErrSourceIPDenied                = errors.New("application source ip denied")
-	ErrForbidden                     = errors.New("forbidden")
-	ErrNotFound                      = errors.New("not found")
-	ErrConflict                      = errors.New("conflict")
-	ErrInvalidRequest                = errors.New("invalid request")
-	ErrSystemManagedResource         = errors.New("system managed resource")
+	ErrApplicationServiceUnavailable    = errors.New("application service unavailable")
+	ErrInvalidToken                     = errors.New("invalid token")
+	ErrApplicationTokenRequired         = errors.New("application token required")
+	ErrSourceIPDenied                   = errors.New("application source ip denied")
+	ErrForbidden                        = errors.New("forbidden")
+	ErrNotFound                         = errors.New("not found")
+	ErrConflict                         = errors.New("conflict")
+	ErrInvalidRequest                   = errors.New("invalid request")
+	ErrSystemManagedResource            = errors.New("system managed resource")
+	ErrApplicationBusy                  = errors.New("application has active work or unclean DNS challenges")
+	ErrApplicationHasActiveCertificates = errors.New("application has active usable certificates")
 )
+
+type ApplicationBusyError struct {
+	ActiveJobs        int64
+	IssuingVersions   int64
+	UncleanChallenges int64
+}
+
+func (e ApplicationBusyError) Error() string { return ErrApplicationBusy.Error() }
+func (e ApplicationBusyError) Unwrap() error { return ErrApplicationBusy }
+
+type ApplicationHasActiveCertificatesError struct{ Count int64 }
+
+func (e ApplicationHasActiveCertificatesError) Error() string {
+	return ErrApplicationHasActiveCertificates.Error()
+}
+func (e ApplicationHasActiveCertificatesError) Unwrap() error {
+	return ErrApplicationHasActiveCertificates
+}
 
 type Store interface {
 	Create(context.Context, CreateApplicationParams) (Application, error)
@@ -60,6 +80,7 @@ type Store interface {
 	CountGrants(context.Context, string, storage.ListOptions) (int64, error)
 	GetGrant(context.Context, string, string) (UserGrant, error)
 	DeleteGrant(context.Context, string, string) (bool, error)
+	DeleteApplication(context.Context, string) (DeleteApplicationResult, error)
 }
 
 type UserReader interface {
@@ -293,6 +314,31 @@ func (s *Service) UpdateApplication(ctx context.Context, actor Actor, applicatio
 		return err
 	})
 	return result, err
+}
+
+func (s *Service) DeleteApplication(ctx context.Context, actor Actor, applicationID string, auditCtx AuditContext) error {
+	return s.withWriteTx(ctx, func(txsvc *Service) error {
+		if err := txsvc.ready(); err != nil {
+			return err
+		}
+		if !actor.admin() {
+			return ErrForbidden
+		}
+		deleted, err := txsvc.repo.DeleteApplication(ctx, applicationID)
+		if err != nil {
+			return classifyWriteError(err)
+		}
+		return txsvc.auditApplicationEvent(ctx, actor.ID, "application_deleted", "application", &deleted.Application.ID, deleted.Application.ID, auditCtx, map[string]any{
+			"application_id":     deleted.Application.ID,
+			"name":               deleted.Application.Name,
+			"display_name":       deleted.Application.DisplayName,
+			"status":             string(deleted.Application.Status),
+			"domain_scope_count": deleted.DomainScopeCount,
+			"token_count":        deleted.TokenCount,
+			"user_grant_count":   deleted.UserGrantCount,
+			"certificate_count":  deleted.CertificateCount,
+		})
+	})
 }
 
 func (s *Service) updateApplication(ctx context.Context, actor Actor, applicationID string, params UpdateApplicationParams, auditCtx AuditContext) (ApplicationWithRole, error) {
@@ -881,6 +927,11 @@ func classifyReadError(err error) error {
 func classifyWriteError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ErrSystemManagedResource) ||
+		errors.Is(err, ErrApplicationBusy) ||
+		errors.Is(err, ErrApplicationHasActiveCertificates) {
+		return err
 	}
 	if errors.Is(err, storage.ErrNoRows) {
 		return ErrNotFound

@@ -217,6 +217,115 @@ func TestDomainScopeCoverageRequiresExactAndWildcardScopesIndependently(t *testi
 	}
 }
 
+func TestDeleteApplicationAdminDeletesAndAuditsIdentityAndCounts(t *testing.T) {
+	now := time.Now().UTC()
+	app := Application{
+		ID:          "22345678-1234-4234-9234-123456789abc",
+		Name:        "api_app",
+		DisplayName: "API App",
+		Status:      StatusDisabled,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	store := &serviceFakeStore{deleteResult: DeleteApplicationResult{
+		Application:      app,
+		DomainScopeCount: 2,
+		TokenCount:       3,
+		UserGrantCount:   4,
+		CertificateCount: 5,
+	}}
+	auditRepo := &serviceFakeAudit{}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: auditRepo,
+		KeySet:          serviceTestKeySet(t),
+		Config:          serviceTokenConfig(),
+	})
+	auditCtx := AuditContext{CorrelationID: "req-delete", SourceIP: "203.0.113.10"}
+	err := service.DeleteApplication(context.Background(), Actor{
+		ID:         "12345678-1234-4234-9234-123456789abc",
+		GlobalRole: users.GlobalRoleAdmin,
+	}, app.ID, auditCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.deletedAppID != app.ID {
+		t.Fatalf("deleted application = %q", store.deletedAppID)
+	}
+	if len(auditRepo.events) != 1 {
+		t.Fatalf("audit events = %#v", auditRepo.events)
+	}
+	event := auditRepo.events[0]
+	if event.Action != "application_deleted" || event.TargetID == nil || *event.TargetID != app.ID ||
+		event.ScopeApplicationID == nil || *event.ScopeApplicationID != app.ID {
+		t.Fatalf("audit event = %#v", event)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["name"] != app.Name || metadata["display_name"] != app.DisplayName ||
+		metadata["domain_scope_count"] != float64(2) || metadata["certificate_count"] != float64(5) {
+		t.Fatalf("audit metadata = %#v", metadata)
+	}
+}
+
+func TestDeleteApplicationRequiresGlobalAdmin(t *testing.T) {
+	store := &serviceFakeStore{}
+	auditRepo := &serviceFakeAudit{}
+	service := NewService(ServiceConfig{
+		Repository:      store,
+		AuditRepository: auditRepo,
+		KeySet:          serviceTestKeySet(t),
+		Config:          serviceTokenConfig(),
+	})
+	err := service.DeleteApplication(context.Background(), Actor{
+		ID:         "12345678-1234-4234-9234-123456789abc",
+		GlobalRole: users.GlobalRoleUser,
+	}, "22345678-1234-4234-9234-123456789abc", AuditContext{})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v", err)
+	}
+	if store.deletedAppID != "" || len(auditRepo.events) != 0 {
+		t.Fatalf("delete=%q audit=%#v", store.deletedAppID, auditRepo.events)
+	}
+}
+
+func TestDeleteApplicationPreservesDedicatedConflictsWithoutAudit(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "reserved", err: ErrSystemManagedResource, want: ErrSystemManagedResource},
+		{name: "busy", err: ApplicationBusyError{ActiveJobs: 1, IssuingVersions: 2, UncleanChallenges: 3}, want: ErrApplicationBusy},
+		{name: "active certificates", err: ApplicationHasActiveCertificatesError{Count: 2}, want: ErrApplicationHasActiveCertificates},
+		{name: "missing", err: storage.ErrNoRows, want: ErrNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &serviceFakeStore{deleteErr: tc.err}
+			auditRepo := &serviceFakeAudit{}
+			service := NewService(ServiceConfig{
+				Repository:      store,
+				AuditRepository: auditRepo,
+				KeySet:          serviceTestKeySet(t),
+				Config:          serviceTokenConfig(),
+			})
+			err := service.DeleteApplication(context.Background(), Actor{
+				ID:         "12345678-1234-4234-9234-123456789abc",
+				GlobalRole: users.GlobalRoleAdmin,
+			}, "22345678-1234-4234-9234-123456789abc", AuditContext{})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v; want %v", err, tc.want)
+			}
+			if len(auditRepo.events) != 0 {
+				t.Fatalf("audit events = %#v", auditRepo.events)
+			}
+		})
+	}
+}
+
 type serviceFakeStore struct {
 	application     Application
 	tokenIdentity   TokenIdentity
@@ -225,6 +334,9 @@ type serviceFakeStore struct {
 	createdToken    CreateTokenParams
 	rotatedToken    RotateTokenParams
 	accessibleAppID []string
+	deleteResult    DeleteApplicationResult
+	deleteErr       error
+	deletedAppID    string
 }
 
 func (f *serviceFakeStore) Create(context.Context, CreateApplicationParams) (Application, error) {
@@ -349,11 +461,26 @@ func (f *serviceFakeStore) DeleteGrant(context.Context, string, string) (bool, e
 	return false, errors.New("not implemented")
 }
 
+func (f *serviceFakeStore) DeleteApplication(_ context.Context, applicationID string) (DeleteApplicationResult, error) {
+	f.deletedAppID = applicationID
+	if f.deleteErr != nil {
+		return DeleteApplicationResult{}, f.deleteErr
+	}
+	if f.deleteResult.Application.ID != "" {
+		return f.deleteResult, nil
+	}
+	return DeleteApplicationResult{Application: f.application}, nil
+}
+
 type serviceFakeAudit struct {
 	events []audit.AppendEventParams
+	err    error
 }
 
 func (f *serviceFakeAudit) Append(_ context.Context, params audit.AppendEventParams) (audit.Event, error) {
+	if f.err != nil {
+		return audit.Event{}, f.err
+	}
 	f.events = append(f.events, params)
 	return audit.Event{}, nil
 }

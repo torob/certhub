@@ -879,6 +879,10 @@ func (s *certificateHTTPAppStore) DeleteGrant(context.Context, string, string) (
 	return false, errors.New("not implemented")
 }
 
+func (s *certificateHTTPAppStore) DeleteApplication(context.Context, string) (appdomain.DeleteApplicationResult, error) {
+	return appdomain.DeleteApplicationResult{}, errors.New("not implemented")
+}
+
 type certificateHTTPIssuerStore struct {
 	issuer issuerdomain.Issuer
 }

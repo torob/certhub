@@ -1869,6 +1869,31 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Applications]
+      operationId: deleteApplication
+      summary: Permanently delete an Application and all subordinate data.
+      description: Global administrators only. System Applications, Applications with active certificate work, and Applications with currently usable certificate material cannot be deleted.
+      security:
+        - UserBearerAuth: []
+      responses:
+        '204':
+          description: Application and subordinate data permanently deleted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+            Pragma:
+              $ref: '#/components/headers/PragmaNoCache'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /v1/applications/{application_id}/certificates:
     parameters:
@@ -3506,6 +3531,7 @@ components:
         - password_2fa_disabled
         - application_created
         - application_updated
+        - application_deleted
         - application_token_created
         - application_token_rotated
         - application_token_revoked
@@ -3575,6 +3601,8 @@ components:
         - renewal_overlap_exists
         - renewal_not_due
         - system_managed_resource
+        - application_busy
+        - application_has_active_certificates
         - conflict
         - issuer_not_configured
         - service_unavailable
@@ -3630,6 +3658,8 @@ components:
         - $ref: '#/components/schemas/CertificateIssuanceFailedDetails'
         - $ref: '#/components/schemas/CertificateRevokedDetails'
         - $ref: '#/components/schemas/RenewalOverlapDetails'
+        - $ref: '#/components/schemas/ApplicationBusyDetails'
+        - $ref: '#/components/schemas/ApplicationActiveCertificatesDetails'
         - $ref: '#/components/schemas/DNSProviderZoneConflictDetails'
         - $ref: '#/components/schemas/ReadinessErrorDetails'
     EmptyErrorDetails:
@@ -3739,6 +3769,28 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CertificateVersionMetadata'
+    ApplicationBusyDetails:
+      type: object
+      additionalProperties: false
+      required: [active_jobs, issuing_versions, unclean_dns_challenges]
+      properties:
+        active_jobs:
+          type: integer
+          minimum: 0
+        issuing_versions:
+          type: integer
+          minimum: 0
+        unclean_dns_challenges:
+          type: integer
+          minimum: 0
+    ApplicationActiveCertificatesDetails:
+      type: object
+      additionalProperties: false
+      required: [active_certificates]
+      properties:
+        active_certificates:
+          type: integer
+          minimum: 1
     DNSProviderZoneConflictDetails:
       type: object
       additionalProperties: false

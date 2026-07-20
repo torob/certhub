@@ -162,6 +162,14 @@ type UpsertGrantParams struct {
 	CreatedByUserID *string
 }
 
+type DeleteApplicationResult struct {
+	Application      Application
+	DomainScopeCount int64
+	TokenCount       int64
+	UserGrantCount   int64
+	CertificateCount int64
+}
+
 func (r Repository) Create(ctx context.Context, params CreateApplicationParams) (Application, error) {
 	if r.db == nil {
 		return Application{}, errors.New("applications repository storage is required")
@@ -236,6 +244,124 @@ func (r Repository) GetByName(ctx context.Context, name string) (Application, er
 		return Application{}, err
 	}
 	return r.getWhere(ctx, "a.name = $1", name)
+}
+
+func (r Repository) DeleteApplication(ctx context.Context, applicationID string) (DeleteApplicationResult, error) {
+	if err := storage.ValidateUUID(applicationID, "application_id"); err != nil {
+		return DeleteApplicationResult{}, err
+	}
+	app, err := scanApplication(r.db.QueryRow(ctx, `
+select `+applicationSelectColumnsSQL()+`
+from applications a
+where a.id = $1
+for update`, applicationID))
+	if err != nil {
+		return DeleteApplicationResult{}, fmt.Errorf("lock application for deletion: %w", err)
+	}
+	if app.SystemKind != nil && *app.SystemKind == SystemKindCerthubServer {
+		return DeleteApplicationResult{}, ErrSystemManagedResource
+	}
+
+	rows, err := r.db.Query(ctx, `
+select id
+from certificates
+where application_id = $1
+for update`, applicationID)
+	if err != nil {
+		return DeleteApplicationResult{}, fmt.Errorf("lock application certificates for deletion: %w", err)
+	}
+	for rows.Next() {
+		var certificateID string
+		if err := rows.Scan(&certificateID); err != nil {
+			rows.Close()
+			return DeleteApplicationResult{}, fmt.Errorf("lock application certificates for deletion: %w", err)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return DeleteApplicationResult{}, fmt.Errorf("lock application certificates for deletion: %w", err)
+	}
+
+	var activeJobs, issuingVersions, uncleanChallenges, activeCertificates int64
+	var domainScopes, tokens, userGrants, certificates int64
+	if err := r.db.QueryRow(ctx, `
+select
+    (select count(*)
+       from certificate_issuance_jobs j
+       join certificates c on c.id = j.certificate_id
+      where c.application_id = $1
+        and j.status in ('pending', 'running')),
+    (select count(*)
+       from certificate_versions v
+       join certificates c on c.id = v.certificate_id
+      where c.application_id = $1
+        and v.status = 'issuing'),
+    (select count(*)
+       from dns_challenge_records d
+       join certificates c on c.id = d.certificate_id
+      where c.application_id = $1
+        and d.status <> 'cleaned'),
+    (select count(*)
+       from certificates c
+      where c.application_id = $1
+        and c.status not in ('failed', 'deleted')
+        and c.deleted_at is null
+        and exists (
+            select 1
+              from certificate_versions v
+             where v.certificate_id = c.id
+               and v.status = 'valid'
+               and v.revoked_at is null
+               and v.cert_pem is not null
+               and v.chain_pem is not null
+               and v.fullchain_pem is not null
+               and v.private_key_pem is not null
+               and v.material_etag is not null
+               and v.not_before <= now()
+               and v.not_after > now()
+        )),
+    (select count(*) from application_domain_scopes where application_id = $1),
+    (select count(*) from application_tokens where application_id = $1),
+    (select count(*) from application_user_grants where application_id = $1),
+    (select count(*) from certificates where application_id = $1)`, applicationID).
+		Scan(
+			&activeJobs,
+			&issuingVersions,
+			&uncleanChallenges,
+			&activeCertificates,
+			&domainScopes,
+			&tokens,
+			&userGrants,
+			&certificates,
+		); err != nil {
+		return DeleteApplicationResult{}, fmt.Errorf("inspect application deletion blockers: %w", err)
+	}
+	if activeJobs > 0 || issuingVersions > 0 || uncleanChallenges > 0 {
+		return DeleteApplicationResult{}, ApplicationBusyError{
+			ActiveJobs:        activeJobs,
+			IssuingVersions:   issuingVersions,
+			UncleanChallenges: uncleanChallenges,
+		}
+	}
+	if activeCertificates > 0 {
+		return DeleteApplicationResult{}, ApplicationHasActiveCertificatesError{Count: activeCertificates}
+	}
+
+	result := DeleteApplicationResult{
+		Application:      app,
+		DomainScopeCount: domainScopes,
+		TokenCount:       tokens,
+		UserGrantCount:   userGrants,
+		CertificateCount: certificates,
+	}
+	tag, err := r.db.Exec(ctx, `delete from applications where id = $1`, applicationID)
+	if err != nil {
+		return DeleteApplicationResult{}, fmt.Errorf("delete application: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return DeleteApplicationResult{}, storage.ErrNoRows
+	}
+	return result, nil
 }
 
 func (r Repository) List(ctx context.Context, params ListApplicationsParams) ([]Application, error) {

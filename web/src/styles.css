@@ -1077,15 +1077,26 @@ tr.selectable:focus-within td {
   width: min(560px, 100%);
 }
 
-.certificate-delete-content {
+.application-delete-dialog {
+  width: min(600px, 100%);
+}
+
+.certificate-delete-content,
+.application-delete-content {
   display: grid;
   gap: 14px;
   padding: 16px;
   overflow: auto;
 }
 
-.certificate-delete-content p {
+.certificate-delete-content p,
+.application-delete-content p {
   margin: 0;
+}
+
+.application-delete-content label {
+  display: grid;
+  gap: 7px;
 }
 
 .certificate-delete-content .warning {

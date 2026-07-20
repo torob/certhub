@@ -344,6 +344,8 @@ Application creation is visible only to Users with global role `admin`.
 
 Application `name` is treated as immutable in the UI after creation. The UI uses `PATCH /v1/applications/{application_id}` only for mutable fields supported by the backend.
 
+Only global admins see the permanent Application deletion action, and it is hidden for `certhub_server`. The confirmation dialog must explain the cascading data loss, require explicit confirmation, and call bodyless `DELETE /v1/applications/{application_id}`. On `application_busy` or `application_has_active_certificates`, keep the dialog open and show blocker counts with instructions to wait for cleanup or revoke/wait for active material. On success, navigate to the Application list.
+
 Reserved Application rules:
 
 - The reserved Application `certhub_server` represents Certhub's own HTTPS serving certificate.
@@ -614,6 +616,7 @@ Application administration:
 - `POST /v1/applications`
 - `GET /v1/applications/{application_id}`
 - `PATCH /v1/applications/{application_id}`
+- `DELETE /v1/applications/{application_id}`
 
 Application token management:
 

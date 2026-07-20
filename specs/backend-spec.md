@@ -2439,6 +2439,38 @@ Expected responses:
 - `404 Not Found`: Application does not exist or is not visible.
 - `409 Conflict`: update violates uniqueness/state constraints or the Application is system-managed.
 
+#### DELETE /v1/applications/{application_id}
+
+Summary: Permanently delete an Application and all subordinate operational data.
+
+Description and notes:
+
+- Requires global `admin`; Application managers receive `403 application_access_denied`.
+- The reserved `certhub_server` Application returns `409 system_managed_resource`.
+- There is no force-delete mode and no request body.
+- The operation locks the Application and all of its Certificates in one transaction.
+- Busy validation runs before active-material validation. Pending/running issuance jobs, issuing versions, or DNS challenges not marked `cleaned` return `409 application_busy` with aggregate blocker counts.
+- Any Certificate with currently usable material returns `409 application_has_active_certificates` with the blocking Certificate count. Usable material is a non-revoked `valid` version whose validity window includes the current time and whose certificate, chain, fullchain, encrypted private key, and ETag are present, provided the parent Certificate is not failed or deleted. Certificate lifecycle enablement does not change this check.
+- Success cascades through domain scopes, tokens, User grants, Certificates, versions, jobs, DNS challenges, and certificate events. Immutable audit history and its historical identifiers remain unchanged.
+- The `application_deleted` audit event is inserted in the deletion transaction with safe Application identity and deletion counts; audit failure rolls back the deletion.
+
+```http
+DELETE /v1/applications/{application_id}
+Authorization: Bearer <user-access-token>
+```
+
+Query params: None.
+
+Request body: None.
+
+Expected responses:
+
+- `204 No Content`: Application and subordinate operational data deleted.
+- `401 Unauthorized`: token is missing or invalid.
+- `403 Forbidden`: User is not a global admin.
+- `404 Not Found`: Application does not exist.
+- `409 Conflict`: system-managed resource, active work, unclean challenges, or active usable Certificates block deletion.
+
 #### POST /v1/applications/{application_id}/tokens
 
 Summary: Create an Application token and return the raw token once.
@@ -3962,6 +3994,7 @@ Required audit actions include:
 - `password_2fa_disabled`
 - `application_created`
 - `application_updated`
+- `application_deleted`
 - `application_token_created`
 - `application_token_rotated`
 - `application_token_revoked`

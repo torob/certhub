@@ -1206,6 +1206,9 @@ function ApplicationDetailPage(props: PageProps) {
   const [tokenValue, setTokenValue] = useState("");
   const [rotatingToken, setRotatingToken] = useState<any | undefined>(undefined);
   const [editing, setEditing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [body, setBody] = useState({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] as string[] });
   const detail = useAsync<{ application: any }>(props.session, id ? base : "", [id, refresh]);
   const app = detail.data?.application || {};
@@ -1240,6 +1243,9 @@ function ApplicationDetailPage(props: PageProps) {
   }, [activeTab]);
   useEffect(() => {
     setEditing(false);
+    setDeleteOpen(false);
+    setDeletePending(false);
+    setDeleteError("");
     setBody({ display_name: "", description: "", status: "active", trusted_source_cidrs: [] });
   }, [id]);
   const beginEdit = () => {
@@ -1338,7 +1344,15 @@ function ApplicationDetailPage(props: PageProps) {
   return pageFrame(app.name || "Application",
     createElement("div", { className: "header-actions" },
       createElement("button", { onClick: () => props.navigate("/applications") }, "Back"),
-      refreshButton(refreshing, () => setRefresh((value) => value + 1))
+      refreshButton(refreshing, () => setRefresh((value) => value + 1)),
+      appLoaded && isAdmin(props.session) && !reserved ? createElement("button", {
+        className: "danger",
+        disabled: refreshing,
+        onClick: () => {
+          setDeleteError("");
+          setDeleteOpen(true);
+        }
+      }, createElement(Trash2, { size: 16 }), "Delete") : null
     ),
 	    initialLoading(detail) ? createElement("div", { className: "empty" }, "Loading") : blockingError(detail) ? createElement("div", { className: "error" }, detail.error?.code, ": ", detail.error?.message) : createElement("div", { className: "tabbed-detail" },
 	      createElement(Tabs, { activeTab, tabs: visibleTabs, ariaLabel: "Application sections", pathFor: (tab: ApplicationTab) => applicationTabPath(id, tab), navigate: props.navigate }),
@@ -1355,7 +1369,28 @@ function ApplicationDetailPage(props: PageProps) {
 	        setRotatingToken(undefined);
 	        setRefresh((value) => value + 1);
 	      }
-	    }) : null
+	    }) : null,
+      deleteOpen ? createElement(ApplicationDeleteDialog, {
+        application: app,
+        pending: deletePending,
+        error: deleteError,
+        onClose: () => {
+          setDeleteOpen(false);
+          setDeleteError("");
+        },
+        onDelete: async () => {
+          setDeletePending(true);
+          setDeleteError("");
+          const result = await api(base, props.session, { method: "DELETE" });
+          setDeletePending(false);
+          if (result.error) {
+            setDeleteError(applicationDeleteErrorText(result));
+            return;
+          }
+          props.setNotice("application permanently deleted");
+          props.navigate("/applications");
+        }
+      }) : null
 	  );
 }
 
@@ -2495,6 +2530,50 @@ function CertificateDeleteDialog(props: { certificate: any; validVersionCount: n
   );
 }
 
+function ApplicationDeleteDialog(props: { application: any; pending: boolean; error: string; onClose: () => void; onDelete: () => void }) {
+  const [confirmation, setConfirmation] = useState("");
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !props.pending) props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [props.onClose, props.pending]);
+  const confirmed = confirmation === props.application.name;
+  return createElement("div", { className: "modal-backdrop", role: "presentation", onClick: () => { if (!props.pending) props.onClose(); } },
+    createElement("section", {
+      className: "modal-dialog application-delete-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "application-delete-title",
+      onClick: (event: any) => event.stopPropagation()
+    },
+      createElement("div", { className: "modal-header" },
+        createElement("h2", { id: "application-delete-title" }, "Delete application permanently?"),
+        createElement("button", { type: "button", className: "modal-close", disabled: props.pending, onClick: props.onClose, "aria-label": "Close application deletion" }, createElement(X, { size: 18 }))
+      ),
+      createElement("div", { className: "application-delete-content" },
+        createElement("p", null, appLabel(props.application)),
+        createElement("p", null, "This permanently removes its tokens, user grants, domain scopes, certificates, certificate versions, private keys, jobs, DNS challenges, and certificate events. Audit history is preserved. This cannot be undone."),
+        createElement("label", null,
+          createElement("span", null, "Type ", createElement("strong", null, props.application.name), " to confirm"),
+          createElement("input", {
+            value: confirmation,
+            disabled: props.pending,
+            autoComplete: "off",
+            onChange: (event: Event) => setConfirmation((event.target as HTMLInputElement).value)
+          })
+        ),
+        props.error ? createElement("div", { className: "error", role: "alert" }, props.error) : null,
+        createElement("div", { className: "toolbar" },
+          createElement("button", { type: "button", disabled: props.pending, onClick: props.onClose }, "Cancel"),
+          createElement("button", { type: "button", className: "danger", disabled: props.pending || !confirmed, onClick: props.onDelete }, props.pending ? "Deleting…" : "Delete permanently")
+        )
+      )
+    )
+  );
+}
+
 function input(label: string, value: string, onChange: (v: string) => void, type = "text") {
   return createElement("label", null, createElement("span", null, label), createElement("input", { value, type, onChange: (e: Event) => onChange((e.target as HTMLInputElement).value), autoComplete: "off" }));
 }
@@ -2950,6 +3029,17 @@ function jsonBlock(value: unknown): string {
 function errorText(result: APIResult<unknown>) {
   if (result.error?.code === "system_managed_resource") return `system_managed_resource: this resource is read-only and managed by backend process configuration request_id=${result.requestID}`;
   return `${result.error?.code || "request_failed"}: ${result.error?.message || `HTTP ${result.status}`} request_id=${result.requestID}`;
+}
+
+function applicationDeleteErrorText(result: APIResult<unknown>) {
+  const details = (result.error?.details || {}) as Record<string, unknown>;
+  if (result.error?.code === "application_busy") {
+    return `Deletion is blocked by certificate work: ${Number(details.active_jobs || 0)} active job(s), ${Number(details.issuing_versions || 0)} issuing version(s), and ${Number(details.unclean_dns_challenges || 0)} DNS challenge(s) awaiting cleanup. Wait for work and cleanup to finish, then try again.`;
+  }
+  if (result.error?.code === "application_has_active_certificates") {
+    return `Deletion is blocked by ${Number(details.active_certificates || 0)} certificate(s) with currently usable material. Revoke the active versions or wait for them to expire, then try again.`;
+  }
+  return errorText(result);
 }
 
 function errorOrOK(result: APIResult<unknown>) {

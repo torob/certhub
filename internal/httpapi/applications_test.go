@@ -15,6 +15,7 @@ import (
 	"github.com/torob/certhub/internal/auth"
 	"github.com/torob/certhub/internal/config"
 	"github.com/torob/certhub/internal/storage"
+	"github.com/torob/certhub/internal/users"
 )
 
 func TestAuthMeWithApplicationToken(t *testing.T) {
@@ -135,6 +136,107 @@ func TestApplicationConflictErrorCarriesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestDeleteApplicationRouteReturnsNoContentWithoutRequestBody(t *testing.T) {
+	now := time.Now().UTC()
+	app := httpFakeApplication(now, nil)
+	store := &httpAppFakeStore{application: app, deleteResult: appdomain.DeleteApplicationResult{
+		Application:      app,
+		DomainScopeCount: 1,
+		TokenCount:       2,
+		UserGrantCount:   3,
+		CertificateCount: 4,
+	}}
+	auditRepo := &httpAppFakeAudit{}
+	handler, token := applicationDeleteTestHandler(t, users.GlobalRoleAdmin, store, auditRepo)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/applications/"+app.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if store.deletedAppID != app.ID {
+		t.Fatalf("deleted application = %q", store.deletedAppID)
+	}
+	if len(auditRepo.events) != 1 || auditRepo.events[0].Action != "application_deleted" {
+		t.Fatalf("audit events = %#v", auditRepo.events)
+	}
+}
+
+func TestDeleteApplicationRejectsApplicationManager(t *testing.T) {
+	app := httpFakeApplication(time.Now().UTC(), nil)
+	store := &httpAppFakeStore{application: app}
+	handler, token := applicationDeleteTestHandler(t, users.GlobalRoleUser, store, &httpAppFakeAudit{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/applications/"+app.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assertErrorCode(t, rec, http.StatusForbidden, "application_access_denied")
+	if store.deletedAppID != "" {
+		t.Fatalf("manager reached deletion store")
+	}
+}
+
+func TestDeleteApplicationReturnsDedicatedConflictsAndDetails(t *testing.T) {
+	app := httpFakeApplication(time.Now().UTC(), nil)
+	tests := []struct {
+		name    string
+		err     error
+		status  int
+		code    string
+		details map[string]float64
+	}{
+		{name: "reserved", err: appdomain.ErrSystemManagedResource, status: http.StatusConflict, code: "system_managed_resource"},
+		{
+			name:   "busy",
+			err:    appdomain.ApplicationBusyError{ActiveJobs: 2, IssuingVersions: 3, UncleanChallenges: 4},
+			status: http.StatusConflict,
+			code:   "application_busy",
+			details: map[string]float64{
+				"active_jobs":            2,
+				"issuing_versions":       3,
+				"unclean_dns_challenges": 4,
+			},
+		},
+		{
+			name:    "active certificates",
+			err:     appdomain.ApplicationHasActiveCertificatesError{Count: 5},
+			status:  http.StatusConflict,
+			code:    "application_has_active_certificates",
+			details: map[string]float64{"active_certificates": 5},
+		},
+		{name: "missing", err: storage.ErrNoRows, status: http.StatusNotFound, code: "certificate_not_found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &httpAppFakeStore{application: app, deleteErr: tc.err}
+			handler, token := applicationDeleteTestHandler(t, users.GlobalRoleAdmin, store, &httpAppFakeAudit{})
+			req := httptest.NewRequest(http.MethodDelete, "/v1/applications/"+app.ID, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assertErrorCode(t, rec, tc.status, tc.code)
+			if len(tc.details) > 0 {
+				var body struct {
+					Error struct {
+						Details map[string]float64 `json:"details"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				for key, want := range tc.details {
+					if body.Error.Details[key] != want {
+						t.Fatalf("details = %#v", body.Error.Details)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestSerializeApplicationIncludesCertificateCount(t *testing.T) {
 	now := time.Now().UTC()
 	app := httpFakeApplication(now, nil)
@@ -143,6 +245,36 @@ func TestSerializeApplicationIncludesCertificateCount(t *testing.T) {
 	if out.CertificateCount != 4 {
 		t.Fatalf("certificate_count = %d", out.CertificateCount)
 	}
+}
+
+func applicationDeleteTestHandler(t *testing.T, role users.GlobalRole, store *httpAppFakeStore, auditRepo *httpAppFakeAudit) (http.Handler, string) {
+	t.Helper()
+	keys := testKeySet(t)
+	user := fakeUser()
+	user.GlobalRole = role
+	token := auth.UserAccessTokenPrefix + strings.Repeat("Z", 43)
+	authSvc := auth.NewService(auth.ServiceConfig{
+		AuthRepository: &identityFakeAuthRepo{session: auth.Session{
+			ID:               "52345678-1234-4234-9234-123456789abc",
+			UserID:           user.ID,
+			AuthMethod:       auth.AuthMethodPassword,
+			AccessTokenHash:  keys.HashToken(token),
+			Status:           auth.SessionStatusActive,
+			AccessExpiresAt:  time.Now().Add(time.Minute),
+			SessionExpiresAt: time.Now().Add(time.Hour),
+		}},
+		UserRepository:  &identityFakeUserRepo{user: user},
+		AuditRepository: identityFakeAudit{},
+		KeySet:          keys,
+		Config:          testConfig(t, "").Auth,
+	})
+	appSvc := appdomain.NewService(appdomain.ServiceConfig{
+		Repository:      store,
+		AuditRepository: auditRepo,
+		KeySet:          keys,
+		Config:          testConfig(t, "").ApplicationToken,
+	})
+	return New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithApplicationAccessServices(appSvc, nil)).Handler(), token
 }
 
 func TestCreateApplicationTokenResponseShowsRawOnceAndNoHash(t *testing.T) {
@@ -294,6 +426,9 @@ type httpAppFakeStore struct {
 	createdToken  appdomain.CreateTokenParams
 	rotatedToken  appdomain.RotateTokenParams
 	markedTokenID string
+	deleteResult  appdomain.DeleteApplicationResult
+	deleteErr     error
+	deletedAppID  string
 }
 
 func (f *httpAppFakeStore) Create(context.Context, appdomain.CreateApplicationParams) (appdomain.Application, error) {
@@ -418,6 +553,17 @@ func (f *httpAppFakeStore) GetGrant(context.Context, string, string) (appdomain.
 
 func (f *httpAppFakeStore) DeleteGrant(context.Context, string, string) (bool, error) {
 	return false, errors.New("not implemented")
+}
+
+func (f *httpAppFakeStore) DeleteApplication(_ context.Context, applicationID string) (appdomain.DeleteApplicationResult, error) {
+	f.deletedAppID = applicationID
+	if f.deleteErr != nil {
+		return appdomain.DeleteApplicationResult{}, f.deleteErr
+	}
+	if f.deleteResult.Application.ID != "" {
+		return f.deleteResult, nil
+	}
+	return appdomain.DeleteApplicationResult{Application: f.application}, nil
 }
 
 type httpAppFakeAudit struct {
