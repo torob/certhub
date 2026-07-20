@@ -152,6 +152,27 @@ for expected in \
   fi
 done
 
+operator_policy_rendered="$tmp_dir/operator-policy-rendered.yaml"
+"$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
+  --namespace certhub \
+  --values "$tmp_dir/certhub/deploy/helm/certhub-operator/ci/values.yaml" \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes \
+  --set-json 'networkPolicy.kubernetes.ingress=[]' \
+  --show-only templates/networkpolicy.yaml >"$operator_policy_rendered"
+for expected in \
+  'apiVersion: networking.k8s.io/v1' \
+  'kind: NetworkPolicy' \
+  'app.kubernetes.io/name: certhub-operator' \
+  '- Ingress' \
+  'ingress:' \
+  '[]'; do
+  if ! grep -F -- "$expected" "$operator_policy_rendered" >/dev/null; then
+    echo "release scaffold operator chart network policy missing: $expected" >&2
+    exit 1
+  fi
+done
+
 operator_retry_rendered="$tmp_dir/operator-retry-rendered.yaml"
 "$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
   --namespace certhub \

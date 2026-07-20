@@ -1,0 +1,54 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $provider := .Values.networkPolicy.provider }}
+{{- $rules := index .Values.networkPolicy $provider }}
+{{- $hasIngress := kindIs "slice" $rules.ingress }}
+{{- $hasEgress := kindIs "slice" $rules.egress }}
+{{- if eq $provider "kubernetes" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "certhub-operator.networkPolicyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "certhub-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "certhub-operator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- if $hasIngress }}
+    - Ingress
+    {{- end }}
+    {{- if $hasEgress }}
+    - Egress
+    {{- end }}
+  {{- if $hasIngress }}
+  ingress:
+    {{- toYaml $rules.ingress | nindent 4 }}
+  {{- end }}
+  {{- if $hasEgress }}
+  egress:
+    {{- toYaml $rules.egress | nindent 4 }}
+  {{- end }}
+{{- else if eq $provider "cilium" }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "certhub-operator.networkPolicyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "certhub-operator.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "certhub-operator.selectorLabels" . | nindent 6 }}
+  {{- if $hasIngress }}
+  ingress:
+    {{- toYaml $rules.ingress | nindent 4 }}
+  {{- end }}
+  {{- if $hasEgress }}
+  egress:
+    {{- toYaml $rules.egress | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

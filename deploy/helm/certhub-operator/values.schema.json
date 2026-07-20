@@ -11,7 +11,8 @@
     "rbac",
     "serviceAccount",
     "certhub",
-    "metrics"
+    "metrics",
+    "networkPolicy"
   ],
   "properties": {
     "global": {
@@ -260,6 +261,34 @@
         }
       }
     },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "provider",
+        "kubernetes",
+        "cilium"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "kubernetes",
+            "cilium"
+          ]
+        },
+        "kubernetes": {
+          "$ref": "#/definitions/networkPolicyRules"
+        },
+        "cilium": {
+          "$ref": "#/definitions/networkPolicyRules"
+        }
+      }
+    },
     "resources": {
       "type": "object"
     },
@@ -365,6 +394,68 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "networkPolicy": {
+            "required": [
+              "enabled",
+              "provider"
+            ],
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "provider": {
+                "const": "kubernetes"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "networkPolicy": {
+            "properties": {
+              "kubernetes": {
+                "$ref": "#/definitions/configuredNetworkPolicyRules"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "networkPolicy": {
+            "required": [
+              "enabled",
+              "provider"
+            ],
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "provider": {
+                "const": "cilium"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "networkPolicy": {
+            "properties": {
+              "cilium": {
+                "$ref": "#/definitions/configuredNetworkPolicyRules"
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "definitions": {
@@ -398,6 +489,58 @@
       "type": "object",
       "additionalProperties": {
         "type": "string"
+      }
+    },
+    "networkPolicyRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ingress": {
+          "$ref": "#/definitions/nullableRuleList"
+        },
+        "egress": {
+          "$ref": "#/definitions/nullableRuleList"
+        }
+      }
+    },
+    "configuredNetworkPolicyRules": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/networkPolicyRules"
+        },
+        {
+          "anyOf": [
+            {
+              "required": [
+                "ingress"
+              ],
+              "properties": {
+                "ingress": {
+                  "type": "array"
+                }
+              }
+            },
+            {
+              "required": [
+                "egress"
+              ],
+              "properties": {
+                "egress": {
+                  "type": "array"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "nullableRuleList": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object"
       }
     },
     "probe": {

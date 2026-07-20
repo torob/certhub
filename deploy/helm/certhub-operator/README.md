@@ -107,6 +107,50 @@ metrics:
 
 The Prometheus Operator CRDs must already exist before enabling this option.
 
+## Network policy
+
+The chart can render one namespaced policy that selects only this release's
+operator pod. Choose either the Kubernetes or Cilium provider and supply native
+rules for that provider:
+
+```yaml
+networkPolicy:
+  enabled: true
+  provider: kubernetes
+  kubernetes:
+    ingress: []
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: certhub-system
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: certhub-server
+        ports:
+          - protocol: TCP
+            port: 8080
+```
+
+For both providers, a null or omitted direction is left out of the policy, an
+explicit `[]` renders an empty rule list, and `- {}` renders one empty native
+rule. Under [Kubernetes NetworkPolicy
+semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/),
+an empty rule `{}` allows all traffic in that direction. Kubernetes and Cilium
+rules have provider-specific fields and semantics; the chart passes the
+selected provider's lists through unchanged.
+
+The chart does not add implicit rules for DNS, the Kubernetes API, Certhub, or
+metrics. Enabling egress isolation without rules that allow DNS resolution, the
+Kubernetes API, and the configured Certhub endpoint will prevent the operator
+from working. Add every required connection explicitly.
+
+Only the selected provider is rendered. The Kubernetes provider creates a
+`networking.k8s.io/v1` `NetworkPolicy`; the Cilium provider creates a namespaced
+`cilium.io/v2` `CiliumNetworkPolicy`. Cilium and its CRDs must already be
+installed before enabling the Cilium provider. The chart does not install
+Cilium CRDs or create cluster-wide Cilium policies.
+
 ## Availability and upgrades
 
 The operator currently has no leader election. The chart therefore enforces one
@@ -139,6 +183,10 @@ storage versions.
 | `certhub.url` | `""` | Required absolute HTTPS Certhub URL |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
+| `networkPolicy.enabled` | `false` | Create a policy selecting the operator pod |
+| `networkPolicy.provider` | `cilium` | Policy backend: `kubernetes` or `cilium` |
+| `networkPolicy.<provider>.ingress` | `null` | Native ingress rule list |
+| `networkPolicy.<provider>.egress` | `null` | Native egress rule list |
 | `resources` | `{}` | Operator resource requests and limits |
 
 See `values.yaml` and `values.schema.json` for the complete interface and

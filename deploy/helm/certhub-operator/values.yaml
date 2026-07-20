@@ -48,6 +48,46 @@ metrics:
     interval: 30s
     scrapeTimeout: 10s
 
+networkPolicy:
+  # Enable a network policy selecting only this release's operator pod.
+  enabled: false
+
+  # Supported providers are "kubernetes" and "cilium". Only the selected
+  # provider's resource is rendered.
+  provider: cilium
+
+  kubernetes:
+    # Native networking.k8s.io/v1 NetworkPolicy ingress rules.
+    #
+    # null/omitted: omit spec.ingress and do not isolate ingress.
+    # []: render spec.ingress: [] and isolate ingress with no allowed traffic.
+    # - {}: allow all ingress under Kubernetes NetworkPolicy semantics.
+    ingress:
+
+    # Native networking.k8s.io/v1 NetworkPolicy egress rules.
+    #
+    # null/omitted: omit spec.egress and do not isolate egress.
+    # []: render spec.egress: [] and isolate egress with no allowed traffic.
+    # - {}: allow all egress under Kubernetes NetworkPolicy semantics.
+    egress:
+
+  cilium:
+    # Native Cilium ingress rules. Rules may use fromEndpoints, fromCIDR,
+    # fromCIDRSet, fromEntities, and toPorts.
+    #
+    # null/omitted: omit spec.ingress.
+    # []: render an empty spec.ingress list.
+    # - {}: render one empty native Cilium ingress rule.
+    ingress:
+
+    # Native Cilium egress rules. Rules may use toEndpoints, toCIDR,
+    # toCIDRSet, toEntities, toServices, toFQDNs, and toPorts.
+    #
+    # null/omitted: omit spec.egress.
+    # []: render an empty spec.egress list.
+    # - {}: render one empty native Cilium egress rule.
+    egress:
+
 resources: {}
 
 podAnnotations: {}

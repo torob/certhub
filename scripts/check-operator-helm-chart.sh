@@ -5,6 +5,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 chart="${1:-$repo_root/deploy/helm/certhub-operator}"
 helm_bin="${HELM_BIN:-helm}"
 kubeconform_bin="${KUBECONFORM_BIN:-kubeconform}"
+kubectl_bin="${KUBECTL_BIN:-kubectl}"
 valid_values="$chart/ci/values.yaml"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -22,6 +23,24 @@ expect_template_failure() {
     --values "$valid_values" \
     "$@" >"$tmp_dir/$name.stdout" 2>"$tmp_dir/$name.stderr"; then
     echo "operator chart unexpectedly accepted invalid case: $name" >&2
+    exit 1
+  fi
+}
+
+expect_contains() {
+  local file="$1"
+  local expected="$2"
+  if ! grep -F -- "$expected" "$file" >/dev/null; then
+    echo "$(basename "$file") missing expected content: $expected" >&2
+    exit 1
+  fi
+}
+
+expect_not_contains() {
+  local file="$1"
+  local unexpected="$2"
+  if grep -F -- "$unexpected" "$file" >/dev/null; then
+    echo "$(basename "$file") unexpectedly contains: $unexpected" >&2
     exit 1
   fi
 }
@@ -52,6 +71,8 @@ for expected in \
     exit 1
   fi
 done
+expect_not_contains "$default_rendered" 'kind: NetworkPolicy'
+expect_not_contains "$default_rendered" 'kind: CiliumNetworkPolicy'
 
 expect_template_failure multiple-replicas --set replicaCount=2
 expect_template_failure zero-replicas --set replicaCount=0
@@ -71,6 +92,139 @@ expect_template_failure monitor-without-service \
 expect_template_failure tag-and-digest \
   --set image.tag=test \
   --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect_template_failure invalid-network-policy-provider \
+  --set networkPolicy.provider=calico
+expect_template_failure scalar-kubernetes-ingress \
+  --set networkPolicy.kubernetes.ingress=allow
+expect_template_failure scalar-cilium-egress \
+  --set networkPolicy.cilium.egress=allow
+expect_template_failure non-object-kubernetes-rule \
+  --set-json 'networkPolicy.kubernetes.ingress=["allow"]'
+expect_template_failure non-object-cilium-rule \
+  --set-json 'networkPolicy.cilium.egress=[443]'
+expect_template_failure enabled-cilium-without-rules \
+  --set networkPolicy.enabled=true
+expect_template_failure enabled-kubernetes-without-rules \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes
+expect_template_failure enabled-cilium-with-only-kubernetes-rules \
+  --set networkPolicy.enabled=true \
+  --set-json 'networkPolicy.kubernetes.ingress=[]'
+
+kubernetes_ingress_only="$tmp_dir/network-policy-kubernetes-ingress-only.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes \
+  --set-json 'networkPolicy.kubernetes.ingress=[]' \
+  --show-only templates/networkpolicy.yaml >"$kubernetes_ingress_only"
+for expected in \
+  'apiVersion: networking.k8s.io/v1' \
+  'kind: NetworkPolicy' \
+  'name: test-operator-certhub-operator-network-policy' \
+  'app.kubernetes.io/name: certhub-operator' \
+  'app.kubernetes.io/instance: test-operator' \
+  'podSelector:' \
+  '- Ingress' \
+  'ingress:' \
+  '[]'; do
+  expect_contains "$kubernetes_ingress_only" "$expected"
+done
+expect_not_contains "$kubernetes_ingress_only" 'kind: CiliumNetworkPolicy'
+expect_not_contains "$kubernetes_ingress_only" '- Egress'
+expect_not_contains "$kubernetes_ingress_only" '  egress:'
+
+kubernetes_egress_only="$tmp_dir/network-policy-kubernetes-egress-only.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes \
+  --set-json 'networkPolicy.kubernetes.egress=[{}]' \
+  --show-only templates/networkpolicy.yaml >"$kubernetes_egress_only"
+for expected in '- Egress' 'egress:' '- {}'; do
+  expect_contains "$kubernetes_egress_only" "$expected"
+done
+expect_not_contains "$kubernetes_egress_only" '- Ingress'
+expect_not_contains "$kubernetes_egress_only" '  ingress:'
+
+kubernetes_bidirectional="$tmp_dir/network-policy-kubernetes-bidirectional.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes \
+  --set-json 'networkPolicy.kubernetes.ingress=[{"from":[{"namespaceSelector":{"matchLabels":{"team":"platform"}}}],"ports":[{"port":8080,"protocol":"TCP"}]}]' \
+  --set-json 'networkPolicy.kubernetes.egress=[{"to":[{"ipBlock":{"cidr":"10.0.0.0/8","except":["10.1.0.0/16"]}}],"ports":[{"port":443,"protocol":"TCP"}]}]' \
+  --show-only templates/networkpolicy.yaml >"$kubernetes_bidirectional"
+for expected in \
+  '- Ingress' \
+  '- Egress' \
+  'namespaceSelector:' \
+  'team: platform' \
+  'port: 8080' \
+  'ipBlock:' \
+  'cidr: 10.0.0.0/8' \
+  '- 10.1.0.0/16' \
+  'port: 443' \
+  'protocol: TCP'; do
+  expect_contains "$kubernetes_bidirectional" "$expected"
+done
+
+cilium_ingress_only="$tmp_dir/network-policy-cilium-ingress-only.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set-json 'networkPolicy.cilium.ingress=[]' \
+  --show-only templates/networkpolicy.yaml >"$cilium_ingress_only"
+for expected in \
+  'apiVersion: cilium.io/v2' \
+  'kind: CiliumNetworkPolicy' \
+  'name: test-operator-certhub-operator-network-policy' \
+  'app.kubernetes.io/name: certhub-operator' \
+  'app.kubernetes.io/instance: test-operator' \
+  'endpointSelector:' \
+  'ingress:' \
+  '[]'; do
+  expect_contains "$cilium_ingress_only" "$expected"
+done
+expect_not_contains "$cilium_ingress_only" 'kind: NetworkPolicy'
+expect_not_contains "$cilium_ingress_only" 'kind: CiliumClusterwideNetworkPolicy'
+expect_not_contains "$cilium_ingress_only" '  egress:'
+expect_not_contains "$cilium_ingress_only" 'policyTypes:'
+
+cilium_egress_only="$tmp_dir/network-policy-cilium-egress-only.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set-json 'networkPolicy.cilium.egress=[{}]' \
+  --show-only templates/networkpolicy.yaml >"$cilium_egress_only"
+for expected in 'egress:' '- {}'; do
+  expect_contains "$cilium_egress_only" "$expected"
+done
+expect_not_contains "$cilium_egress_only" '  ingress:'
+
+cilium_bidirectional="$tmp_dir/network-policy-cilium-bidirectional.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set-json 'networkPolicy.cilium.ingress=[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"trusted-client"}}],"toPorts":[{"ports":[{"port":"8080","protocol":"TCP"}]}]}]' \
+  --set-json 'networkPolicy.cilium.egress=[{"toFQDNs":[{"matchName":"certhub.example.test"}],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}]' \
+  --show-only templates/networkpolicy.yaml >"$cilium_bidirectional"
+for expected in \
+  'fromEndpoints:' \
+  'app.kubernetes.io/name: trusted-client' \
+  'toFQDNs:' \
+  'matchName: certhub.example.test' \
+  'port: "8080"' \
+  'port: "443"' \
+  'protocol: TCP'; do
+  expect_contains "$cilium_bidirectional" "$expected"
+done
 
 namespaced_rendered="$tmp_dir/namespaced.yaml"
 "$helm_bin" template test-operator "$chart" \
@@ -207,9 +361,38 @@ if ! grep -F 'image: "ghcr.io/torob/certhub-operator:9.8.7"' "$packaged_rendered
   echo "packaged operator chart does not default to its appVersion image" >&2
   exit 1
 fi
+packaged_policy="$tmp_dir/packaged-network-policy.yaml"
+"$helm_bin" template test-operator "$packaged_chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.provider=kubernetes \
+  --set-json 'networkPolicy.kubernetes.egress=[]' \
+  --show-only templates/networkpolicy.yaml >"$packaged_policy"
+for expected in 'kind: NetworkPolicy' '- Egress' 'egress:' '[]'; do
+  expect_contains "$packaged_policy" "$expected"
+done
 
 if command -v "$kubeconform_bin" >/dev/null 2>&1; then
   "$kubeconform_bin" -strict -summary -ignore-missing-schemas "$default_rendered" >/dev/null
+  "$kubeconform_bin" -strict -summary "$kubernetes_ingress_only" >/dev/null
+  "$kubeconform_bin" -strict -summary "$kubernetes_egress_only" >/dev/null
+  "$kubeconform_bin" -strict -summary "$kubernetes_bidirectional" >/dev/null
+fi
+
+if command -v "$kubectl_bin" >/dev/null 2>&1 &&
+  "$kubectl_bin" get crd ciliumnetworkpolicies.cilium.io \
+    --request-timeout=5s >/dev/null 2>&1; then
+  cilium_server_dry_run="$tmp_dir/network-policy-cilium-server-dry-run.yaml"
+  "$helm_bin" template test-operator "$chart" \
+    --namespace default \
+    --values "$valid_values" \
+    --set networkPolicy.enabled=true \
+    --set-json 'networkPolicy.cilium.egress=[]' \
+    --show-only templates/networkpolicy.yaml >"$cilium_server_dry_run"
+  "$kubectl_bin" apply --dry-run=server \
+    --request-timeout=10s \
+    --filename "$cilium_server_dry_run" >/dev/null
 fi
 
 echo "Operator Helm chart checks passed."
