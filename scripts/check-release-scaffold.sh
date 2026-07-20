@@ -100,15 +100,18 @@ if (!String(provenance.inputs?.docker_ca_base || "").includes("@sha256:")) fail(
 if (!/^[a-f0-9]{64}$/.test(provenance.sbom_sha256 || "")) fail("release provenance missing SBOM hash");
 NODE
 
-for chart in certhub-server certhub-operator; do
-  "$helm_bin" lint "$tmp_dir/certhub/deploy/helm/$chart" >/dev/null
-  "$helm_bin" template "test-$chart" "$tmp_dir/certhub/deploy/helm/$chart" --namespace certhub --include-crds >/dev/null
-done
+"$helm_bin" lint "$tmp_dir/certhub/deploy/helm/certhub-server" >/dev/null
+"$helm_bin" template test-server "$tmp_dir/certhub/deploy/helm/certhub-server" --namespace certhub --include-crds >/dev/null
+HELM_BIN="$helm_bin" "$repo_root/scripts/check-operator-helm-chart.sh" "$tmp_dir/certhub/deploy/helm/certhub-operator" >/dev/null
 
 server_rendered="$tmp_dir/server-rendered.yaml"
 operator_rendered="$tmp_dir/operator-rendered.yaml"
 "$helm_bin" template test-server "$tmp_dir/certhub/deploy/helm/certhub-server" --namespace certhub >"$server_rendered"
-"$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" --namespace certhub --include-crds --set clusterScoped=true --set watchNamespace=apps >"$operator_rendered"
+"$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
+  --namespace certhub \
+  --include-crds \
+  --values "$tmp_dir/certhub/deploy/helm/certhub-operator/ci/values.yaml" \
+  --set clusterScoped=true >"$operator_rendered"
 for expected in \
   "automountServiceAccountToken: false" \
   "fsGroup: 65532" \
@@ -123,10 +126,11 @@ done
 const fs = require("fs");
 for (const valuesPath of process.argv.slice(2)) {
   const text = fs.readFileSync(valuesPath, "utf8");
-  const match = text.match(/^\s*tag:\s*["']?([^"'\n#]+)["']?/m);
-  const tag = match?.[1]?.trim();
-  if (!tag || tag === "latest") {
-    console.error(`${valuesPath} must default to a non-latest image tag`);
+  const match = text.match(/^\s*tag:\s*(.*?)\s*(?:#.*)?$/m);
+  const tag = match?.[1]?.replace(/^["']|["']$/g, "").trim();
+  const isOperator = valuesPath.includes("certhub-operator");
+  if (tag === "latest" || (!isOperator && !tag)) {
+    console.error(`${valuesPath} must use an appVersion-derived or explicit non-latest image tag`);
     process.exit(1);
   }
 }
@@ -151,6 +155,7 @@ done
 operator_retry_rendered="$tmp_dir/operator-retry-rendered.yaml"
 "$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
   --namespace certhub \
+  --values "$tmp_dir/certhub/deploy/helm/certhub-operator/ci/values.yaml" \
   --set certhub.httpRetryMaxAttempts=1 \
   --set certhub.httpRetryInitialBackoff=250ms \
   --set certhub.httpRetryMaxBackoff=2s >"$operator_retry_rendered"

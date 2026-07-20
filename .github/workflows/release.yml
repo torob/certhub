@@ -46,6 +46,11 @@ jobs:
         id: release
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate operator Helm chart
+        env:
+          HELM_BIN: helm
+        run: ./scripts/check-operator-helm-chart.sh
+
       - name: Build release artifacts
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}

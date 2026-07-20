@@ -1,17 +1,31 @@
+nameOverride: ""
+fullnameOverride: ""
+
 replicaCount: 1
 
 image:
   repository: ghcr.io/torob/certhub-operator
-  tag: "0.1.0"
+  tag: ""
+  digest: ""
   pullPolicy: IfNotPresent
+
+imagePullSecrets: []
 
 clusterScoped: false
 watchNamespace: ""
-managedSecretNames:
-  - gateway-tls
+managedSecretNames: []
+
+rbac:
+  create: true
+  createTargetSecrets: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
 
 certhub:
-  url: https://certhub.example.com
+  url: ""
   tokenSecretName: certhub-token
   tokenSecretKey: token
   tokenSecretNamespace: ""
@@ -26,8 +40,36 @@ metrics:
   service:
     enabled: true
     port: 8080
+    annotations: {}
+    labels: {}
+  serviceMonitor:
+    enabled: false
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
 
 resources: {}
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+terminationGracePeriodSeconds: 30
+
+probes:
+  liveness:
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
 
 podSecurityContext:
   runAsNonRoot: true

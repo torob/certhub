@@ -1,0 +1,5 @@
+certhub:
+  url: https://certhub.example.test
+
+managedSecretNames:
+  - gateway-tls

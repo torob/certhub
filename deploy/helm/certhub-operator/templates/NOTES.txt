@@ -1,0 +1,21 @@
+Certhub operator {{ .Chart.AppVersion }} is configured to watch
+{{- if .Values.clusterScoped }}
+ all namespaces.
+{{- else if .Values.watchNamespace }}
+ namespace {{ .Values.watchNamespace }}.
+{{- else }}
+ release namespace {{ .Release.Namespace }}.
+{{- end }}
+
+Managed TLS Secret names: {{ join ", " .Values.managedSecretNames }}
+
+{{- if .Values.rbac.createTargetSecrets }}
+The ServiceAccount can create Secrets in its watch scope. Kubernetes RBAC
+cannot restrict top-level Secret creation by resource name. Pre-create target
+Secrets and set rbac.createTargetSecrets=false for a tighter permission model.
+{{- else }}
+Target TLS Secrets must exist before the operator reconciles them.
+{{- end }}
+
+Before upgrading a release that changes the CerthubCertificate schema, apply
+the new CRD explicitly. Helm does not upgrade CRDs stored under crds/.

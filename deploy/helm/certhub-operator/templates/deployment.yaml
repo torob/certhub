@@ -1,29 +1,46 @@
+{{- $watchNamespace := default .Release.Namespace .Values.watchNamespace -}}
+{{- $tokenDefaultNamespace := ternary .Release.Namespace $watchNamespace .Values.clusterScoped -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-certhub-operator
+  name: {{ include "certhub-operator.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: certhub-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "certhub-operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: certhub-operator
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "certhub-operator.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        app.kubernetes.io/name: certhub-operator
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- include "certhub-operator.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ .Release.Name }}-certhub-operator
+      serviceAccountName: {{ include "certhub-operator.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       securityContext:
-{{ toYaml .Values.podSecurityContext | indent 8 }}
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: operator
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "certhub-operator.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["run"]
           env:
@@ -34,9 +51,9 @@ spec:
             - name: CERTHUB_TOKEN_SECRET_KEY
               value: {{ .Values.certhub.tokenSecretKey | quote }}
             - name: CERTHUB_TOKEN_SECRET_NAMESPACE
-              value: {{ default (ternary .Release.Namespace (default .Release.Namespace .Values.watchNamespace) .Values.clusterScoped) .Values.certhub.tokenSecretNamespace | quote }}
+              value: {{ default $tokenDefaultNamespace .Values.certhub.tokenSecretNamespace | quote }}
             - name: WATCH_NAMESPACE
-              value: {{ ternary .Values.watchNamespace (default .Release.Namespace .Values.watchNamespace) .Values.clusterScoped | quote }}
+              value: {{ ternary "" $watchNamespace .Values.clusterScoped | quote }}
             - name: CERTHUB_METRICS_BIND_ADDR
               value: {{ printf ":%v" .Values.metrics.service.port | quote }}
             - name: CERTHUB_RESYNC_INTERVAL
@@ -60,11 +77,35 @@ spec:
             httpGet:
               path: /healthz
               port: metrics
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: metrics
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           securityContext:
-{{ toYaml .Values.securityContext | indent 12 }}
+            {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
-{{ toYaml .Values.resources | indent 12 }}
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -105,9 +105,9 @@ release="cth-k8s-test"
 rendered="$(mktemp)"
 "$helm_bin" template "$release" deploy/helm/certhub-operator \
   --namespace "$namespace" \
-  --set replicaCount=0 \
-  --set certhub.url=https://certhub.example.com \
-  --set managedSecretNames[0]=gateway-tls >"$rendered"
+  --values deploy/helm/certhub-operator/ci/values.yaml \
+  --show-only templates/serviceaccount.yaml \
+  --show-only templates/rbac.yaml >"$rendered"
 "$kubectl_bin" apply --namespace "$namespace" -f "$rendered" >/dev/null
 
 "$kubectl_bin" apply --namespace "$namespace" -f - >/dev/null <<'YAML'
