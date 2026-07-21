@@ -64,11 +64,6 @@ same Role or RoleBinding in a shared target namespace.
 {{- printf "%s-network-policy" ($fullname | trunc 48 | trimSuffix "-") -}}
 {{- end }}
 
-{{- define "certhub-operator.tokenRBACName" -}}
-{{- $fullname := include "certhub-operator.fullname" . -}}
-{{- printf "%s-token" ($fullname | trunc 57 | trimSuffix "-") -}}
-{{- end }}
-
 {{- define "certhub-operator.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end }}

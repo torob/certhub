@@ -2,7 +2,7 @@
 
 This chart deploys the Certhub Kubernetes certificate sync operator. The
 operator watches `CerthubCertificate` resources and writes their certificate
-material to explicitly allowed Kubernetes TLS Secrets.
+material to same-namespace Kubernetes TLS Secrets selected by each resource.
 
 ## Prerequisites
 
@@ -11,8 +11,8 @@ material to explicitly allowed Kubernetes TLS Secrets.
 - A Certhub Application token stored in a Kubernetes Secret.
 - An HTTPS Certhub server URL.
 
-The Certhub URL and managed Secret names have no production-safe defaults and
-must be supplied for every installation.
+The Certhub URL has no production-safe default and must be supplied for every
+installation.
 
 ## Install
 
@@ -32,10 +32,6 @@ Create a values file:
 ```yaml
 certhub:
   url: https://certhub.example.com
-
-managedSecretNames:
-  - gateway-tls
-  - api-tls
 ```
 
 Install the release:
@@ -54,38 +50,63 @@ specific image digest; it cannot be combined with an explicit tag.
 
 ## Namespace scope
 
-| Mode | `clusterScoped` | `watchNamespace` | Access |
+| Mode | `clusterScoped` | `watchNamespaces` | Access |
 | --- | --- | --- | --- |
-| Release namespace | `false` | `""` | Role in the Helm release namespace |
-| One other namespace | `false` | namespace name | Role in that namespace |
-| All namespaces | `true` | `""` | ClusterRole and ClusterRoleBinding |
+| Release namespace | `false` | `[]` | Role in the Helm release namespace |
+| Selected namespaces | `false` | `[apps, staging]` | One Role and RoleBinding in each namespace |
+| All namespaces | `true` | `[]` | ClusterRole and ClusterRoleBinding |
 
-`clusterScoped=true` with a nonempty `watchNamespace` is rejected because it
-would grant cluster-wide permissions to an operator that watches only one
-namespace.
+`clusterScoped=true` with a nonempty `watchNamespaces` list is rejected because
+it would grant cluster-wide permissions to an operator that watches only some
+namespaces.
 
-By default the token Secret is read from the watched namespace in namespaced
-mode and from the Helm release namespace in cluster mode. Set
-`certhub.tokenSecretNamespace` to override that location.
+## Token Secret
+
+The token Secret must be in the Helm release namespace, regardless of which
+namespaces the operator watches. The chart injects the selected key into the
+pod as `CERTHUB_TOKEN` using a Kubernetes `secretKeyRef`; the operator does not
+read this Secret through the Kubernetes API and receives no token-specific
+RBAC.
+
+Configure a non-default Secret or key with `certhub.tokenSecretName` and
+`certhub.tokenSecretKey`. Kubernetes will not start the container while the
+referenced Secret or key is missing. Restart the operator pod after rotating
+the token.
 
 ## Target Secret permissions
 
-`managedSecretNames` is both the operator runtime allowlist and the
-`resourceNames` list used for get, update, patch, and delete RBAC permissions.
-The chart grants `create secrets` separately because Kubernetes cannot restrict
-a top-level create request by resource name.
+Each `CerthubCertificate` chooses its target through `spec.secretName`. The
+operator always uses the resource's own namespace; there is no cross-namespace
+target field. Users authorized to create or update `CerthubCertificate`
+resources are therefore trusted to choose certificate Secret names in that
+namespace.
 
-For a tighter permission model, pre-create empty TLS Secrets and set:
-
-```yaml
-rbac:
-  create: true
-  createTargetSecrets: false
-```
+The generated RBAC grants Secret get, update, patch, and delete throughout each
+watched namespace without granting Secret list or watch. Existing Secrets are
+mutated or deleted only after their type, owner UID, labels, annotations,
+namespace, and name pass the operator's ownership checks. Cluster-scoped mode
+grants these target-Secret permissions across all namespaces.
 
 Set `rbac.create=false` to supply all RBAC resources outside the chart. Set
 `serviceAccount.create=false` and `serviceAccount.name` to use an existing
 ServiceAccount.
+
+## Breaking value changes
+
+The singular `watchNamespace` value has been replaced by `watchNamespaces`,
+`managedSecretNames` and `certhub.tokenSecretNamespace` have been removed, and
+the token Secret must move to the Helm release namespace. Remove the old
+allowlist and convert a custom namespace during upgrade:
+
+```yaml
+watchNamespaces:
+  - apps
+```
+
+The operator environment now uses comma-separated `WATCH_NAMESPACES` and reads
+the Application token directly from `CERTHUB_TOKEN`. `WATCH_NAMESPACE`,
+`CERTHUB_ALLOWED_SECRET_NAMES`, and the three `CERTHUB_TOKEN_SECRET_*`
+variables are rejected.
 
 ## Metrics
 
@@ -177,10 +198,10 @@ storage versions.
 | `image.tag` | `""` | Explicit image tag; empty uses chart `appVersion` |
 | `image.digest` | `""` | Optional `sha256:` image digest |
 | `clusterScoped` | `false` | Watch all namespaces and create cluster RBAC |
-| `watchNamespace` | `""` | Watched namespace in namespaced mode |
-| `managedSecretNames` | `[]` | Required target Secret allowlist |
-| `rbac.createTargetSecrets` | `true` | Grant target Secret creation |
+| `watchNamespaces` | `[]` | Exact namespaces to watch; empty uses the release namespace |
 | `certhub.url` | `""` | Required absolute HTTPS Certhub URL |
+| `certhub.tokenSecretName` | `certhub-token` | Token Secret in the Helm release namespace |
+| `certhub.tokenSecretKey` | `token` | Application-token key in the token Secret |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
 | `networkPolicy.enabled` | `false` | Create a policy selecting the operator pod |

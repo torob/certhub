@@ -143,7 +143,13 @@ Mutation and deletion require all ownership checks to pass:
 
 ## Authentication
 
-The operator authenticates to Certhub using a Certhub Application token stored in a Kubernetes Secret. If the Certhub Application has trusted source CIDRs configured, the operator pod's effective source IP, after any trusted proxy processing by Certhub, must be inside one of those CIDRs.
+The operator authenticates to Certhub using a Certhub Application token from
+the `CERTHUB_TOKEN` environment variable. The Helm chart injects this variable
+from a Kubernetes Secret in the operator pod's release namespace using
+`secretKeyRef`; the operator does not fetch its token through the Kubernetes
+API. If the Certhub Application has trusted source CIDRs configured, the
+operator pod's effective source IP, after any trusted proxy processing by
+Certhub, must be inside one of those CIDRs.
 
 Transport rules:
 
@@ -157,9 +163,21 @@ Operator deployment configuration:
 
 ```text
 CERTHUB_URL
-CERTHUB_TOKEN_SECRET_NAME
-CERTHUB_TOKEN_SECRET_KEY
+CERTHUB_TOKEN
+WATCH_NAMESPACES
 ```
+
+`CERTHUB_TOKEN` is required and must be a valid Certhub Application token.
+The chart keeps only `certhub.tokenSecretName` and
+`certhub.tokenSecretKey` as Secret-reference settings. The Secret must be in
+the Helm release namespace, and token rotation requires an operator pod
+restart.
+
+`WATCH_NAMESPACES` is a comma-separated list of exact Kubernetes namespaces.
+The operator lists and watches each configured namespace independently. An
+empty list selects all namespaces for a cluster-scoped deployment. Helm
+namespaced deployments expand an empty `watchNamespaces` value to the release
+namespace before starting the operator.
 
 ## Command
 
@@ -183,6 +201,11 @@ Application trusted source CIDRs do not replace the Application token. The opera
 Human User permissions in Certhub do not authorize the operator's backend calls. If a human User should be restricted from creating Kubernetes certificates, enforce that through Kubernetes RBAC on `CerthubCertificate` resources and through the operator Application's Certhub domain scopes.
 
 The Kubernetes ServiceAccount used by the operator pod is only for Kubernetes API RBAC and is separate from the Certhub Application.
+
+Permission to create or update a `CerthubCertificate` authorizes selecting any
+valid same-namespace target Secret name. The operator never targets another
+namespace and never overwrites or deletes a Secret that fails its ownership
+checks.
 
 ## Reconcile Flow
 
@@ -332,7 +355,7 @@ Required operator scenarios:
 - Operator writes only the referenced same-namespace target Secret and never writes Secrets in namespaces not selected by its deployment mode and RBAC.
 - Operator refuses CRs whose `secretName` targets another namespace by path-like, URL-like, or annotation-driven indirection.
 - Operator does not copy Application tokens into managed TLS Secrets, CR status, annotations, labels, metrics, or Events.
-- Operator reads the Certhub Application token only from the configured Secret name/key and never lists, watches, copies, or logs unrelated Kubernetes Secrets.
+- Operator reads the Certhub Application token only from the configured Secret name/key. It never lists or watches Secrets and only gets target Secret names selected by same-namespace `CerthubCertificate` resources.
 - Operator never sends `Forwarded`, `X-Forwarded-For`, or other headers that attempt to claim a different source IP.
 - Managed Secret contains only expected TLS data keys and non-secret Certhub annotations; status contains no private key or PEM material.
 - Managed Secret owner references, labels, and annotations cannot point at objects outside the CR namespace or include raw certificate material, private keys, Application tokens, or backend material JSON.
@@ -341,8 +364,8 @@ Required operator scenarios:
 - Backend outage preserves existing Secret and retries with backoff.
 - Retryable backend errors use `Retry-After` or `retry_after_seconds` for requeue timing.
 - Operator logs and metrics include backend error codes without leaking Application tokens or certificate material.
-- Operator RBAC manifests grant only the needed verbs for `CerthubCertificate`, status updates, Events, the configured Application-token Secret, and managed TLS Secrets.
-- RBAC tests verify the operator ServiceAccount cannot read unrelated Secrets, cannot write Secrets outside watched namespaces, cannot update CR specs, and cannot access issuer, DNS provider, User, Application admin, or audit APIs.
-- Multi-namespace and single-namespace deployment tests verify Secret writes are constrained by the selected deployment mode and fail closed when RBAC denies access.
+- Operator RBAC manifests grant only the needed verbs for `CerthubCertificate`, status updates, Events, the configured Application-token Secret, and named Secret operations in watched namespaces; Secret list and watch remain forbidden.
+- RBAC tests verify equivalent permissions in every selected namespace, no Secret access outside watched namespaces, no CR spec updates, and no access to issuer, DNS provider, User, Application admin, or audit APIs.
+- Multi-namespace and single-namespace deployment tests verify independent list/watch behavior, partial-failure isolation, and Secret writes constrained by the selected deployment mode.
 - Delete/finalizer tests verify the operator never deletes or clears an unowned Secret and never logs Secret data during cleanup.
 - CR spec change requests a new certificate identity and syncs new material.

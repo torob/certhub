@@ -32,14 +32,13 @@ type BackendClient interface {
 }
 
 type Reconciler struct {
-	Kube               KubernetesClient
-	Backend            BackendClient
-	Metrics            *Metrics
-	AllowedSecretNames []string
-	ResyncInterval     time.Duration
-	Backoff            time.Duration
-	Now                func() time.Time
-	NewRequestID       func(*CerthubCertificate) string
+	Kube           KubernetesClient
+	Backend        BackendClient
+	Metrics        *Metrics
+	ResyncInterval time.Duration
+	Backoff        time.Duration
+	Now            func() time.Time
+	NewRequestID   func(*CerthubCertificate) string
 }
 
 type Result struct {
@@ -70,12 +69,8 @@ func NewReconciler(kube KubernetesClient, backend BackendClient) *Reconciler {
 	}
 }
 
-func NewHTTPBackendFromConfig(ctx context.Context, kube KubernetesClient, cfg Config) (*certhubclient.Client, error) {
-	token, err := LoadApplicationToken(ctx, kube, cfg.TokenNamespace, cfg.TokenSecretName, cfg.TokenSecretKey)
-	if err != nil {
-		return nil, err
-	}
-	return certhubclient.New(cfg.CerthubURL, token, certhubclient.WithUserAgent("certhub-operator"), certhubclient.WithHTTPClient(BackendHTTPClient(cfg)), certhubclient.WithRetryPolicy(cfg.RetryPolicy))
+func NewHTTPBackendFromConfig(cfg Config) (*certhubclient.Client, error) {
+	return certhubclient.New(cfg.CerthubURL, cfg.Token, certhubclient.WithUserAgent("certhub-operator"), certhubclient.WithHTTPClient(BackendHTTPClient(cfg)), certhubclient.WithRetryPolicy(cfg.RetryPolicy))
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (Result, error) {
@@ -99,19 +94,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 	if r.Backoff == 0 {
 		r.Backoff = time.Minute
 	}
-	if !r.secretNameAllowed(cert.Spec.SecretName) {
-		message := "spec.secretName is not allowed by operator deployment policy"
-		r.setStatus(cert, PhaseFailed, message,
-			condition(ConditionAccepted, ConditionFalse, "SecretNameNotAllowed", message, r.Now()),
-			condition(ConditionReady, ConditionFalse, "SecretNameNotAllowed", message, r.Now()),
-		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
-			return result, nil
-		}
-		r.Metrics.IncReconcile("secret_name_not_allowed")
-		return reconcileResult("secret_name_not_allowed", 0), nil
-	}
-
 	if cert.Metadata.DeletionTimestamp != nil {
 		return r.reconcileDelete(ctx, cert)
 	}
@@ -483,13 +465,6 @@ func (r *Reconciler) updateStatus(ctx context.Context, cert *CerthubCertificate)
 func retryIDMarker(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-func (r *Reconciler) secretNameAllowed(name string) bool {
-	if len(r.AllowedSecretNames) == 0 {
-		return true
-	}
-	return slices.Contains(r.AllowedSecretNames, name)
 }
 
 func condition(conditionType, status, reason, message string, now time.Time) Condition {

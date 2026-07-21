@@ -18,7 +18,6 @@ type Runtime struct {
 		KubernetesClient
 		CertificateLister
 		CertificateWatcher
-		DefaultNamespace() string
 	}
 	Backend BackendClient
 	Logger  *slog.Logger
@@ -32,10 +31,7 @@ func NewInClusterRuntime(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 	kube.retry = cfg.RetryPolicy
 	kube.client = netretry.NewClient(kube.httpClient, cfg.RetryPolicy)
-	if cfg.TokenNamespace == "" {
-		cfg.TokenNamespace = kube.DefaultNamespace()
-	}
-	backend, err := NewHTTPBackendFromConfig(ctx, kube, cfg)
+	backend, err := NewHTTPBackendFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +57,6 @@ func (r *Runtime) Run(ctx context.Context, stderr io.Writer) error {
 	}
 	reconciler := NewReconciler(r.Kube, r.Backend)
 	reconciler.Metrics = metrics
-	reconciler.AllowedSecretNames = append([]string(nil), r.Config.AllowedSecretNames...)
 	if r.Config.ResyncInterval > 0 {
 		reconciler.ResyncInterval = r.Config.ResyncInterval
 	}
@@ -83,9 +78,12 @@ func (r *Runtime) Run(ctx context.Context, stderr io.Writer) error {
 
 	nextDelay, err := r.reconcileAll(ctx, reconciler, logger)
 	if err != nil {
-		return err
+		logger.Error("operator initial reconcile sweep failed", "error", Sanitize(err.Error()))
+		nextDelay = r.Config.ReconcileBackoff
 	}
-	watchCh, err := r.Kube.WatchCertificateChanges(ctx, r.Config.WatchNamespace)
+	watchCtx, cancelWatches := context.WithCancel(ctx)
+	defer cancelWatches()
+	watchCh, err := r.watchCertificateChanges(watchCtx)
 	if err != nil {
 		return err
 	}
@@ -97,14 +95,10 @@ func (r *Runtime) Run(ctx context.Context, stderr io.Writer) error {
 			return nil
 		case err := <-errc:
 			return fmt.Errorf("metrics server failed: %w", err)
-		case _, ok := <-watchCh:
-			if !ok {
-				watchCh, _ = r.Kube.WatchCertificateChanges(ctx, r.Config.WatchNamespace)
-				continue
-			}
-			nextDelay, err = r.reconcileAll(ctx, reconciler, logger)
+		case namespace := <-watchCh:
+			nextDelay, err = r.reconcileNamespace(ctx, reconciler, logger, namespace)
 			if err != nil {
-				logger.Error("operator reconcile sweep failed", "error", Sanitize(err.Error()))
+				logger.Error("operator namespace reconcile failed", "namespace", namespace, "error", Sanitize(err.Error()))
 				nextDelay = r.Config.ReconcileBackoff
 			}
 			resetTimer(timer, nextDelay)
@@ -120,7 +114,25 @@ func (r *Runtime) Run(ctx context.Context, stderr io.Writer) error {
 }
 
 func (r *Runtime) reconcileAll(ctx context.Context, reconciler *Reconciler, logger *slog.Logger) (time.Duration, error) {
-	items, err := r.Kube.ListCertificates(ctx, r.Config.WatchNamespace)
+	nextDelay := r.Config.ResyncInterval
+	var reconcileErrors []error
+	for _, namespace := range r.watchNamespaces() {
+		delay, err := r.reconcileNamespace(ctx, reconciler, logger, namespace)
+		if delay > 0 && (nextDelay <= 0 || delay < nextDelay) {
+			nextDelay = delay
+		}
+		if err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile namespace %q: %w", namespace, err))
+		}
+	}
+	if nextDelay <= 0 {
+		nextDelay = r.Config.ReconcileBackoff
+	}
+	return nextDelay, errors.Join(reconcileErrors...)
+}
+
+func (r *Runtime) reconcileNamespace(ctx context.Context, reconciler *Reconciler, logger *slog.Logger, namespace string) (time.Duration, error) {
+	items, err := r.Kube.ListCertificates(ctx, namespace)
 	if err != nil {
 		return r.Config.ReconcileBackoff, err
 	}
@@ -156,6 +168,59 @@ func (r *Runtime) reconcileAll(ctx context.Context, reconciler *Reconciler, logg
 		nextDelay = r.Config.ResyncInterval
 	}
 	return nextDelay, nil
+}
+
+func (r *Runtime) watchNamespaces() []string {
+	if len(r.Config.WatchNamespaces) == 0 {
+		return []string{""}
+	}
+	return r.Config.WatchNamespaces
+}
+
+func (r *Runtime) watchCertificateChanges(ctx context.Context) (<-chan string, error) {
+	namespaces := r.watchNamespaces()
+	events := make(chan string, len(namespaces))
+	for _, namespace := range namespaces {
+		watch, err := r.Kube.WatchCertificateChanges(ctx, namespace)
+		if err != nil {
+			return nil, fmt.Errorf("watch namespace %q: %w", namespace, err)
+		}
+		go r.forwardNamespaceWatch(ctx, namespace, watch, events)
+	}
+	return events, nil
+}
+
+func (r *Runtime) forwardNamespaceWatch(ctx context.Context, namespace string, watch <-chan struct{}, events chan<- string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-watch:
+			if !ok {
+				if ctx.Err() != nil {
+					return
+				}
+				timer := time.NewTimer(5 * time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				next, err := r.Kube.WatchCertificateChanges(ctx, namespace)
+				if err != nil {
+					continue
+				}
+				watch = next
+				continue
+			}
+			select {
+			case events <- namespace:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 func resetTimer(timer *time.Timer, delay time.Duration) {

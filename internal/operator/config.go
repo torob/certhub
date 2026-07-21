@@ -1,12 +1,12 @@
 package operator
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,18 +15,17 @@ import (
 	"github.com/torob/certhub/pkg/netretry"
 )
 
+var namespaceNameRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
 type Config struct {
-	CerthubURL         string
-	TokenNamespace     string
-	TokenSecretName    string
-	TokenSecretKey     string
-	WatchNamespace     string
-	AllowedSecretNames []string
-	MetricsBindAddr    string
-	ResyncInterval     time.Duration
-	ReconcileBackoff   time.Duration
-	HTTPTimeout        time.Duration
-	RetryPolicy        netretry.Policy
+	CerthubURL       string
+	Token            string
+	WatchNamespaces  []string
+	MetricsBindAddr  string
+	ResyncInterval   time.Duration
+	ReconcileBackoff time.Duration
+	HTTPTimeout      time.Duration
+	RetryPolicy      netretry.Policy
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -34,24 +33,34 @@ func LoadConfigFromEnv() (Config, error) {
 }
 
 func LoadConfig(getenv func(string) string) (Config, error) {
+	if strings.TrimSpace(getenv("WATCH_NAMESPACE")) != "" {
+		return Config{}, errors.New("WATCH_NAMESPACE is no longer supported; use WATCH_NAMESPACES")
+	}
+	if strings.TrimSpace(getenv("CERTHUB_ALLOWED_SECRET_NAMES")) != "" {
+		return Config{}, errors.New("CERTHUB_ALLOWED_SECRET_NAMES is no longer supported")
+	}
+	for _, legacy := range []string{
+		"CERTHUB_TOKEN_SECRET_NAME",
+		"CERTHUB_TOKEN_SECRET_KEY",
+		"CERTHUB_TOKEN_SECRET_NAMESPACE",
+	} {
+		if strings.TrimSpace(getenv(legacy)) != "" {
+			return Config{}, fmt.Errorf("%s is no longer supported; use CERTHUB_TOKEN", legacy)
+		}
+	}
+	watchNamespaces, err := parseWatchNamespaces(getenv("WATCH_NAMESPACES"))
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		CerthubURL:         strings.TrimSpace(getenv("CERTHUB_URL")),
-		TokenNamespace:     strings.TrimSpace(getenv("CERTHUB_TOKEN_SECRET_NAMESPACE")),
-		TokenSecretName:    strings.TrimSpace(getenv("CERTHUB_TOKEN_SECRET_NAME")),
-		TokenSecretKey:     strings.TrimSpace(getenv("CERTHUB_TOKEN_SECRET_KEY")),
-		WatchNamespace:     strings.TrimSpace(getenv("WATCH_NAMESPACE")),
-		AllowedSecretNames: splitCSV(getenv("CERTHUB_ALLOWED_SECRET_NAMES")),
-		MetricsBindAddr:    strings.TrimSpace(getenv("CERTHUB_METRICS_BIND_ADDR")),
-		ResyncInterval:     6 * time.Hour,
-		ReconcileBackoff:   time.Minute,
-		HTTPTimeout:        30 * time.Second,
-		RetryPolicy:        netretry.DefaultPolicy(),
-	}
-	if cfg.TokenSecretKey == "" {
-		cfg.TokenSecretKey = "token"
-	}
-	if cfg.TokenNamespace == "" {
-		cfg.TokenNamespace = cfg.WatchNamespace
+		CerthubURL:       strings.TrimSpace(getenv("CERTHUB_URL")),
+		Token:            strings.TrimSpace(getenv("CERTHUB_TOKEN")),
+		WatchNamespaces:  watchNamespaces,
+		MetricsBindAddr:  strings.TrimSpace(getenv("CERTHUB_METRICS_BIND_ADDR")),
+		ResyncInterval:   6 * time.Hour,
+		ReconcileBackoff: time.Minute,
+		HTTPTimeout:      30 * time.Second,
+		RetryPolicy:      netretry.DefaultPolicy(),
 	}
 	if cfg.MetricsBindAddr == "" {
 		cfg.MetricsBindAddr = ":8080"
@@ -63,11 +72,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return Config{}, errors.New("CERTHUB_URL must be an absolute https URL")
 	}
-	if cfg.TokenSecretName == "" {
-		return Config{}, errors.New("CERTHUB_TOKEN_SECRET_NAME is required")
-	}
-	if cfg.TokenSecretKey == "" {
-		return Config{}, errors.New("CERTHUB_TOKEN_SECRET_KEY is required")
+	if err := certhubclient.ValidateApplicationToken(cfg.Token); err != nil {
+		return Config{}, err
 	}
 	if value := strings.TrimSpace(getenv("CERTHUB_RESYNC_INTERVAL")); value != "" {
 		interval, err := time.ParseDuration(value)
@@ -117,33 +123,28 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-func LoadApplicationToken(ctx context.Context, kube KubernetesClient, namespace, name, key string) (string, error) {
-	secret, err := kube.GetSecret(ctx, namespace, name)
-	if err != nil {
-		return "", fmt.Errorf("read Certhub token Secret: %w", err)
-	}
-	if secret == nil || secret.Data == nil {
-		return "", errors.New("Certhub token Secret has no data")
-	}
-	token := strings.TrimSpace(string(secret.Data[key]))
-	if err := certhubclient.ValidateApplicationToken(token); err != nil {
-		return "", err
-	}
-	return token, nil
-}
-
 func BackendHTTPClient(cfg Config) *http.Client {
 	return &http.Client{Timeout: cfg.HTTPTimeout}
 }
 
-func splitCSV(value string) []string {
+func parseWatchNamespaces(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
 	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
+		namespace := strings.TrimSpace(part)
+		if namespace == "" || !namespaceNameRE.MatchString(namespace) {
+			return nil, errors.New("WATCH_NAMESPACES must contain comma-separated Kubernetes namespace names")
 		}
+		if _, ok := seen[namespace]; ok {
+			return nil, fmt.Errorf("WATCH_NAMESPACES contains duplicate namespace %q", namespace)
+		}
+		seen[namespace] = struct{}{}
+		out = append(out, namespace)
 	}
-	return out
+	return out, nil
 }

@@ -14,11 +14,8 @@ import (
 
 const operatorConfigHelp = `Configuration:
   CERTHUB_URL                         required absolute https URL
-  CERTHUB_TOKEN_SECRET_NAME           required Kubernetes Secret name
-  CERTHUB_TOKEN_SECRET_KEY            optional Secret data key, default token
-  CERTHUB_TOKEN_SECRET_NAMESPACE      optional token Secret namespace
-  WATCH_NAMESPACE                     optional namespace scope, empty means all namespaces
-  CERTHUB_ALLOWED_SECRET_NAMES        optional comma-separated target Secret allowlist
+  CERTHUB_TOKEN                       required Certhub Application token
+  WATCH_NAMESPACES                    optional comma-separated namespace scope, empty means all namespaces
   CERTHUB_METRICS_BIND_ADDR           optional metrics/probe bind address, default :8080
   CERTHUB_RESYNC_INTERVAL             optional duration, default 6h
   CERTHUB_RECONCILE_BACKOFF           optional duration, default 1m

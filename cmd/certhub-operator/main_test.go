@@ -20,12 +20,12 @@ func TestOperatorHelpSurfaces(t *testing.T) {
 		{
 			name:     "run help",
 			args:     []string{"run", "--help"},
-			contains: []string{"Usage:", "certhub-operator run", "CERTHUB_TOKEN_SECRET_NAME"},
+			contains: []string{"Usage:", "certhub-operator run", "CERTHUB_TOKEN", "WATCH_NAMESPACES"},
 		},
 		{
 			name:     "help run",
 			args:     []string{"help", "run"},
-			contains: []string{"Usage:", "certhub-operator run", "CERTHUB_TOKEN_SECRET_NAME"},
+			contains: []string{"Usage:", "certhub-operator run", "CERTHUB_TOKEN"},
 		},
 	}
 	for _, tt := range tests {

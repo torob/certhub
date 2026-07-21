@@ -6,8 +6,7 @@
     "replicaCount",
     "image",
     "clusterScoped",
-    "watchNamespace",
-    "managedSecretNames",
+    "watchNamespaces",
     "rbac",
     "serviceAccount",
     "certhub",
@@ -99,12 +98,8 @@
     "clusterScoped": {
       "type": "boolean"
     },
-    "watchNamespace": {
-      "$ref": "#/definitions/optionalDnsLabel"
-    },
-    "managedSecretNames": {
+    "watchNamespaces": {
       "type": "array",
-      "minItems": 1,
       "uniqueItems": true,
       "items": {
         "$ref": "#/definitions/dnsLabel"
@@ -114,14 +109,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "create",
-        "createTargetSecrets"
+        "create"
       ],
       "properties": {
         "create": {
-          "type": "boolean"
-        },
-        "createTargetSecrets": {
           "type": "boolean"
         }
       }
@@ -153,7 +144,6 @@
         "url",
         "tokenSecretName",
         "tokenSecretKey",
-        "tokenSecretNamespace",
         "resyncInterval",
         "reconcileBackoff",
         "httpTimeout",
@@ -175,9 +165,6 @@
           "minLength": 1,
           "maxLength": 253,
           "pattern": "^[-._a-zA-Z0-9]+$"
-        },
-        "tokenSecretNamespace": {
-          "$ref": "#/definitions/optionalDnsLabel"
         },
         "resyncInterval": {
           "$ref": "#/definitions/duration"
@@ -357,8 +344,8 @@
       },
       "then": {
         "properties": {
-          "watchNamespace": {
-            "maxLength": 0
+          "watchNamespaces": {
+            "maxItems": 0
           }
         }
       }

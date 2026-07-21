@@ -77,7 +77,6 @@ spec:
 		meta:  certhubclient.ResponseMeta{StatusCode: http.StatusOK},
 	}}}
 	reconciler := NewReconciler(kube, backend)
-	reconciler.AllowedSecretNames = []string{"gateway-tls"}
 	result, err := reconciler.Reconcile(ctx, cert)
 	if err != nil {
 		t.Fatalf("reconcile against real Kubernetes API: %v", err)

@@ -18,6 +18,8 @@ import (
 	"github.com/torob/certhub/pkg/material"
 )
 
+const validOperatorToken = "cth_app_v1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
+
 func TestValidateCertificateSpec(t *testing.T) {
 	tests := []struct {
 		name string
@@ -88,25 +90,6 @@ func TestReadySyncWritesTLSSecret(t *testing.T) {
 	}
 	if !reflect.DeepEqual(backend.calls, []string{"GetTLSMaterial"}) {
 		t.Fatalf("unexpected backend calls: %#v", backend.calls)
-	}
-}
-
-func TestAllowedSecretNamePolicyRejectsBeforeBackend(t *testing.T) {
-	kube := newFakeKube()
-	backend := &fakeBackend{}
-	reconciler := testReconciler(kube, backend)
-	reconciler.AllowedSecretNames = []string{"other-tls"}
-	cert := testCertificate()
-
-	result, err := reconciler.Reconcile(context.Background(), cert)
-	if err != nil {
-		t.Fatalf("reconcile failed: %v", err)
-	}
-	if result.RequeueAfter != 0 || len(backend.calls) != 0 || kube.writeCount != 0 {
-		t.Fatalf("unexpected work for disallowed secret: result=%#v calls=%#v writes=%d", result, backend.calls, kube.writeCount)
-	}
-	if cert.Status.Phase != PhaseFailed || !hasCondition(cert.Status, ConditionAccepted, ConditionFalse) {
-		t.Fatalf("unexpected status: %#v", cert.Status)
 	}
 }
 
@@ -477,7 +460,7 @@ func TestRuntimeReconcileAllReturnsShortestRequeue(t *testing.T) {
 		materials: []materialResponse{{err: apiError(http.StatusConflict, certerrors.CodeCertificateNotReady, true, ptr(17))}},
 	}
 	runtime := &Runtime{
-		Config:  Config{WatchNamespace: "ns", ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
+		Config:  Config{WatchNamespaces: []string{"ns"}, ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
 		Kube:    kube,
 		Backend: backend,
 		Metrics: NewMetrics(),
@@ -499,7 +482,7 @@ func TestRuntimeReconcileAllHonorsErrorRequeue(t *testing.T) {
 	kube.certificates = []*CerthubCertificate{cert}
 	kube.finalizerErr = stderrors.New("finalizer denied")
 	runtime := &Runtime{
-		Config:  Config{WatchNamespace: "ns", ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
+		Config:  Config{WatchNamespaces: []string{"ns"}, ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
 		Kube:    kube,
 		Backend: &fakeBackend{},
 		Metrics: NewMetrics(),
@@ -511,6 +494,126 @@ func TestRuntimeReconcileAllHonorsErrorRequeue(t *testing.T) {
 	}
 	if delay != 5*time.Second {
 		t.Fatalf("delay = %s; want backoff from error result", delay)
+	}
+}
+
+func TestRuntimeReconcileAllCoversNamespacesDespiteListFailure(t *testing.T) {
+	kube := newFakeKube()
+	first := testCertificate()
+	first.Metadata.Namespace = "first"
+	second := testCertificate()
+	second.Metadata.Namespace = "third"
+	second.Metadata.Name = "second"
+	second.Metadata.UID = "uid-2"
+	kube.certificatesByNamespace = map[string][]*CerthubCertificate{
+		"first": {first},
+		"third": {second},
+	}
+	kube.listErrors = map[string]error{"second": stderrors.New("list denied")}
+	backend := &fakeBackend{materials: []materialResponse{
+		{value: testMaterial("first-etag"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+		{value: testMaterial("third-etag"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+	}}
+	runtime := &Runtime{
+		Config: Config{
+			WatchNamespaces:  []string{"first", "second", "third"},
+			ResyncInterval:   time.Hour,
+			ReconcileBackoff: 5 * time.Second,
+		},
+		Kube:    kube,
+		Backend: backend,
+		Metrics: NewMetrics(),
+	}
+	reconciler := testReconciler(kube, backend)
+
+	delay, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t))
+	if err == nil || !strings.Contains(err.Error(), "second") {
+		t.Fatalf("reconcileAll error = %v", err)
+	}
+	if delay != 5*time.Second {
+		t.Fatalf("delay = %s; want list failure backoff", delay)
+	}
+	if !reflect.DeepEqual(kube.listedNamespaces, []string{"first", "second", "third"}) {
+		t.Fatalf("listed namespaces = %#v", kube.listedNamespaces)
+	}
+	if kube.writeCount != 2 {
+		t.Fatalf("writes = %d; want successful namespaces to reconcile", kube.writeCount)
+	}
+}
+
+func TestRuntimeEmptyNamespaceListUsesClusterScope(t *testing.T) {
+	kube := newFakeKube()
+	backend := &fakeBackend{}
+	runtime := &Runtime{
+		Config:  Config{ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
+		Kube:    kube,
+		Backend: backend,
+		Metrics: NewMetrics(),
+	}
+	reconciler := testReconciler(kube, backend)
+
+	if _, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(kube.listedNamespaces, []string{""}) {
+		t.Fatalf("listed namespaces = %#v; want cluster-wide empty namespace", kube.listedNamespaces)
+	}
+}
+
+func TestRuntimeMultiplexesNamespaceWatches(t *testing.T) {
+	kube := newFakeKube()
+	kube.watchChannels = map[string]chan struct{}{
+		"first":  make(chan struct{}, 1),
+		"second": make(chan struct{}, 1),
+	}
+	runtime := &Runtime{
+		Config: Config{WatchNamespaces: []string{"first", "second"}},
+		Kube:   kube,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := runtime.watchCertificateChanges(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kube.watchChannels["second"] <- struct{}{}
+	select {
+	case namespace := <-events:
+		if namespace != "second" {
+			t.Fatalf("event namespace = %q", namespace)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for namespace watch event")
+	}
+	if !reflect.DeepEqual(kube.watchedNamespaces, []string{"first", "second"}) {
+		t.Fatalf("watched namespaces = %#v", kube.watchedNamespaces)
+	}
+}
+
+func TestRuntimeContinuesAfterInitialNamespaceListFailure(t *testing.T) {
+	kube := newFakeKube()
+	kube.listErrors = map[string]error{"second": stderrors.New("list denied")}
+	backend := &fakeBackend{}
+	runtime := &Runtime{
+		Config: Config{
+			WatchNamespaces:  []string{"first", "second"},
+			MetricsBindAddr:  "127.0.0.1:0",
+			ResyncInterval:   time.Hour,
+			ReconcileBackoff: 5 * time.Second,
+		},
+		Kube:    kube,
+		Backend: backend,
+		Metrics: NewMetrics(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+
+	if err := runtime.Run(ctx, io.Discard); err != nil {
+		t.Fatalf("runtime stopped on partial initial list failure: %v", err)
+	}
+	if !reflect.DeepEqual(kube.watchedNamespaces, []string{"first", "second"}) {
+		t.Fatalf("watched namespaces = %#v", kube.watchedNamespaces)
 	}
 }
 
@@ -553,23 +656,43 @@ func TestDeletedCertificateClearsConditionMetrics(t *testing.T) {
 	}
 }
 
-func TestConfigAndTokenLoading(t *testing.T) {
+func TestConfigAndBackendConstruction(t *testing.T) {
 	_, err := LoadConfig(func(key string) string {
 		values := map[string]string{
-			"CERTHUB_URL":               "http://certhub.example",
-			"CERTHUB_TOKEN_SECRET_NAME": "app-token",
+			"CERTHUB_URL":   "http://certhub.example",
+			"CERTHUB_TOKEN": validOperatorToken,
 		}
 		return values[key]
 	})
 	if err == nil {
 		t.Fatalf("plain HTTP URL accepted")
 	}
+	for _, tt := range []struct {
+		name  string
+		token string
+	}{
+		{name: "missing token"},
+		{name: "malformed token", token: "not-an-application-token"},
+		{name: "user token", token: "cth_uat_v1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfig(func(key string) string {
+				values := map[string]string{
+					"CERTHUB_URL":   "https://certhub.example",
+					"CERTHUB_TOKEN": tt.token,
+				}
+				return values[key]
+			})
+			if err == nil {
+				t.Fatal("invalid token configuration accepted")
+			}
+		})
+	}
 	cfg, err := LoadConfig(func(key string) string {
 		values := map[string]string{
 			"CERTHUB_URL":                        "https://certhub.example",
-			"CERTHUB_TOKEN_SECRET_NAMESPACE":     "ops",
-			"CERTHUB_TOKEN_SECRET_NAME":          "app-token",
-			"CERTHUB_TOKEN_SECRET_KEY":           "token",
+			"CERTHUB_TOKEN":                      "  " + validOperatorToken + "\n",
+			"WATCH_NAMESPACES":                   "apps, staging",
 			"CERTHUB_HTTP_RETRY_MAX_ATTEMPTS":    "3",
 			"CERTHUB_HTTP_RETRY_INITIAL_BACKOFF": "2s",
 			"CERTHUB_HTTP_RETRY_MAX_BACKOFF":     "6s",
@@ -582,21 +705,70 @@ func TestConfigAndTokenLoading(t *testing.T) {
 	if cfg.RetryPolicy.MaxAttempts != 3 || cfg.RetryPolicy.InitialBackoff != 2*time.Second || cfg.RetryPolicy.MaxBackoff != 6*time.Second {
 		t.Fatalf("retry policy = %#v", cfg.RetryPolicy)
 	}
-	kube := newFakeKube()
-	kube.secrets["ops/app-token"] = &Secret{Data: map[string][]byte{"token": []byte("cth_app_v1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ")}}
-	token, err := LoadApplicationToken(context.Background(), kube, cfg.TokenNamespace, cfg.TokenSecretName, cfg.TokenSecretKey)
-	if err != nil {
-		t.Fatalf("token load failed: %v", err)
+	if !reflect.DeepEqual(cfg.WatchNamespaces, []string{"apps", "staging"}) {
+		t.Fatalf("watch namespaces = %#v", cfg.WatchNamespaces)
 	}
-	if !strings.HasPrefix(token, "cth_app_v1_") {
-		t.Fatalf("unexpected token: %q", token)
+	if cfg.Token != validOperatorToken {
+		t.Fatalf("token was not trimmed")
+	}
+	if backend, err := NewHTTPBackendFromConfig(cfg); err != nil || backend == nil {
+		t.Fatalf("backend construction failed: %v", err)
+	}
+}
+
+func TestWatchNamespaceAndLegacyConfigValidation(t *testing.T) {
+	base := map[string]string{
+		"CERTHUB_URL":   "https://certhub.example",
+		"CERTHUB_TOKEN": validOperatorToken,
+	}
+	load := func(overrides map[string]string) (Config, error) {
+		return LoadConfig(func(key string) string {
+			if value, ok := overrides[key]; ok {
+				return value
+			}
+			return base[key]
+		})
+	}
+	cfg, err := load(map[string]string{"WATCH_NAMESPACES": " apps "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.WatchNamespaces, []string{"apps"}) {
+		t.Fatalf("single namespace config = %#v", cfg)
+	}
+	cfg, err = load(map[string]string{"WATCH_NAMESPACES": "apps,staging"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.WatchNamespaces, []string{"apps", "staging"}) {
+		t.Fatalf("multi-namespace config = %#v", cfg)
+	}
+	tests := []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "empty item", overrides: map[string]string{"WATCH_NAMESPACES": "apps,,staging"}},
+		{name: "invalid namespace", overrides: map[string]string{"WATCH_NAMESPACES": "UPPER"}},
+		{name: "duplicate namespace", overrides: map[string]string{"WATCH_NAMESPACES": "apps,apps"}},
+		{name: "legacy singular", overrides: map[string]string{"WATCH_NAMESPACE": "apps"}},
+		{name: "legacy allowlist", overrides: map[string]string{"CERTHUB_ALLOWED_SECRET_NAMES": "gateway-tls"}},
+		{name: "legacy token Secret name", overrides: map[string]string{"CERTHUB_TOKEN_SECRET_NAME": "app-token"}},
+		{name: "legacy token Secret key", overrides: map[string]string{"CERTHUB_TOKEN_SECRET_KEY": "token"}},
+		{name: "legacy token Secret namespace", overrides: map[string]string{"CERTHUB_TOKEN_SECRET_NAMESPACE": "ops"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := load(tt.overrides); err == nil {
+				t.Fatal("invalid namespace configuration accepted")
+			}
+		})
 	}
 }
 
 func TestOperatorRetryConfigDefaultsAndValidation(t *testing.T) {
 	base := map[string]string{
-		"CERTHUB_URL":               "https://certhub.example",
-		"CERTHUB_TOKEN_SECRET_NAME": "app-token",
+		"CERTHUB_URL":   "https://certhub.example",
+		"CERTHUB_TOKEN": validOperatorToken,
 	}
 	load := func(overrides map[string]string) (Config, error) {
 		return LoadConfig(func(key string) string {
@@ -834,15 +1006,20 @@ func (f *fakeBackend) EnsureCertificate(_ context.Context, _ certhubclient.Certi
 }
 
 type fakeKube struct {
-	secrets       map[string]*Secret
-	certificates  []*CerthubCertificate
-	statusUpdates int
-	writeCount    int
-	deleteCount   int
-	events        []Event
-	statusErr     error
-	beforeDelete  func()
-	finalizerErr  error
+	secrets                 map[string]*Secret
+	certificates            []*CerthubCertificate
+	certificatesByNamespace map[string][]*CerthubCertificate
+	listErrors              map[string]error
+	listedNamespaces        []string
+	watchChannels           map[string]chan struct{}
+	watchedNamespaces       []string
+	statusUpdates           int
+	writeCount              int
+	deleteCount             int
+	events                  []Event
+	statusErr               error
+	beforeDelete            func()
+	finalizerErr            error
 }
 
 func newFakeKube() *fakeKube {
@@ -896,11 +1073,22 @@ func (f *fakeKube) EmitEvent(_ context.Context, event Event) error {
 	return nil
 }
 
-func (f *fakeKube) ListCertificates(context.Context, string) ([]*CerthubCertificate, error) {
+func (f *fakeKube) ListCertificates(_ context.Context, namespace string) ([]*CerthubCertificate, error) {
+	f.listedNamespaces = append(f.listedNamespaces, namespace)
+	if err := f.listErrors[namespace]; err != nil {
+		return nil, err
+	}
+	if f.certificatesByNamespace != nil {
+		return f.certificatesByNamespace[namespace], nil
+	}
 	return f.certificates, nil
 }
 
-func (f *fakeKube) WatchCertificateChanges(ctx context.Context, _ string) (<-chan struct{}, error) {
+func (f *fakeKube) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan struct{}, error) {
+	f.watchedNamespaces = append(f.watchedNamespaces, namespace)
+	if ch := f.watchChannels[namespace]; ch != nil {
+		return ch, nil
+	}
 	ch := make(chan struct{})
 	go func() {
 		<-ctx.Done()

@@ -12,12 +12,13 @@ image:
 imagePullSecrets: []
 
 clusterScoped: false
-watchNamespace: ""
-managedSecretNames: []
+
+# Exact namespaces to watch in namespaced mode. An empty list uses the Helm
+# release namespace. Leave empty when clusterScoped=true.
+watchNamespaces: []
 
 rbac:
   create: true
-  createTargetSecrets: true
 
 serviceAccount:
   create: true
@@ -26,9 +27,10 @@ serviceAccount:
 
 certhub:
   url: ""
+  # The token Secret must exist in the Helm release namespace. Its value is
+  # injected into the operator as CERTHUB_TOKEN without operator Secret RBAC.
   tokenSecretName: certhub-token
   tokenSecretKey: token
-  tokenSecretNamespace: ""
   resyncInterval: 6h
   reconcileBackoff: 1m
   httpTimeout: 30s

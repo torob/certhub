@@ -29,6 +29,7 @@ fi
 "$kubectl_bin" version --request-timeout=10s >/dev/null
 
 namespace=""
+second_namespace=""
 rendered=""
 created_crd=0
 
@@ -40,13 +41,19 @@ cleanup() {
   fi
   if [ "${CERTHUB_KEEP_K8S_TEST_RESOURCES:-}" = "1" ]; then
     if [ -n "$namespace" ]; then
-      echo "Keeping Kubernetes test resources in namespace $namespace."
+      echo "Keeping Kubernetes test resources in namespaces $namespace and $second_namespace."
     fi
     exit "$status"
   fi
   if [ -n "$namespace" ]; then
     if ! "$kubectl_bin" delete namespace "$namespace" --ignore-not-found=true --wait=false >/dev/null 2>&1; then
       echo "failed to delete Kubernetes test namespace $namespace" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ -n "$second_namespace" ]; then
+    if ! "$kubectl_bin" delete namespace "$second_namespace" --ignore-not-found=true --wait=false >/dev/null 2>&1; then
+      echo "failed to delete Kubernetes test namespace $second_namespace" >&2
       cleanup_failed=1
     fi
   fi
@@ -94,10 +101,13 @@ fi
 
 suffix="$(date -u +%Y%m%d%H%M%S)-$$"
 namespace="certhub-k8s-test-$suffix"
+second_namespace="$namespace-second"
 release="cth-k8s-test"
 
 "$kubectl_bin" create namespace "$namespace" >/dev/null
+"$kubectl_bin" create namespace "$second_namespace" >/dev/null
 "$kubectl_bin" label namespace "$namespace" app.kubernetes.io/part-of=certhub-k8s-integration >/dev/null
+"$kubectl_bin" label namespace "$second_namespace" app.kubernetes.io/part-of=certhub-k8s-integration >/dev/null
 "$kubectl_bin" create secret generic certhub-token \
   --namespace "$namespace" \
   --from-literal=token='cth_app_v1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ' >/dev/null
@@ -106,6 +116,8 @@ rendered="$(mktemp)"
 "$helm_bin" template "$release" deploy/helm/certhub-operator \
   --namespace "$namespace" \
   --values deploy/helm/certhub-operator/ci/values.yaml \
+  --set "watchNamespaces[0]=$namespace" \
+  --set "watchNamespaces[1]=$second_namespace" \
   --show-only templates/serviceaccount.yaml \
   --show-only templates/rbac.yaml >"$rendered"
 "$kubectl_bin" apply --namespace "$namespace" -f "$rendered" >/dev/null
@@ -186,18 +198,31 @@ expect_can_i_as_operator yes update certhubcertificates.certs.torob.dev --subres
 expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$namespace"
 
 expect_can_i_as_operator yes get secrets/certhub-token --namespace "$namespace"
-expect_can_i_as_operator no get secrets/unrelated-secret --namespace "$namespace"
+expect_can_i_as_operator yes get secrets/unrelated-secret --namespace "$namespace"
 expect_can_i_as_operator yes create secrets --namespace "$namespace"
 expect_can_i_as_operator no list secrets --namespace "$namespace"
 expect_can_i_as_operator yes update secrets/gateway-tls --namespace "$namespace"
 expect_can_i_as_operator yes patch secrets/gateway-tls --namespace "$namespace"
 expect_can_i_as_operator yes delete secrets/gateway-tls --namespace "$namespace"
-expect_can_i_as_operator no update secrets/unrelated-secret --namespace "$namespace"
-expect_can_i_as_operator no delete secrets/unrelated-secret --namespace "$namespace"
+expect_can_i_as_operator yes update secrets/unrelated-secret --namespace "$namespace"
+expect_can_i_as_operator yes delete secrets/unrelated-secret --namespace "$namespace"
+
+expect_can_i_as_operator yes get certhubcertificates.certs.torob.dev --namespace "$second_namespace"
+expect_can_i_as_operator yes list certhubcertificates.certs.torob.dev --namespace "$second_namespace"
+expect_can_i_as_operator yes watch certhubcertificates.certs.torob.dev --namespace "$second_namespace"
+expect_can_i_as_operator no update certhubcertificates.certs.torob.dev --namespace "$second_namespace"
+expect_can_i_as_operator yes update certhubcertificates.certs.torob.dev --subresource=status --namespace "$second_namespace"
+expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$second_namespace"
+expect_can_i_as_operator yes get secrets/arbitrary-tls --namespace "$second_namespace"
+expect_can_i_as_operator yes create secrets --namespace "$second_namespace"
+expect_can_i_as_operator yes update secrets/arbitrary-tls --namespace "$second_namespace"
+expect_can_i_as_operator yes patch secrets/arbitrary-tls --namespace "$second_namespace"
+expect_can_i_as_operator yes delete secrets/arbitrary-tls --namespace "$second_namespace"
+expect_can_i_as_operator no list secrets --namespace "$second_namespace"
 
 expect_can_i_as_operator no get secrets/certhub-token --namespace default
 expect_can_i_as_operator no create secrets --namespace default
 expect_can_i_as_operator no update secrets/gateway-tls --namespace default
 expect_can_i_as_operator no list secrets --all-namespaces
 
-echo "Kubernetes operator CRD admission and namespace-scoped RBAC validation passed for namespace $namespace."
+echo "Kubernetes operator CRD admission and multi-namespace RBAC validation passed for $namespace and $second_namespace."

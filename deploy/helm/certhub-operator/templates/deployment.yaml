@@ -1,5 +1,7 @@
-{{- $watchNamespace := default .Release.Namespace .Values.watchNamespace -}}
-{{- $tokenDefaultNamespace := ternary .Release.Namespace $watchNamespace .Values.clusterScoped -}}
+{{- $watchNamespaces := .Values.watchNamespaces -}}
+{{- if and (not .Values.clusterScoped) (eq (len $watchNamespaces) 0) -}}
+{{- $watchNamespaces = list .Release.Namespace -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,14 +48,13 @@ spec:
           env:
             - name: CERTHUB_URL
               value: {{ .Values.certhub.url | quote }}
-            - name: CERTHUB_TOKEN_SECRET_NAME
-              value: {{ .Values.certhub.tokenSecretName | quote }}
-            - name: CERTHUB_TOKEN_SECRET_KEY
-              value: {{ .Values.certhub.tokenSecretKey | quote }}
-            - name: CERTHUB_TOKEN_SECRET_NAMESPACE
-              value: {{ default $tokenDefaultNamespace .Values.certhub.tokenSecretNamespace | quote }}
-            - name: WATCH_NAMESPACE
-              value: {{ ternary "" $watchNamespace .Values.clusterScoped | quote }}
+            - name: CERTHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.certhub.tokenSecretName | quote }}
+                  key: {{ .Values.certhub.tokenSecretKey | quote }}
+            - name: WATCH_NAMESPACES
+              value: {{ join "," $watchNamespaces | quote }}
             - name: CERTHUB_METRICS_BIND_ADDR
               value: {{ printf ":%v" .Values.metrics.service.port | quote }}
             - name: CERTHUB_RESYNC_INTERVAL
@@ -68,8 +69,6 @@ spec:
               value: {{ default "1s" .Values.certhub.httpRetryInitialBackoff | quote }}
             - name: CERTHUB_HTTP_RETRY_MAX_BACKOFF
               value: {{ default "8s" .Values.certhub.httpRetryMaxBackoff | quote }}
-            - name: CERTHUB_ALLOWED_SECRET_NAMES
-              value: {{ join "," .Values.managedSecretNames | quote }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.service.port }}

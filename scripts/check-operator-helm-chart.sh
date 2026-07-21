@@ -64,7 +64,13 @@ for expected in \
   'type: Recreate' \
   'terminationGracePeriodSeconds: 30' \
   'image: "ghcr.io/torob/certhub-operator:0.1.0"' \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'name: "certhub-token"' \
+  'key: "token"' \
+  'name: WATCH_NAMESPACES' \
   'value: "certhub"' \
+  'verbs: ["create", "get", "update", "patch", "delete"]' \
   'app.kubernetes.io/managed-by: Helm'; do
   if ! grep -F "$expected" "$default_rendered" >/dev/null; then
     echo "default operator render missing: $expected" >&2
@@ -73,18 +79,53 @@ for expected in \
 done
 expect_not_contains "$default_rendered" 'kind: NetworkPolicy'
 expect_not_contains "$default_rendered" 'kind: CiliumNetworkPolicy'
+expect_not_contains "$default_rendered" 'CERTHUB_ALLOWED_SECRET_NAMES'
+expect_not_contains "$default_rendered" 'CERTHUB_TOKEN_SECRET_'
+expect_not_contains "$default_rendered" 'resourceNames:'
+if grep -E 'name: WATCH_NAMESPACE$' "$default_rendered" >/dev/null; then
+  echo "default operator render contains removed WATCH_NAMESPACE environment variable" >&2
+  exit 1
+fi
+
+custom_token_ref="$tmp_dir/custom-token-ref.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set certhub.tokenSecretName=operator-auth \
+  --set certhub.tokenSecretKey=application-token \
+  --show-only templates/deployment.yaml >"$custom_token_ref"
+for expected in \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'name: "operator-auth"' \
+  'key: "application-token"'; do
+  expect_contains "$custom_token_ref" "$expected"
+done
+expect_not_contains "$custom_token_ref" 'CERTHUB_TOKEN_SECRET_'
 
 expect_template_failure multiple-replicas --set replicaCount=2
 expect_template_failure zero-replicas --set replicaCount=0
 expect_template_failure insecure-url --set certhub.url=http://certhub.example.test
 expect_template_failure malformed-duration --set certhub.resyncInterval=soon
 expect_template_failure invalid-port --set metrics.service.port=70000
-expect_template_failure duplicate-secret-name \
-  --set 'managedSecretNames[0]=gateway-tls' \
-  --set 'managedSecretNames[1]=gateway-tls'
+expect_template_failure removed-managed-secret-names \
+  --set 'managedSecretNames[0]=gateway-tls'
+expect_template_failure removed-watch-namespace \
+  --set watchNamespace=apps
+expect_template_failure removed-token-secret-namespace \
+  --set certhub.tokenSecretNamespace=apps
+expect_template_failure removed-create-target-secrets \
+  --set rbac.createTargetSecrets=false
+expect_template_failure scalar-watch-namespaces \
+  --set watchNamespaces=apps
+expect_template_failure duplicate-watch-namespace \
+  --set 'watchNamespaces[0]=apps' \
+  --set 'watchNamespaces[1]=apps'
+expect_template_failure invalid-watch-namespace \
+  --set 'watchNamespaces[0]=UPPER'
 expect_template_failure contradictory-scope \
   --set clusterScoped=true \
-  --set watchNamespace=apps
+  --set 'watchNamespaces[0]=apps'
 expect_template_failure unknown-value --set unexpectedValue=true
 expect_template_failure monitor-without-service \
   --set metrics.service.enabled=false \
@@ -230,28 +271,71 @@ namespaced_rendered="$tmp_dir/namespaced.yaml"
 "$helm_bin" template test-operator "$chart" \
   --namespace certhub-system \
   --values "$valid_values" \
-  --set watchNamespace=apps >"$namespaced_rendered"
-for expected in 'namespace: apps' 'value: "apps"' 'kind: Role'; do
+  --set 'watchNamespaces[0]=apps' >"$namespaced_rendered"
+for expected in \
+  'namespace: apps' \
+  'name: WATCH_NAMESPACES' \
+  'value: "apps"' \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'kind: Role' \
+  'verbs: ["create", "get", "update", "patch", "delete"]'; do
   if ! grep -F "$expected" "$namespaced_rendered" >/dev/null; then
     echo "custom-namespace render missing: $expected" >&2
     exit 1
   fi
 done
+expect_not_contains "$namespaced_rendered" 'CERTHUB_TOKEN_SECRET_'
+expect_not_contains "$namespaced_rendered" 'resourceNames:'
 if grep -F 'kind: ClusterRole' "$namespaced_rendered" >/dev/null; then
   echo "custom-namespace render unexpectedly contains cluster RBAC" >&2
   exit 1
 fi
+
+multi_namespaced_rendered="$tmp_dir/multi-namespaced.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub-system \
+  --values "$valid_values" \
+  --set 'watchNamespaces[0]=apps' \
+  --set 'watchNamespaces[1]=staging' >"$multi_namespaced_rendered"
+for expected in \
+  'namespace: apps' \
+  'namespace: staging' \
+  'value: "apps,staging"' \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'verbs: ["create", "get", "update", "patch", "delete"]'; do
+  expect_contains "$multi_namespaced_rendered" "$expected"
+done
+watch_role_count="$(awk '
+  /^kind: Role$/ { role=1; next }
+  /^kind:/ { role=0 }
+  role && /^  namespace: (apps|staging)$/ { count++ }
+  END { print count+0 }
+' "$multi_namespaced_rendered")"
+if [ "$watch_role_count" != "2" ]; then
+  echo "multi-namespace render did not create exactly one Role per watched namespace" >&2
+  exit 1
+fi
+total_role_count="$(grep -c '^kind: Role$' "$multi_namespaced_rendered" || true)"
+total_role_binding_count="$(grep -c '^kind: RoleBinding$' "$multi_namespaced_rendered" || true)"
+if [ "$total_role_count" != "2" ] || [ "$total_role_binding_count" != "2" ]; then
+  echo "multi-namespace render contains unexpected token-specific RBAC" >&2
+  exit 1
+fi
+expect_not_contains "$multi_namespaced_rendered" 'resourceNames:'
+expect_not_contains "$multi_namespaced_rendered" 'CERTHUB_TOKEN_SECRET_'
 
 namespaced_a="$tmp_dir/namespaced-a.yaml"
 namespaced_b="$tmp_dir/namespaced-b.yaml"
 "$helm_bin" template test-operator "$chart" \
   --namespace operator-a \
   --values "$valid_values" \
-  --set watchNamespace=apps >"$namespaced_a"
+  --set 'watchNamespaces[0]=apps' >"$namespaced_a"
 "$helm_bin" template test-operator "$chart" \
   --namespace operator-b \
   --values "$valid_values" \
-  --set watchNamespace=apps >"$namespaced_b"
+  --set 'watchNamespaces[0]=apps' >"$namespaced_b"
 role_name_a="$(awk '/^kind: Role$/ { found=1; next } found && /^  name:/ { print $2; exit }' "$namespaced_a")"
 role_name_b="$(awk '/^kind: Role$/ { found=1; next } found && /^  name:/ { print $2; exit }' "$namespaced_b")"
 if [ -z "$role_name_a" ] || [ -z "$role_name_b" ] || [ "$role_name_a" = "$role_name_b" ]; then
@@ -269,26 +353,27 @@ cluster_b="$tmp_dir/cluster-b.yaml"
   --namespace certhub-b \
   --values "$valid_values" \
   --set clusterScoped=true >"$cluster_b"
-for expected in 'kind: ClusterRole' 'value: ""' 'value: "certhub-a"'; do
+for expected in \
+  'kind: ClusterRole' \
+  'value: ""' \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'verbs: ["create", "get", "update", "patch", "delete"]'; do
   if ! grep -F "$expected" "$cluster_a" >/dev/null; then
     echo "cluster render missing: $expected" >&2
     exit 1
   fi
 done
+if grep -E '^kind: (Role|RoleBinding)$' "$cluster_a" >/dev/null; then
+  echo "cluster render unexpectedly contains namespaced token RBAC" >&2
+  exit 1
+fi
+expect_not_contains "$cluster_a" 'resourceNames:'
+expect_not_contains "$cluster_a" 'CERTHUB_TOKEN_SECRET_'
 cluster_name_a="$(awk '/^kind: ClusterRole$/ { found=1; next } found && /^  name:/ { print $2; exit }' "$cluster_a")"
 cluster_name_b="$(awk '/^kind: ClusterRole$/ { found=1; next } found && /^  name:/ { print $2; exit }' "$cluster_b")"
 if [ -z "$cluster_name_a" ] || [ -z "$cluster_name_b" ] || [ "$cluster_name_a" = "$cluster_name_b" ]; then
   echo "cluster-scoped resource names are not namespace-unique" >&2
-  exit 1
-fi
-
-no_create_rendered="$tmp_dir/no-create.yaml"
-"$helm_bin" template test-operator "$chart" \
-  --namespace certhub \
-  --values "$valid_values" \
-  --set rbac.createTargetSecrets=false >"$no_create_rendered"
-if grep -A2 'resources: \["secrets"\]' "$no_create_rendered" | grep -F 'verbs: ["create"]' >/dev/null; then
-  echo "target Secret create permission rendered while disabled" >&2
   exit 1
 fi
 

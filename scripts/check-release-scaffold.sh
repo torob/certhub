@@ -135,8 +135,18 @@ for (const valuesPath of process.argv.slice(2)) {
   }
 }
 NODE
-if ! grep -A1 'name: CERTHUB_TOKEN_SECRET_NAMESPACE' "$operator_rendered" | grep -F 'value: "certhub"' >/dev/null; then
-  echo "operator cluster-scoped token namespace default does not match release namespace" >&2
+for expected in \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'name: "certhub-token"' \
+  'key: "token"'; do
+  if ! grep -F "$expected" "$operator_rendered" >/dev/null; then
+    echo "operator chart render missing token Secret injection: $expected" >&2
+    exit 1
+  fi
+done
+if grep -E '^kind: (Role|RoleBinding)$|CERTHUB_TOKEN_SECRET_|resourceNames:' "$operator_rendered" >/dev/null; then
+  echo "operator cluster-scoped render contains removed token configuration or RBAC" >&2
   exit 1
 fi
 for expected in \
@@ -145,12 +155,40 @@ for expected in \
   'name: CERTHUB_HTTP_RETRY_INITIAL_BACKOFF' \
   'value: "1s"' \
   'name: CERTHUB_HTTP_RETRY_MAX_BACKOFF' \
-  'value: "8s"'; do
+  'value: "8s"' \
+  'verbs: ["create", "get", "update", "patch", "delete"]'; do
   if ! grep -F "$expected" "$operator_rendered" >/dev/null; then
     echo "operator chart render missing retry default: $expected" >&2
     exit 1
   fi
 done
+
+operator_multi_namespace_rendered="$tmp_dir/operator-multi-namespace-rendered.yaml"
+"$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
+  --namespace certhub \
+  --values "$tmp_dir/certhub/deploy/helm/certhub-operator/ci/values.yaml" \
+  --set 'watchNamespaces[0]=apps' \
+  --set 'watchNamespaces[1]=staging' >"$operator_multi_namespace_rendered"
+for expected in \
+  'namespace: apps' \
+  'namespace: staging' \
+  'name: WATCH_NAMESPACES' \
+  'value: "apps,staging"' \
+  'name: CERTHUB_TOKEN' \
+  'secretKeyRef:' \
+  'verbs: ["create", "get", "update", "patch", "delete"]'; do
+  if ! grep -F "$expected" "$operator_multi_namespace_rendered" >/dev/null; then
+    echo "release scaffold operator multi-namespace render missing: $expected" >&2
+    exit 1
+  fi
+done
+operator_multi_role_count="$(grep -c '^kind: Role$' "$operator_multi_namespace_rendered" || true)"
+operator_multi_binding_count="$(grep -c '^kind: RoleBinding$' "$operator_multi_namespace_rendered" || true)"
+if [ "$operator_multi_role_count" != "2" ] || [ "$operator_multi_binding_count" != "2" ] ||
+  grep -E 'CERTHUB_TOKEN_SECRET_|resourceNames:' "$operator_multi_namespace_rendered" >/dev/null; then
+  echo "release scaffold operator render contains unexpected token-specific RBAC" >&2
+  exit 1
+fi
 
 operator_policy_rendered="$tmp_dir/operator-policy-rendered.yaml"
 "$helm_bin" template test-operator "$tmp_dir/certhub/deploy/helm/certhub-operator" \
