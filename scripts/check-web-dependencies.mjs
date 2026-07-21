@@ -132,7 +132,8 @@ for (const [name, spec] of Object.entries(rootPackage?.devDependencies || {})) {
 if (pkg.overrides) {
   const approvedOverrides = {
     "@redocly/openapi-core": "1.34.7",
-    "js-yaml": "4.2.0"
+    "brace-expansion": "2.1.2",
+    "js-yaml": "4.3.0"
   };
   for (const [name, spec] of Object.entries(pkg.overrides)) {
     if (approvedOverrides[name] !== spec) {
