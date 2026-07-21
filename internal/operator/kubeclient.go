@@ -108,6 +108,21 @@ func (c *RESTKubeClient) CreateOrUpdateSecret(ctx context.Context, secret *Secre
 	return c.do(ctx, http.MethodPut, coreNamespacedPath(secret.Metadata.Namespace, "secrets", secret.Metadata.Name), secret, nil, http.StatusOK)
 }
 
+func (c *RESTKubeClient) ClearSecretOwnerReferences(ctx context.Context, secret *Secret) error {
+	if secret == nil {
+		return errors.New("Secret is required")
+	}
+	if secret.Metadata.ResourceVersion == "" {
+		return errors.New("clear Secret owner references requires resourceVersion")
+	}
+	namespace := c.resolveNamespace(secret.Metadata.Namespace)
+	body := map[string]any{"metadata": map[string]any{
+		"resourceVersion": secret.Metadata.ResourceVersion,
+		"ownerReferences": []OwnerReference{},
+	}}
+	return c.doPatch(ctx, coreNamespacedPath(namespace, "secrets", secret.Metadata.Name), body, nil, http.StatusOK)
+}
+
 func (c *RESTKubeClient) DeleteSecret(ctx context.Context, namespace, name string, expected *Secret) error {
 	namespace = c.resolveNamespace(namespace)
 	existing, err := c.GetSecret(ctx, namespace, name)

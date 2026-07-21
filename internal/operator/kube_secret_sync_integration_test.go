@@ -101,6 +101,9 @@ spec:
 	if secret.Metadata.Annotations[AnnotationOwnerUID] != cert.Metadata.UID {
 		t.Fatalf("Secret owner UID annotation = %q, want %q", secret.Metadata.Annotations[AnnotationOwnerUID], cert.Metadata.UID)
 	}
+	if len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("Retain Secret has garbage-collection owner references: %#v", secret.Metadata.OwnerReferences)
+	}
 
 	updated, err := kube.ListCertificates(ctx, namespace)
 	if err != nil {
@@ -111,6 +114,15 @@ spec:
 	}
 	if !hasCondition(updated[0].Status, ConditionSecretSynced, ConditionTrue) {
 		t.Fatalf("updated status is missing true SecretSynced condition: %#v", updated[0].Status.Conditions)
+	}
+
+	runKubectl(ctx, t, kubectl, nil, "delete", "certhubcertificate", "gateway", "--namespace", namespace, "--wait=true")
+	retained, err := kube.GetSecret(ctx, namespace, "gateway-tls")
+	if err != nil {
+		t.Fatalf("Retain Secret disappeared after CerthubCertificate deletion: %v", err)
+	}
+	if retained.Metadata.Annotations[AnnotationOwnerUID] != cert.Metadata.UID {
+		t.Fatalf("retained Secret ownership metadata changed: %#v", retained.Metadata.Annotations)
 	}
 }
 

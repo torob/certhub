@@ -138,7 +138,8 @@ Mutation and deletion require all ownership checks to pass:
 - Secret name equals `spec.secretName`.
 - `certhub.torob.dev/owner-uid` equals the current CR UID.
 - Required management labels are present and match the current CR.
-- If an owner reference exists, it points to the current CR UID.
+- New managed Secrets have no owner references. A legacy owner reference must
+  point to the current CR UID and is removed after all ownership checks pass.
 - Secret type is `kubernetes.io/tls`, or absent only before initial creation.
 
 ## Authentication
@@ -279,7 +280,9 @@ If Secret update fails:
 Delete behavior:
 
 - Default `secretDeletionPolicy=Retain` leaves the target Secret in place when the `CerthubCertificate` is deleted.
-- `secretDeletionPolicy=Delete` deletes only a Secret that the operator can prove it owns through the required labels, `certhub.torob.dev/owner-uid`, same-namespace/name checks, and owner reference UID checks when present.
+- Managed Secrets do not use Kubernetes owner references; Secret lifetime is controlled only by `secretDeletionPolicy`.
+- Existing owned Secrets with legacy owner references are migrated with a resource-version-guarded metadata patch, including when certificate material is already current.
+- `secretDeletionPolicy=Delete` deletes only a Secret that the operator can prove it owns through the required labels, `certhub.torob.dev/owner-uid`, and same-namespace/name checks.
 - Finalizers are required only when needed to honor `secretDeletionPolicy=Delete` safely.
 - The operator must never delete, clear, or rewrite an unowned Secret, a Secret with an owner-reference UID mismatch, or a Secret missing the expected management labels/annotations.
 - Deleting the Kubernetes CR never deletes or revokes the Certhub backend Certificate. It only affects the local Kubernetes Secret according to `secretDeletionPolicy`.
@@ -344,21 +347,22 @@ Required operator scenarios:
 - Operator rejects plain HTTP Certhub URLs by default, verifies TLS certificates, and does not forward Authorization headers across redirects to different hosts, ports, or schemes.
 - The operator never logs or emits Kubernetes Events containing raw Application tokens, Authorization headers, private keys, certificate PEM, backend material JSON, or Secret data.
 - Existing Secret is updated when backend certificate material changes.
-- Existing Secret is left unchanged when backend returns `204 No Content` for a matching stored `material_etag`.
+- Existing Secret data and certificate metadata are left unchanged when the backend returns `204 No Content` for a matching stored `material_etag`; legacy owner-reference cleanup may still patch Kubernetes metadata.
 - Existing Secret is preserved unchanged when authorization fails, backend is unavailable, material is not ready, issuance fails, or a Secret update write fails before commit.
 - Existing Secret is preserved unchanged when backend reports `certificate_no_active_version`; status records the terminal backend state and no stale Secret rewrite occurs.
 - Existing target Secrets that are not owned or explicitly managed by the matching `CerthubCertificate` are not overwritten.
 - Owner-reference UID mismatch, `certhub.torob.dev/owner-uid` mismatch, missing required management labels, or conflicting Secret type causes a failed condition instead of mutating the existing Secret.
+- Newly created managed Secrets have no owner references, and a valid legacy Certhub owner reference is removed without changing Secret data even when the backend returns `204 No Content`.
 - Deleting a CR with default `secretDeletionPolicy=Retain` leaves the target Secret unchanged and does not require a finalizer.
 - Deleting a CR with `secretDeletionPolicy=Delete` deletes only an owned target Secret after owner UID, labels, annotations, namespace, name, and Secret type checks pass.
 - Deleting a CR never calls Certhub certificate revoke/delete APIs.
 - Operator writes only the referenced same-namespace target Secret and never writes Secrets in namespaces not selected by its deployment mode and RBAC.
 - Operator refuses CRs whose `secretName` targets another namespace by path-like, URL-like, or annotation-driven indirection.
 - Operator does not copy Application tokens into managed TLS Secrets, CR status, annotations, labels, metrics, or Events.
-- Operator reads the Certhub Application token only from the configured Secret name/key. It never lists or watches Secrets and only gets target Secret names selected by same-namespace `CerthubCertificate` resources.
+- Operator reads the Certhub Application token only from `CERTHUB_TOKEN`, which the chart injects from a same-namespace Secret. It never reads that token through the Kubernetes API, lists Secrets, or watches Secrets.
 - Operator never sends `Forwarded`, `X-Forwarded-For`, or other headers that attempt to claim a different source IP.
 - Managed Secret contains only expected TLS data keys and non-secret Certhub annotations; status contains no private key or PEM material.
-- Managed Secret owner references, labels, and annotations cannot point at objects outside the CR namespace or include raw certificate material, private keys, Application tokens, or backend material JSON.
+- Managed Secret labels and annotations cannot point at objects outside the CR namespace or include raw certificate material, private keys, Application tokens, or backend material JSON; managed Secrets contain no owner references.
 - Status messages and Kubernetes Events sanitize backend failure messages before storing them in the Kubernetes API.
 - Repeated reconciles do not create duplicate logical Certificates.
 - Backend outage preserves existing Secret and retries with backoff.

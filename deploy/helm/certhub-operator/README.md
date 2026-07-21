@@ -81,11 +81,21 @@ target field. Users authorized to create or update `CerthubCertificate`
 resources are therefore trusted to choose certificate Secret names in that
 namespace.
 
-The generated RBAC grants Secret get, update, patch, and delete throughout each
-watched namespace without granting Secret list or watch. Existing Secrets are
-mutated or deleted only after their type, owner UID, labels, annotations,
-namespace, and name pass the operator's ownership checks. Cluster-scoped mode
-grants these target-Secret permissions across all namespaces.
+The generated RBAC grants Secret create, get, update, patch, and delete
+throughout each watched namespace without granting Secret list or watch.
+Existing Secrets are mutated or deleted only after their type, owner UID,
+labels, annotations, namespace, and name pass the operator's ownership checks.
+Cluster-scoped mode grants these target-Secret permissions across all
+namespaces.
+
+Managed TLS Secrets have no Kubernetes owner reference. The default
+`secretDeletionPolicy: Retain` therefore leaves the Secret in place when its
+`CerthubCertificate` is removed. `secretDeletionPolicy: Delete` uses an
+operator finalizer and explicit ownership-checked deletion. Existing managed
+Secrets with legacy owner references are migrated during reconciliation.
+After upgrading from an older chart, allow the operator to reconcile existing
+resources before deleting a `Retain` resource so the legacy reference is
+removed before Kubernetes garbage collection can act.
 
 Set `rbac.create=false` to supply all RBAC resources outside the chart. Set
 `serviceAccount.create=false` and `serviceAccount.name` to use an existing

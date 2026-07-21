@@ -85,6 +85,9 @@ func TestReadySyncWritesTLSSecret(t *testing.T) {
 	if secret.Metadata.Labels[LabelManagedBy] != ManagedByValue {
 		t.Fatalf("missing managed label: %#v", secret.Metadata.Labels)
 	}
+	if len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("new Secret has garbage-collection owner references: %#v", secret.Metadata.OwnerReferences)
+	}
 	if cert.Status.Phase != PhaseReady || cert.Status.CertificateID != "cert-1" {
 		t.Fatalf("unexpected status: %#v", cert.Status)
 	}
@@ -93,14 +96,34 @@ func TestReadySyncWritesTLSSecret(t *testing.T) {
 	}
 }
 
-func TestNoContentLeavesExistingSecretUnchanged(t *testing.T) {
+func TestDeletePolicySyncWritesSecretWithoutOwnerReference(t *testing.T) {
 	kube := newFakeKube()
-	old := ownedSecret(testCertificate(), "old-etag")
+	backend := &fakeBackend{materials: []materialResponse{{value: testMaterial("etag-delete"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}}}}
+	reconciler := testReconciler(kube, backend)
+	cert := testCertificate()
+	cert.Spec.SecretDeletionPolicy = PolicyDelete
+
+	if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	secret := kube.secrets["ns/gateway-tls"]
+	if secret == nil || len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("Delete policy Secret has owner references: %#v", secret)
+	}
+	if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+		t.Fatalf("Delete policy finalizer not added: %#v", cert.Metadata.Finalizers)
+	}
+}
+
+func TestNoContentMigratesLegacyOwnerReferenceWithoutChangingData(t *testing.T) {
+	kube := newFakeKube()
+	cert := testCertificate()
+	old := ownedSecret(cert, "old-etag")
+	old.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
 	old.Data["tls.crt"] = []byte("OLD")
 	kube.secrets["ns/gateway-tls"] = old
 	backend := &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}}
 	reconciler := testReconciler(kube, backend)
-	cert := testCertificate()
 
 	result, err := reconciler.Reconcile(context.Background(), cert)
 	if err != nil {
@@ -117,6 +140,9 @@ func TestNoContentLeavesExistingSecretUnchanged(t *testing.T) {
 	}
 	if kube.writeCount != 0 {
 		t.Fatalf("unexpected secret write")
+	}
+	if kube.clearOwnerReferencesCount != 1 || len(kube.secrets["ns/gateway-tls"].Metadata.OwnerReferences) != 0 {
+		t.Fatalf("legacy owner reference was not cleared")
 	}
 }
 
@@ -259,9 +285,75 @@ func TestForeignOwnerReferenceRefusesSecret(t *testing.T) {
 	if len(backend.calls) != 0 || kube.writeCount != 0 {
 		t.Fatalf("foreign-owned secret was used: calls=%#v writes=%d", backend.calls, kube.writeCount)
 	}
+	if kube.clearOwnerReferencesCount != 0 {
+		t.Fatalf("foreign-owned Secret owner references were modified")
+	}
 	if cert.Status.Phase != PhaseFailed {
 		t.Fatalf("expected failed status, got %#v", cert.Status)
 	}
+}
+
+func TestOwnerReferenceCleanupFailurePreservesRetainFinalizer(t *testing.T) {
+	kube := newFakeKube()
+	cert := testCertificate()
+	cert.Metadata.Finalizers = []string{Finalizer}
+	secret := ownedSecret(cert, "old")
+	secret.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
+	kube.secrets["ns/gateway-tls"] = secret
+	kube.clearOwnerReferencesErr = stderrors.New("conflict")
+	backend := &fakeBackend{}
+	reconciler := testReconciler(kube, backend)
+
+	result, err := reconciler.Reconcile(context.Background(), cert)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != reconciler.Backoff || result.Result != "owner_reference_cleanup_failed" {
+		t.Fatalf("unexpected cleanup failure result: %#v", result)
+	}
+	if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+		t.Fatalf("Retain finalizer was removed before owner-reference cleanup")
+	}
+	if len(backend.calls) != 0 {
+		t.Fatalf("backend called after metadata migration failure: %#v", backend.calls)
+	}
+}
+
+func TestDeletionPolicyTransitionsReconcileFinalizer(t *testing.T) {
+	t.Run("Retain to Delete adds finalizer", func(t *testing.T) {
+		kube := newFakeKube()
+		cert := testCertificate()
+		cert.Spec.SecretDeletionPolicy = PolicyDelete
+		kube.secrets["ns/gateway-tls"] = ownedSecret(cert, "old")
+		reconciler := testReconciler(kube, &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}})
+
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+			t.Fatalf("Delete policy finalizer not added: %#v", cert.Metadata.Finalizers)
+		}
+	})
+
+	t.Run("Delete to Retain clears legacy owner and finalizer", func(t *testing.T) {
+		kube := newFakeKube()
+		cert := testCertificate()
+		cert.Metadata.Finalizers = []string{Finalizer}
+		secret := ownedSecret(cert, "old")
+		secret.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
+		kube.secrets["ns/gateway-tls"] = secret
+		reconciler := testReconciler(kube, &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}})
+
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+			t.Fatalf("Retain policy finalizer remained: %#v", cert.Metadata.Finalizers)
+		}
+		if kube.clearOwnerReferencesCount != 1 || len(secret.Metadata.OwnerReferences) != 0 {
+			t.Fatalf("legacy owner reference was not cleared before finalizer")
+		}
+	})
 }
 
 func TestWriteTimeOwnershipCheckRejectsSwappedSecret(t *testing.T) {
@@ -303,6 +395,31 @@ func TestRetryIDStoredAsHashMarker(t *testing.T) {
 	}
 	if cert.Status.ObservedRetryID == "" || strings.Contains(cert.Status.ObservedRetryID, "cth_app_v1_") {
 		t.Fatalf("retry id was not safely marked: %q", cert.Status.ObservedRetryID)
+	}
+}
+
+func TestRetainPolicyClearsLegacyOwnerBeforeCRDeletion(t *testing.T) {
+	kube := newFakeKube()
+	cert := testCertificate()
+	now := time.Now().UTC()
+	cert.Metadata.DeletionTimestamp = &now
+	cert.Metadata.Finalizers = []string{Finalizer}
+	secret := ownedSecret(cert, "old")
+	secret.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
+	kube.secrets["ns/gateway-tls"] = secret
+	reconciler := testReconciler(kube, &fakeBackend{})
+
+	if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if kube.deleteCount != 0 || kube.secrets["ns/gateway-tls"] == nil {
+		t.Fatalf("Retain policy removed the target Secret")
+	}
+	if kube.clearOwnerReferencesCount != 1 || len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("legacy owner reference was not cleared")
+	}
+	if slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+		t.Fatalf("finalizer not removed after Secret retention: %#v", cert.Metadata.Finalizers)
 	}
 }
 
@@ -894,18 +1011,21 @@ func ownedSecret(cert *CerthubCertificate, etag string) *Secret {
 				AnnotationOwnerUID:     cert.Metadata.UID,
 				AnnotationMaterialETag: etag,
 			},
-			OwnerReferences: []OwnerReference{{
-				APIVersion: APIVersion,
-				Kind:       Kind,
-				Name:       cert.Metadata.Name,
-				UID:        cert.Metadata.UID,
-			}},
 		},
 		Type: SecretTypeTLS,
 		Data: map[string][]byte{
 			"tls.crt": []byte("CERT"),
 			"tls.key": []byte("KEY"),
 		},
+	}
+}
+
+func certhubOwnerReference(cert *CerthubCertificate) OwnerReference {
+	return OwnerReference{
+		APIVersion: APIVersion,
+		Kind:       Kind,
+		Name:       cert.Metadata.Name,
+		UID:        cert.Metadata.UID,
 	}
 }
 
@@ -1006,20 +1126,22 @@ func (f *fakeBackend) EnsureCertificate(_ context.Context, _ certhubclient.Certi
 }
 
 type fakeKube struct {
-	secrets                 map[string]*Secret
-	certificates            []*CerthubCertificate
-	certificatesByNamespace map[string][]*CerthubCertificate
-	listErrors              map[string]error
-	listedNamespaces        []string
-	watchChannels           map[string]chan struct{}
-	watchedNamespaces       []string
-	statusUpdates           int
-	writeCount              int
-	deleteCount             int
-	events                  []Event
-	statusErr               error
-	beforeDelete            func()
-	finalizerErr            error
+	secrets                   map[string]*Secret
+	certificates              []*CerthubCertificate
+	certificatesByNamespace   map[string][]*CerthubCertificate
+	listErrors                map[string]error
+	listedNamespaces          []string
+	watchChannels             map[string]chan struct{}
+	watchedNamespaces         []string
+	statusUpdates             int
+	writeCount                int
+	clearOwnerReferencesCount int
+	deleteCount               int
+	events                    []Event
+	statusErr                 error
+	beforeDelete              func()
+	finalizerErr              error
+	clearOwnerReferencesErr   error
 }
 
 func newFakeKube() *fakeKube {
@@ -1037,6 +1159,15 @@ func (f *fakeKube) GetSecret(_ context.Context, namespace, name string) (*Secret
 func (f *fakeKube) CreateOrUpdateSecret(_ context.Context, secret *Secret) error {
 	f.writeCount++
 	f.secrets[secret.Metadata.Namespace+"/"+secret.Metadata.Name] = secret
+	return nil
+}
+
+func (f *fakeKube) ClearSecretOwnerReferences(_ context.Context, secret *Secret) error {
+	if f.clearOwnerReferencesErr != nil {
+		return f.clearOwnerReferencesErr
+	}
+	f.clearOwnerReferencesCount++
+	secret.Metadata.OwnerReferences = nil
 	return nil
 }
 

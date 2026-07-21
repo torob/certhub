@@ -70,7 +70,7 @@ func TestRESTKubeClientRetriesReadsButNotMutations(t *testing.T) {
 func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *testing.T) {
 	ctx := context.Background()
 	var stored *Secret
-	var sawPost, sawPut, sawDelete bool
+	var sawPost, sawOwnerReferencePatch, sawPut, sawDelete bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requireKubeAuth(t, r)
 		switch {
@@ -98,11 +98,26 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 			stored = &created
 			sawPost = true
 			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
+			if r.Header.Get("Content-Type") != "application/merge-patch+json" {
+				t.Fatalf("owner-reference patch content type = %q", r.Header.Get("Content-Type"))
+			}
+			var patch struct {
+				Metadata Metadata `json:"metadata"`
+			}
+			decodeKubeJSON(t, r, &patch)
+			if patch.Metadata.ResourceVersion != "rv-1" || patch.Metadata.OwnerReferences == nil || len(patch.Metadata.OwnerReferences) != 0 {
+				t.Fatalf("unexpected owner-reference patch: %#v", patch.Metadata)
+			}
+			stored.Metadata.OwnerReferences = nil
+			stored.Metadata.ResourceVersion = "rv-cleaned"
+			sawOwnerReferencePatch = true
+			writeKubeJSON(t, w, stored)
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			requireKubeContentType(t, r, "application/json")
 			var updated Secret
 			decodeKubeJSON(t, r, &updated)
-			if updated.Metadata.ResourceVersion != "rv-1" {
+			if updated.Metadata.ResourceVersion != "rv-cleaned" {
 				t.Fatalf("update did not carry resourceVersion: %#v", updated.Metadata)
 			}
 			if got := string(updated.Data["tls.key"]); got != "KEY2" {
@@ -146,6 +161,13 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 	if !sawPost {
 		t.Fatalf("create did not POST")
 	}
+	stored.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
+	if err := client.ClearSecretOwnerReferences(ctx, stored); err != nil {
+		t.Fatalf("owner-reference cleanup failed: %v", err)
+	}
+	if !sawOwnerReferencePatch {
+		t.Fatalf("owner-reference cleanup did not PATCH")
+	}
 
 	updated := ownedSecret(cert, "etag-2")
 	updated.Data["tls.key"] = []byte("KEY2")
@@ -161,6 +183,16 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 	}
 	if !sawDelete {
 		t.Fatalf("delete did not use Kubernetes delete preconditions")
+	}
+}
+
+func TestRESTKubeClientOwnerReferenceCleanupRequiresVersionedSecret(t *testing.T) {
+	client := &RESTKubeClient{}
+	if err := client.ClearSecretOwnerReferences(context.Background(), nil); err == nil {
+		t.Fatal("nil Secret accepted for owner-reference cleanup")
+	}
+	if err := client.ClearSecretOwnerReferences(context.Background(), &Secret{Metadata: Metadata{Name: "gateway-tls", Namespace: "ns"}}); err == nil {
+		t.Fatal("unversioned Secret accepted for owner-reference cleanup")
 	}
 }
 

@@ -20,6 +20,7 @@ var ErrNotFound = stderrors.New("not found")
 type KubernetesClient interface {
 	GetSecret(ctx context.Context, namespace, name string) (*Secret, error)
 	CreateOrUpdateSecret(ctx context.Context, secret *Secret) error
+	ClearSecretOwnerReferences(ctx context.Context, secret *Secret) error
 	DeleteSecret(ctx context.Context, namespace, name string, expected *Secret) error
 	UpdateStatus(ctx context.Context, cert *CerthubCertificate) error
 	UpdateFinalizers(ctx context.Context, cert *CerthubCertificate, finalizers []string) error
@@ -142,7 +143,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 			r.Metrics.IncSecretSync("ownership_conflict")
 			return reconcileResult("ownership_conflict", 0), nil
 		}
+		if len(secret.Metadata.OwnerReferences) > 0 {
+			if cleanupErr := r.Kube.ClearSecretOwnerReferences(ctx, secret); cleanupErr != nil {
+				r.failTransient(ctx, cert, "SecretOwnerReferenceCleanupFailed", cleanupErr.Error())
+				r.Metrics.IncReconcile("owner_reference_cleanup_failed")
+				r.Metrics.IncSecretSync("metadata_migration_failed")
+				return reconcileResult("owner_reference_cleanup_failed", r.Backoff), nil
+			}
+			secret.Metadata.OwnerReferences = nil
+			r.emit(ctx, cert, "Normal", "SecretOwnerReferenceRemoved", "legacy Secret owner reference removed")
+			r.Metrics.IncSecretSync("metadata_migrated")
+		}
 		ifNoneMatch = secret.Metadata.Annotations[AnnotationMaterialETag]
+	}
+	if SecretDeletionPolicy(cert.Spec) == PolicyRetain && slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+		next := removeFinalizer(cert.Metadata.Finalizers, Finalizer)
+		if err := r.Kube.UpdateFinalizers(ctx, cert, next); err != nil {
+			r.Metrics.IncReconcile("finalizer_failed")
+			return reconcileResult("finalizer_failed", r.Backoff), err
+		}
+		cert.Metadata.Finalizers = next
 	}
 
 	criteria := certhubclient.CertificateCriteria{
@@ -212,14 +232,27 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 			r.failTransient(ctx, cert, "SecretReadFailed", err.Error())
 			return reconcileResult("secret_read_failed", r.Backoff), nil
 		}
+	} else {
+		secret, err := r.Kube.GetSecret(ctx, cert.Metadata.Namespace, cert.Spec.SecretName)
+		if err == nil && secret != nil && len(secret.Metadata.OwnerReferences) > 0 {
+			if ownershipErr := checkOwnedSecret(cert, secret); ownershipErr == nil {
+				if cleanupErr := r.Kube.ClearSecretOwnerReferences(ctx, secret); cleanupErr != nil {
+					r.failTransient(ctx, cert, "SecretOwnerReferenceCleanupFailed", cleanupErr.Error())
+					r.Metrics.IncReconcile("owner_reference_cleanup_failed")
+					return reconcileResult("owner_reference_cleanup_failed", r.Backoff), nil
+				}
+				secret.Metadata.OwnerReferences = nil
+				r.emit(ctx, cert, "Normal", "SecretRetained", "legacy Secret owner reference removed before deletion")
+			} else {
+				r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
+			}
+		} else if err != nil && !stderrors.Is(err, ErrNotFound) {
+			r.failTransient(ctx, cert, "SecretReadFailed", err.Error())
+			return reconcileResult("secret_read_failed", r.Backoff), nil
+		}
 	}
 	if slices.Contains(cert.Metadata.Finalizers, Finalizer) {
-		next := make([]string, 0, len(cert.Metadata.Finalizers)-1)
-		for _, finalizer := range cert.Metadata.Finalizers {
-			if finalizer != Finalizer {
-				next = append(next, finalizer)
-			}
-		}
+		next := removeFinalizer(cert.Metadata.Finalizers, Finalizer)
 		if err := r.Kube.UpdateFinalizers(ctx, cert, next); err != nil {
 			r.Metrics.IncReconcile("finalizer_failed")
 			return reconcileResult("finalizer_failed", r.Backoff), err
@@ -229,6 +262,16 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 	r.Metrics.IncReconcile("deleted")
 	r.Metrics.ClearCertificateConditions(cert.Metadata.Namespace, cert.Metadata.Name)
 	return reconcileResult("deleted", 0), nil
+}
+
+func removeFinalizer(finalizers []string, remove string) []string {
+	next := make([]string, 0, len(finalizers))
+	for _, finalizer := range finalizers {
+		if finalizer != remove {
+			next = append(next, finalizer)
+		}
+	}
+	return next
 }
 
 func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertificate, criteria certhubclient.CertificateCriteria, domains []string, err error) (Result, error) {
@@ -363,12 +406,6 @@ func (r *Reconciler) writeTLSSecret(ctx context.Context, cert *CerthubCertificat
 				AnnotationNotAfter:          value.NotAfter.Format(time.RFC3339),
 				AnnotationOwnerUID:          cert.Metadata.UID,
 			},
-			OwnerReferences: []OwnerReference{{
-				APIVersion: APIVersion,
-				Kind:       Kind,
-				Name:       cert.Metadata.Name,
-				UID:        cert.Metadata.UID,
-			}},
 		},
 		Type: SecretTypeTLS,
 		Data: map[string][]byte{
