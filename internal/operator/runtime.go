@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,13 @@ type Runtime struct {
 	Backend BackendClient
 	Logger  *slog.Logger
 	Metrics *Metrics
+
+	watchInputs map[string]string
+}
+
+type namespacedCertificateWatchEvent struct {
+	namespace string
+	event     CertificateWatchEvent
 }
 
 func NewInClusterRuntime(ctx context.Context, cfg Config) (*Runtime, error) {
@@ -95,10 +103,13 @@ func (r *Runtime) Run(ctx context.Context, stderr io.Writer) error {
 			return nil
 		case err := <-errc:
 			return fmt.Errorf("metrics server failed: %w", err)
-		case namespace := <-watchCh:
-			nextDelay, err = r.reconcileNamespace(ctx, reconciler, logger, namespace)
+		case change := <-watchCh:
+			if !r.shouldReconcileWatchEvent(change.namespace, change.event) {
+				continue
+			}
+			nextDelay, err = r.reconcileNamespace(ctx, reconciler, logger, change.namespace)
 			if err != nil {
-				logger.Error("operator namespace reconcile failed", "namespace", namespace, "error", Sanitize(err.Error()))
+				logger.Error("operator namespace reconcile failed", "namespace", change.namespace, "error", Sanitize(err.Error()))
 				nextDelay = r.Config.ReconcileBackoff
 			}
 			resetTimer(timer, nextDelay)
@@ -138,6 +149,7 @@ func (r *Runtime) reconcileNamespace(ctx context.Context, reconciler *Reconciler
 	}
 	nextDelay := r.Config.ResyncInterval
 	for _, cert := range items {
+		r.rememberCertificateInput(cert)
 		reconcileID := fmt.Sprintf("operator-%s-%d", cert.Metadata.UID, time.Now().UTC().UnixNano())
 		reconciler.NewRequestID = func(*CerthubCertificate) string { return reconcileID }
 		start := time.Now()
@@ -177,9 +189,9 @@ func (r *Runtime) watchNamespaces() []string {
 	return r.Config.WatchNamespaces
 }
 
-func (r *Runtime) watchCertificateChanges(ctx context.Context) (<-chan string, error) {
+func (r *Runtime) watchCertificateChanges(ctx context.Context) (<-chan namespacedCertificateWatchEvent, error) {
 	namespaces := r.watchNamespaces()
-	events := make(chan string, len(namespaces))
+	events := make(chan namespacedCertificateWatchEvent, len(namespaces))
 	for _, namespace := range namespaces {
 		watch, err := r.Kube.WatchCertificateChanges(ctx, namespace)
 		if err != nil {
@@ -190,12 +202,12 @@ func (r *Runtime) watchCertificateChanges(ctx context.Context) (<-chan string, e
 	return events, nil
 }
 
-func (r *Runtime) forwardNamespaceWatch(ctx context.Context, namespace string, watch <-chan struct{}, events chan<- string) {
+func (r *Runtime) forwardNamespaceWatch(ctx context.Context, namespace string, watch <-chan CertificateWatchEvent, events chan<- namespacedCertificateWatchEvent) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case _, ok := <-watch:
+		case event, ok := <-watch:
 			if !ok {
 				if ctx.Err() != nil {
 					return
@@ -215,12 +227,67 @@ func (r *Runtime) forwardNamespaceWatch(ctx context.Context, namespace string, w
 				continue
 			}
 			select {
-			case events <- namespace:
+			case events <- namespacedCertificateWatchEvent{namespace: namespace, event: event}:
 			case <-ctx.Done():
 				return
 			}
 		}
 	}
+}
+
+func (r *Runtime) rememberCertificateInput(cert *CerthubCertificate) {
+	if cert == nil {
+		return
+	}
+	if r.watchInputs == nil {
+		r.watchInputs = make(map[string]string)
+	}
+	r.watchInputs[certificateWatchKey(cert)] = certificateReconcileInput(cert)
+}
+
+func (r *Runtime) shouldReconcileWatchEvent(namespace string, event CertificateWatchEvent) bool {
+	cert := event.Certificate
+	if cert == nil {
+		return false
+	}
+	if cert.Metadata.Namespace == "" {
+		cert.Metadata.Namespace = namespace
+	}
+	key := certificateWatchKey(cert)
+	if r.watchInputs == nil {
+		r.watchInputs = make(map[string]string)
+	}
+	if event.Type == "DELETED" {
+		delete(r.watchInputs, key)
+		return false
+	}
+	if event.Type != "ADDED" && event.Type != "MODIFIED" {
+		return false
+	}
+	next := certificateReconcileInput(cert)
+	previous, known := r.watchInputs[key]
+	r.watchInputs[key] = next
+	return !known || previous != next
+}
+
+func certificateWatchKey(cert *CerthubCertificate) string {
+	return cert.Metadata.Namespace + "/" + cert.Metadata.Name + "/" + cert.Metadata.UID
+}
+
+func certificateReconcileInput(cert *CerthubCertificate) string {
+	value := struct {
+		Spec              CerthubCertificateSpec `json:"spec"`
+		RetryID           string                 `json:"retryId,omitempty"`
+		Finalizers        []string               `json:"finalizers,omitempty"`
+		DeletionTimestamp *time.Time             `json:"deletionTimestamp,omitempty"`
+	}{
+		Spec:              cert.Spec,
+		RetryID:           cert.Metadata.Annotations[AnnotationRetryID],
+		Finalizers:        cert.Metadata.Finalizers,
+		DeletionTimestamp: cert.Metadata.DeletionTimestamp,
+	}
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func resetTimer(timer *time.Timer, delay time.Duration) {

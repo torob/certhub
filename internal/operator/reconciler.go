@@ -7,6 +7,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"time"
 
@@ -101,11 +102,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 
 	normalized, err := ValidateCertificateSpec(cert.Spec)
 	if err != nil {
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.setStatus(cert, PhaseFailed, Sanitize(err.Error()),
 			condition(ConditionAccepted, ConditionFalse, "InvalidSpec", err.Error(), r.Now()),
 			condition(ConditionReady, ConditionFalse, "InvalidSpec", err.Error(), r.Now()),
 		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, _ := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
 		}
 		r.Metrics.IncReconcile("invalid")
@@ -130,15 +132,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 	var ifNoneMatch string
 	if err == nil && secret != nil {
 		if ownershipErr := checkOwnedSecret(cert, secret); ownershipErr != nil {
+			previousStatus := cloneCertificateStatus(cert.Status)
 			r.setStatus(cert, PhaseFailed, ownershipErr.Error(),
 				condition(ConditionAccepted, ConditionTrue, "Accepted", "spec accepted", r.Now()),
 				condition(ConditionSecretSynced, ConditionFalse, "SecretOwnershipConflict", ownershipErr.Error(), r.Now()),
 				condition(ConditionReady, ConditionFalse, "SecretOwnershipConflict", ownershipErr.Error(), r.Now()),
 			)
-			if result, ok := r.updateStatus(ctx, cert); !ok {
+			if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 				return result, nil
+			} else if changed {
+				r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
 			}
-			r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
 			r.Metrics.IncReconcile("ownership_conflict")
 			r.Metrics.IncSecretSync("ownership_conflict")
 			return reconcileResult("ownership_conflict", 0), nil
@@ -177,11 +181,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 	if err == nil {
 		r.Metrics.IncBackend("ok")
 		if materialValue == nil && meta.StatusCode == http.StatusNoContent {
+			previousStatus := cloneCertificateStatus(cert.Status)
 			r.markReady(cert, normalized.Domains, "", "Secret current")
-			if result, ok := r.updateStatus(ctx, cert); !ok {
+			if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 				return result, nil
+			} else if changed {
+				r.emit(ctx, cert, "Normal", "CertificateReady", "Certificate material is ready")
 			}
-			r.emit(ctx, cert, "Normal", "CertificateReady", "Certificate material is ready")
 			r.Metrics.IncReconcile("current")
 			r.Metrics.IncSecretSync("current")
 			return backendResult("current", "ok", r.ResyncInterval), nil
@@ -197,11 +203,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 			r.Metrics.IncSecretSync("write_failed")
 			return reconcileResult("secret_write_failed", r.Backoff), nil
 		}
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.markReady(cert, normalized.Domains, materialValue.CertificateID, "Secret synced")
 		cert.Status.NotBefore = materialValue.NotBefore.Format(time.RFC3339)
 		cert.Status.NotAfter = materialValue.NotAfter.Format(time.RFC3339)
 		cert.Status.RenewalTime = materialValue.NotAfter.Add(-30 * 24 * time.Hour).Format(time.RFC3339)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, _ := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
 		}
 		r.emit(ctx, cert, "Normal", "CertificateReady", "Certificate material is ready")
@@ -277,8 +284,9 @@ func removeFinalizer(finalizers []string, remove string) []string {
 func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertificate, criteria certhubclient.CertificateCriteria, domains []string, err error) (Result, error) {
 	var apiErr *certerrors.APIError
 	if !stderrors.As(err, &apiErr) {
-		r.failTransient(ctx, cert, "BackendUnavailable", err.Error())
-		r.emit(ctx, cert, "Warning", "BackendUnavailable", "Certhub request failed")
+		if r.failTransient(ctx, cert, "BackendUnavailable", err.Error()) {
+			r.emit(ctx, cert, "Warning", "BackendUnavailable", "Certhub request failed")
+		}
 		r.Metrics.IncReconcile("backend_unavailable")
 		r.Metrics.IncBackend("transport")
 		return backendResult("backend_unavailable", "transport", r.Backoff), nil
@@ -300,6 +308,7 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 		if response != nil {
 			certificateID = response.Certificate.ID
 		}
+		previousStatus := cloneCertificateStatus(cert.Status)
 		cert.Status.CertificateID = certificateID
 		r.setStatus(cert, PhaseIssuing, "Certificate creation requested",
 			condition(ConditionAccepted, ConditionTrue, "Accepted", "spec accepted", r.Now()),
@@ -307,7 +316,7 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 			condition(ConditionSecretSynced, ConditionFalse, "PendingMaterial", "TLS material is not ready", r.Now()),
 		)
 		cert.Status.ObservedDomains = append([]string(nil), domains...)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, _ := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
 		}
 		r.emit(ctx, cert, "Normal", "CertificateCreated", "Certhub certificate creation requested")
@@ -316,61 +325,70 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 		}
 		return backendResult("certificate_created", code, r.Backoff), nil
 	case certerrors.CodeCertificateNotReady, certerrors.CodeCertificateExpired:
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.setStatus(cert, PhaseIssuing, "Certificate material is not ready",
 			condition(ConditionAccepted, ConditionTrue, "Accepted", "spec accepted", r.Now()),
 			condition(ConditionReady, ConditionFalse, "PendingMaterial", "Certificate material is not ready", r.Now()),
 			condition(ConditionSecretSynced, ConditionFalse, "PendingMaterial", "TLS material is not ready", r.Now()),
 		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
+		} else if changed {
+			r.emit(ctx, cert, "Normal", "CertificatePending", "Certificate material is not ready")
 		}
-		r.emit(ctx, cert, "Normal", "CertificatePending", "Certificate material is not ready")
 		return backendResult("pending_material", code, retryDelay(apiErr, r.Backoff)), nil
 	case certerrors.CodeCertificateIssuanceFailed:
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.setStatus(cert, PhaseFailed, Sanitize(apiErr.Envelope.Message),
 			condition(ConditionIssuanceFailed, ConditionTrue, "IssuanceFailed", apiErr.Envelope.Message, r.Now()),
 			condition(ConditionReady, ConditionFalse, "IssuanceFailed", apiErr.Envelope.Message, r.Now()),
 		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
+		} else if changed {
+			r.emit(ctx, cert, "Warning", "IssuanceFailed", apiErr.Envelope.Message)
 		}
-		r.emit(ctx, cert, "Warning", "IssuanceFailed", apiErr.Envelope.Message)
 		return backendResult("issuance_failed", code, 0), nil
 	case certerrors.CodeCertificateRevoked, certerrors.CodeCertificateNoActiveVersion:
 		resultReason := "certificate_revoked"
 		if code == certerrors.CodeCertificateNoActiveVersion {
 			resultReason = "certificate_no_active_version"
 		}
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.setStatus(cert, PhaseFailed, Sanitize(apiErr.Envelope.Message),
 			condition(ConditionCertificateRevoked, ConditionTrue, "CertificateRevoked", apiErr.Envelope.Message, r.Now()),
 			condition(ConditionReady, ConditionFalse, "CertificateRevoked", apiErr.Envelope.Message, r.Now()),
 		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
+		} else if changed {
+			r.emit(ctx, cert, "Warning", "CertificateRevoked", apiErr.Envelope.Message)
 		}
-		r.emit(ctx, cert, "Warning", "CertificateRevoked", apiErr.Envelope.Message)
 		return backendResult(resultReason, code, 0), nil
 	case certerrors.CodeDomainNotAuthorized, certerrors.CodeApplicationSourceIPDenied, certerrors.CodeApplicationTokenRequired, certerrors.CodeInvalidToken:
 		message := "Certhub Application is not authorized for this certificate"
 		if code == certerrors.CodeApplicationSourceIPDenied {
 			message = "operator source IP is outside the Certhub Application trusted source CIDRs"
 		}
+		previousStatus := cloneCertificateStatus(cert.Status)
 		r.setStatus(cert, PhaseFailed, message,
 			condition(ConditionAuthorizationFailed, ConditionTrue, "AuthorizationFailed", message, r.Now()),
 			condition(ConditionReady, ConditionFalse, "AuthorizationFailed", message, r.Now()),
 		)
-		if result, ok := r.updateStatus(ctx, cert); !ok {
+		if result, ok, changed := r.updateStatus(ctx, cert, previousStatus); !ok {
 			return result, nil
+		} else if changed {
+			r.emit(ctx, cert, "Warning", "AuthorizationFailed", message)
 		}
-		r.emit(ctx, cert, "Warning", "AuthorizationFailed", message)
 		return backendResult("authorization_failed", code, 0), nil
 	default:
 		requeue := r.Backoff
 		if apiErr.Envelope.Retryable {
 			requeue = retryDelay(apiErr, r.Backoff)
 		}
-		r.failTransient(ctx, cert, backendReason(code), apiErr.Envelope.Message)
-		r.emit(ctx, cert, "Warning", "BackendUnavailable", apiErr.Envelope.Message)
+		if r.failTransient(ctx, cert, backendReason(code), apiErr.Envelope.Message) {
+			r.emit(ctx, cert, "Warning", "BackendUnavailable", apiErr.Envelope.Message)
+		}
 		return backendResult("backend_error", code, requeue), nil
 	}
 }
@@ -468,12 +486,14 @@ func (r *Reconciler) markReady(cert *CerthubCertificate, domains []string, certi
 	cert.Status.ObservedDomains = append([]string(nil), domains...)
 }
 
-func (r *Reconciler) failTransient(ctx context.Context, cert *CerthubCertificate, reason, message string) {
+func (r *Reconciler) failTransient(ctx context.Context, cert *CerthubCertificate, reason, message string) bool {
+	previousStatus := cloneCertificateStatus(cert.Status)
 	r.setStatus(cert, PhasePending, Sanitize(message),
 		condition(ConditionReady, ConditionFalse, reason, message, r.Now()),
 		condition(ConditionSecretSynced, ConditionFalse, reason, message, r.Now()),
 	)
-	_, _ = r.updateStatus(ctx, cert)
+	_, ok, changed := r.updateStatus(ctx, cert, previousStatus)
+	return ok && changed
 }
 
 func (r *Reconciler) setStatus(cert *CerthubCertificate, phase, message string, conditions ...Condition) {
@@ -490,13 +510,23 @@ func (r *Reconciler) setStatus(cert *CerthubCertificate, phase, message string, 
 	}
 }
 
-func (r *Reconciler) updateStatus(ctx context.Context, cert *CerthubCertificate) (Result, bool) {
+func (r *Reconciler) updateStatus(ctx context.Context, cert *CerthubCertificate, previous CerthubCertificateStatus) (Result, bool, bool) {
+	if reflect.DeepEqual(previous, cert.Status) {
+		r.Metrics.SetCertificateConditions(cert)
+		return Result{}, true, false
+	}
 	if err := r.Kube.UpdateStatus(ctx, cert); err != nil {
 		r.Metrics.IncReconcile("status_update_failed")
-		return reconcileResult("status_update_failed", r.Backoff), false
+		return reconcileResult("status_update_failed", r.Backoff), false, false
 	}
 	r.Metrics.SetCertificateConditions(cert)
-	return Result{}, true
+	return Result{}, true, true
+}
+
+func cloneCertificateStatus(status CerthubCertificateStatus) CerthubCertificateStatus {
+	status.ObservedDomains = append([]string(nil), status.ObservedDomains...)
+	status.Conditions = append([]Condition(nil), status.Conditions...)
+	return status
 }
 
 func retryIDMarker(value string) string {
@@ -517,6 +547,9 @@ func condition(conditionType, status, reason, message string, now time.Time) Con
 func upsertCondition(status *CerthubCertificateStatus, next Condition) {
 	for i := range status.Conditions {
 		if status.Conditions[i].Type == next.Type {
+			if status.Conditions[i].Status == next.Status {
+				next.LastTransitionTime = status.Conditions[i].LastTransitionTime
+			}
 			status.Conditions[i] = next
 			return
 		}

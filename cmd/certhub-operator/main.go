@@ -17,7 +17,7 @@ const operatorConfigHelp = `Configuration:
   CERTHUB_TOKEN                       required Certhub Application token
   WATCH_NAMESPACES                    optional comma-separated namespace scope, empty means all namespaces
   CERTHUB_METRICS_BIND_ADDR           optional metrics/probe bind address, default :8080
-  CERTHUB_RESYNC_INTERVAL             optional duration, default 6h
+  CERTHUB_RESYNC_INTERVAL             optional duration, minimum 30s, default 6h
   CERTHUB_RECONCILE_BACKOFF           optional duration, default 1m
   CERTHUB_HTTP_TIMEOUT                optional backend request timeout, default 30s
 `

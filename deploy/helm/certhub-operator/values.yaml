@@ -31,6 +31,7 @@ certhub:
   # injected into the operator as CERTHUB_TOKEN without operator Secret RBAC.
   tokenSecretName: certhub-token
   tokenSecretKey: token
+  # Periodic certificate resync; the operator accepts values of at least 30s.
   resyncInterval: 6h
   reconcileBackoff: 1m
   httpTimeout: 30s

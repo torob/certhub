@@ -382,6 +382,104 @@ func TestStatusUpdateFailureRequeues(t *testing.T) {
 	}
 }
 
+func TestStableReconcileSkipsStatusWritesAndEvents(t *testing.T) {
+	t.Run("ready current", func(t *testing.T) {
+		kube := newFakeKube()
+		cert := testCertificate()
+		kube.secrets["ns/gateway-tls"] = ownedSecret(cert, "old")
+		backend := &fakeBackend{materials: []materialResponse{
+			{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}},
+			{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}},
+		}}
+		reconciler := testReconciler(kube, backend)
+
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		firstConditions := append([]Condition(nil), cert.Status.Conditions...)
+		reconciler.Now = func() time.Time { return time.Date(2026, 6, 26, 13, 0, 0, 0, time.UTC) }
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		if kube.statusUpdates != 1 {
+			t.Fatalf("status updates = %d; want one transition write", kube.statusUpdates)
+		}
+		if len(kube.events) != 1 || kube.events[0].Reason != "CertificateReady" {
+			t.Fatalf("events repeated for stable Ready status: %#v", kube.events)
+		}
+		if !reflect.DeepEqual(cert.Status.Conditions, firstConditions) {
+			t.Fatalf("stable Ready conditions changed: before=%#v after=%#v", firstConditions, cert.Status.Conditions)
+		}
+	})
+
+	t.Run("authorization failed", func(t *testing.T) {
+		kube := newFakeKube()
+		cert := testCertificate()
+		backend := &fakeBackend{materials: []materialResponse{
+			{err: apiError(http.StatusForbidden, certerrors.CodeDomainNotAuthorized, false, nil)},
+			{err: apiError(http.StatusForbidden, certerrors.CodeDomainNotAuthorized, false, nil)},
+		}}
+		reconciler := testReconciler(kube, backend)
+
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		firstConditions := append([]Condition(nil), cert.Status.Conditions...)
+		reconciler.Now = func() time.Time { return time.Date(2026, 6, 26, 13, 0, 0, 0, time.UTC) }
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		if kube.statusUpdates != 1 || len(kube.events) != 1 {
+			t.Fatalf("stable authorization failure wrote status/events: updates=%d events=%#v", kube.statusUpdates, kube.events)
+		}
+		if !reflect.DeepEqual(cert.Status.Conditions, firstConditions) {
+			t.Fatalf("stable authorization conditions changed: before=%#v after=%#v", firstConditions, cert.Status.Conditions)
+		}
+	})
+
+	t.Run("ownership conflict", func(t *testing.T) {
+		kube := newFakeKube()
+		cert := testCertificate()
+		unowned := ownedSecret(cert, "old")
+		unowned.Metadata.Annotations[AnnotationOwnerUID] = "other-owner"
+		kube.secrets["ns/gateway-tls"] = unowned
+		reconciler := testReconciler(kube, &fakeBackend{})
+
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		firstConditions := append([]Condition(nil), cert.Status.Conditions...)
+		reconciler.Now = func() time.Time { return time.Date(2026, 6, 26, 13, 0, 0, 0, time.UTC) }
+		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+			t.Fatal(err)
+		}
+		if kube.statusUpdates != 1 || len(kube.events) != 1 {
+			t.Fatalf("stable ownership conflict wrote status/events: updates=%d events=%#v", kube.statusUpdates, kube.events)
+		}
+		if !reflect.DeepEqual(cert.Status.Conditions, firstConditions) {
+			t.Fatalf("stable ownership conditions changed: before=%#v after=%#v", firstConditions, cert.Status.Conditions)
+		}
+	})
+}
+
+func TestConditionTransitionTimeChangesOnlyWithConditionStatus(t *testing.T) {
+	first := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Hour)
+	third := second.Add(time.Hour)
+	status := CerthubCertificateStatus{Conditions: []Condition{
+		condition(ConditionReady, ConditionFalse, "Pending", "waiting", first),
+	}}
+
+	upsertCondition(&status, condition(ConditionReady, ConditionFalse, "StillPending", "still waiting", second))
+	if got := status.Conditions[0].LastTransitionTime; !got.Equal(first) {
+		t.Fatalf("same-status update moved transition time to %s", got)
+	}
+	upsertCondition(&status, condition(ConditionReady, ConditionTrue, "Ready", "ready", third))
+	if got := status.Conditions[0].LastTransitionTime; !got.Equal(third) {
+		t.Fatalf("status transition time = %s; want %s", got, third)
+	}
+}
+
 func TestRetryIDStoredAsHashMarker(t *testing.T) {
 	kube := newFakeKube()
 	backend := &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}}
@@ -679,9 +777,9 @@ func TestRuntimeEmptyNamespaceListUsesClusterScope(t *testing.T) {
 
 func TestRuntimeMultiplexesNamespaceWatches(t *testing.T) {
 	kube := newFakeKube()
-	kube.watchChannels = map[string]chan struct{}{
-		"first":  make(chan struct{}, 1),
-		"second": make(chan struct{}, 1),
+	kube.watchChannels = map[string]chan CertificateWatchEvent{
+		"first":  make(chan CertificateWatchEvent, 1),
+		"second": make(chan CertificateWatchEvent, 1),
 	}
 	runtime := &Runtime{
 		Config: Config{WatchNamespaces: []string{"first", "second"}},
@@ -694,17 +792,62 @@ func TestRuntimeMultiplexesNamespaceWatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kube.watchChannels["second"] <- struct{}{}
+	kube.watchChannels["second"] <- CertificateWatchEvent{Type: "ADDED", Certificate: testCertificate()}
 	select {
-	case namespace := <-events:
-		if namespace != "second" {
-			t.Fatalf("event namespace = %q", namespace)
+	case change := <-events:
+		if change.namespace != "second" || change.event.Type != "ADDED" {
+			t.Fatalf("unexpected watch change: %#v", change)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for namespace watch event")
 	}
 	if !reflect.DeepEqual(kube.watchedNamespaces, []string{"first", "second"}) {
 		t.Fatalf("watched namespaces = %#v", kube.watchedNamespaces)
+	}
+}
+
+func TestRuntimeFiltersStatusOnlyWatchChanges(t *testing.T) {
+	runtime := &Runtime{}
+	base := testCertificate()
+	base.Metadata.ResourceVersion = "1"
+	runtime.rememberCertificateInput(base)
+
+	statusOnly := cloneTestCertificate(base)
+	statusOnly.Metadata.ResourceVersion = "2"
+	statusOnly.Status.Phase = PhaseReady
+	if runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: statusOnly}) {
+		t.Fatal("status-only watch change triggered reconciliation")
+	}
+
+	retry := cloneTestCertificate(statusOnly)
+	retry.Metadata.Annotations[AnnotationRetryID] = "retry-2"
+	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: retry}) {
+		t.Fatal("retry annotation change was ignored")
+	}
+
+	spec := cloneTestCertificate(retry)
+	spec.Spec.Domains = []string{"new.example.com"}
+	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: spec}) {
+		t.Fatal("spec change was ignored")
+	}
+
+	finalizer := cloneTestCertificate(spec)
+	finalizer.Metadata.Finalizers = []string{Finalizer}
+	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: finalizer}) {
+		t.Fatal("finalizer change was ignored")
+	}
+
+	deleting := cloneTestCertificate(finalizer)
+	now := time.Now().UTC()
+	deleting.Metadata.DeletionTimestamp = &now
+	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: deleting}) {
+		t.Fatal("deletion timestamp change was ignored")
+	}
+	if runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "DELETED", Certificate: deleting}) {
+		t.Fatal("deleted watch event triggered reconciliation")
+	}
+	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "ADDED", Certificate: base}) {
+		t.Fatal("re-created certificate was ignored after deletion")
 	}
 }
 
@@ -830,6 +973,35 @@ func TestConfigAndBackendConstruction(t *testing.T) {
 	}
 	if backend, err := NewHTTPBackendFromConfig(cfg); err != nil || backend == nil {
 		t.Fatalf("backend construction failed: %v", err)
+	}
+}
+
+func TestOperatorResyncIntervalBounds(t *testing.T) {
+	base := map[string]string{
+		"CERTHUB_URL":   "https://certhub.example",
+		"CERTHUB_TOKEN": validOperatorToken,
+	}
+	load := func(value string) (Config, error) {
+		return LoadConfig(func(key string) string {
+			if key == "CERTHUB_RESYNC_INTERVAL" {
+				return value
+			}
+			return base[key]
+		})
+	}
+
+	cfg, err := load("30s")
+	if err != nil || cfg.ResyncInterval != 30*time.Second {
+		t.Fatalf("30s resync rejected: cfg=%#v err=%v", cfg, err)
+	}
+	for _, value := range []string{"29.999s", "soon"} {
+		if _, err := load(value); err == nil || !strings.Contains(err.Error(), "at least 30s") {
+			t.Fatalf("invalid resync %q returned %v", value, err)
+		}
+	}
+	cfg, err = load("")
+	if err != nil || cfg.ResyncInterval != 6*time.Hour {
+		t.Fatalf("default resync changed: cfg=%#v err=%v", cfg, err)
 	}
 }
 
@@ -983,6 +1155,30 @@ func testCertificate() *CerthubCertificate {
 	}
 }
 
+func cloneTestCertificate(cert *CerthubCertificate) *CerthubCertificate {
+	clone := *cert
+	clone.Metadata = cert.Metadata
+	clone.Metadata.Labels = cloneStringMap(cert.Metadata.Labels)
+	clone.Metadata.Annotations = cloneStringMap(cert.Metadata.Annotations)
+	clone.Metadata.OwnerReferences = append([]OwnerReference(nil), cert.Metadata.OwnerReferences...)
+	clone.Metadata.Finalizers = append([]string(nil), cert.Metadata.Finalizers...)
+	clone.Spec = cert.Spec
+	clone.Spec.Domains = append([]string(nil), cert.Spec.Domains...)
+	clone.Status = cloneCertificateStatus(cert.Status)
+	return &clone
+}
+
+func cloneStringMap(value map[string]string) map[string]string {
+	if value == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
+}
+
 func testMaterial(etag string) *material.TLSMaterial {
 	return &material.TLSMaterial{
 		CertificateID:     "cert-1",
@@ -1131,7 +1327,7 @@ type fakeKube struct {
 	certificatesByNamespace   map[string][]*CerthubCertificate
 	listErrors                map[string]error
 	listedNamespaces          []string
-	watchChannels             map[string]chan struct{}
+	watchChannels             map[string]chan CertificateWatchEvent
 	watchedNamespaces         []string
 	statusUpdates             int
 	writeCount                int
@@ -1215,12 +1411,12 @@ func (f *fakeKube) ListCertificates(_ context.Context, namespace string) ([]*Cer
 	return f.certificates, nil
 }
 
-func (f *fakeKube) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan struct{}, error) {
+func (f *fakeKube) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error) {
 	f.watchedNamespaces = append(f.watchedNamespaces, namespace)
 	if ch := f.watchChannels[namespace]; ch != nil {
 		return ch, nil
 	}
-	ch := make(chan struct{})
+	ch := make(chan CertificateWatchEvent)
 	go func() {
 		<-ctx.Done()
 		close(ch)

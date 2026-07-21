@@ -77,8 +77,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	if value := strings.TrimSpace(getenv("CERTHUB_RESYNC_INTERVAL")); value != "" {
 		interval, err := time.ParseDuration(value)
-		if err != nil || interval < time.Minute {
-			return Config{}, errors.New("CERTHUB_RESYNC_INTERVAL must be a duration of at least 1m")
+		if err != nil || interval < 30*time.Second {
+			return Config{}, errors.New("CERTHUB_RESYNC_INTERVAL must be a duration of at least 30s")
 		}
 		cfg.ResyncInterval = interval
 	}

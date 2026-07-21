@@ -253,6 +253,10 @@ Default resync interval:
 6 hours
 ```
 
+The minimum configurable resync interval is 30 seconds. Status-only watch
+updates do not trigger reconciliation, and an unchanged effective status is
+not written back to Kubernetes or re-emitted as an Event.
+
 ## Failure Behavior
 
 If backend returns `domain_not_authorized`:
@@ -303,7 +307,8 @@ Logs and metrics must not include private keys, raw Application tokens, or full 
 
 Operator Kubernetes permissions:
 
-- Read/write `CerthubCertificate` resources and status.
+- Read/list/watch `CerthubCertificate` resources, patch the main resource only
+  for cleanup finalizers, and update status through the status subresource.
 - Read the Kubernetes Secret containing the Certhub Application token.
 - Read/write Kubernetes Secrets in watched namespaces.
 - Emit Kubernetes Events.
@@ -369,7 +374,7 @@ Required operator scenarios:
 - Retryable backend errors use `Retry-After` or `retry_after_seconds` for requeue timing.
 - Operator logs and metrics include backend error codes without leaking Application tokens or certificate material.
 - Operator RBAC manifests grant only the needed verbs for `CerthubCertificate`, status updates, Events, the configured Application-token Secret, and named Secret operations in watched namespaces; Secret list and watch remain forbidden.
-- RBAC tests verify equivalent permissions in every selected namespace, no Secret access outside watched namespaces, no CR spec updates, and no access to issuer, DNS provider, User, Application admin, or audit APIs.
+- RBAC tests verify equivalent permissions in every selected namespace, no Secret access outside watched namespaces, no main-resource update permission, finalizer-only main-resource patches in the implementation, and no access to issuer, DNS provider, User, Application admin, or audit APIs.
 - Multi-namespace and single-namespace deployment tests verify independent list/watch behavior, partial-failure isolation, and Secret writes constrained by the selected deployment mode.
 - Delete/finalizer tests verify the operator never deletes or clears an unowned Secret and never logs Secret data during cleanup.
 - CR spec change requests a new certificate identity and syncs new material.

@@ -70,6 +70,7 @@ for expected in \
   'key: "token"' \
   'name: WATCH_NAMESPACES' \
   'value: "certhub"' \
+  'verbs: ["get", "list", "watch", "patch"]' \
   'verbs: ["create", "get", "update", "patch", "delete"]' \
   'app.kubernetes.io/managed-by: Helm'; do
   if ! grep -F "$expected" "$default_rendered" >/dev/null; then
@@ -82,6 +83,7 @@ expect_not_contains "$default_rendered" 'kind: CiliumNetworkPolicy'
 expect_not_contains "$default_rendered" 'CERTHUB_ALLOWED_SECRET_NAMES'
 expect_not_contains "$default_rendered" 'CERTHUB_TOKEN_SECRET_'
 expect_not_contains "$default_rendered" 'resourceNames:'
+expect_not_contains "$default_rendered" 'certhubcertificates/finalizers'
 if grep -E 'name: WATCH_NAMESPACE$' "$default_rendered" >/dev/null; then
   echo "default operator render contains removed WATCH_NAMESPACE environment variable" >&2
   exit 1
@@ -107,6 +109,15 @@ expect_template_failure multiple-replicas --set replicaCount=2
 expect_template_failure zero-replicas --set replicaCount=0
 expect_template_failure insecure-url --set certhub.url=http://certhub.example.test
 expect_template_failure malformed-duration --set certhub.resyncInterval=soon
+
+short_resync="$tmp_dir/short-resync.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set certhub.resyncInterval=30s \
+  --show-only templates/deployment.yaml >"$short_resync"
+expect_contains "$short_resync" 'name: CERTHUB_RESYNC_INTERVAL'
+expect_contains "$short_resync" 'value: "30s"'
 expect_template_failure invalid-port --set metrics.service.port=70000
 expect_template_failure removed-managed-secret-names \
   --set 'managedSecretNames[0]=gateway-tls'

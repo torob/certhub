@@ -88,6 +88,11 @@ labels, annotations, namespace, and name pass the operator's ownership checks.
 Cluster-scoped mode grants these target-Secret permissions across all
 namespaces.
 
+The operator patches the main `CerthubCertificate` resource only to add or
+remove its cleanup finalizer. Kubernetes CRDs do not expose a separate
+`/finalizers` REST endpoint, so the generated RBAC grants main-resource
+`patch` but does not grant main-resource `update`.
+
 Managed TLS Secrets have no Kubernetes owner reference. The default
 `secretDeletionPolicy: Retain` therefore leaves the Secret in place when its
 `CerthubCertificate` is removed. `secretDeletionPolicy: Delete` uses an
@@ -212,6 +217,7 @@ storage versions.
 | `certhub.url` | `""` | Required absolute HTTPS Certhub URL |
 | `certhub.tokenSecretName` | `certhub-token` | Token Secret in the Helm release namespace |
 | `certhub.tokenSecretKey` | `token` | Application-token key in the token Secret |
+| `certhub.resyncInterval` | `6h` | Periodic resync interval; minimum `30s` |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
 | `networkPolicy.enabled` | `false` | Create a policy selecting the operator pod |

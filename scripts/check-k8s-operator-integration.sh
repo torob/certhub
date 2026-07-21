@@ -120,7 +120,7 @@ rendered="$(mktemp)"
   --set "watchNamespaces[1]=$second_namespace" \
   --show-only templates/serviceaccount.yaml \
   --show-only templates/rbac.yaml >"$rendered"
-"$kubectl_bin" apply --namespace "$namespace" -f "$rendered" >/dev/null
+"$kubectl_bin" apply -f "$rendered" >/dev/null
 
 "$kubectl_bin" apply --namespace "$namespace" -f - >/dev/null <<'YAML'
 apiVersion: certs.torob.dev/v1alpha1
@@ -193,9 +193,25 @@ expect_can_i_as_operator() {
 expect_can_i_as_operator yes get certhubcertificates.certs.torob.dev --namespace "$namespace"
 expect_can_i_as_operator yes list certhubcertificates.certs.torob.dev --namespace "$namespace"
 expect_can_i_as_operator yes watch certhubcertificates.certs.torob.dev --namespace "$namespace"
+expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --namespace "$namespace"
 expect_can_i_as_operator no update certhubcertificates.certs.torob.dev --namespace "$namespace"
 expect_can_i_as_operator yes update certhubcertificates.certs.torob.dev --subresource=status --namespace "$namespace"
-expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$namespace"
+expect_can_i_as_operator no patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$namespace"
+
+"$kubectl_bin" patch certhubcertificate gateway \
+  --namespace "$namespace" \
+  --as="$service_account" \
+  --type=merge \
+  --patch '{"metadata":{"finalizers":["certhub.torob.dev/secret-cleanup"]}}' >/dev/null
+if [ "$("$kubectl_bin" get certhubcertificate gateway --namespace "$namespace" -o jsonpath='{.metadata.finalizers[0]}')" != "certhub.torob.dev/secret-cleanup" ]; then
+  echo "operator ServiceAccount finalizer patch did not persist" >&2
+  exit 1
+fi
+"$kubectl_bin" patch certhubcertificate gateway \
+  --namespace "$namespace" \
+  --as="$service_account" \
+  --type=merge \
+  --patch '{"metadata":{"finalizers":[]}}' >/dev/null
 
 expect_can_i_as_operator yes get secrets/certhub-token --namespace "$namespace"
 expect_can_i_as_operator yes get secrets/unrelated-secret --namespace "$namespace"
@@ -210,9 +226,10 @@ expect_can_i_as_operator yes delete secrets/unrelated-secret --namespace "$names
 expect_can_i_as_operator yes get certhubcertificates.certs.torob.dev --namespace "$second_namespace"
 expect_can_i_as_operator yes list certhubcertificates.certs.torob.dev --namespace "$second_namespace"
 expect_can_i_as_operator yes watch certhubcertificates.certs.torob.dev --namespace "$second_namespace"
+expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --namespace "$second_namespace"
 expect_can_i_as_operator no update certhubcertificates.certs.torob.dev --namespace "$second_namespace"
 expect_can_i_as_operator yes update certhubcertificates.certs.torob.dev --subresource=status --namespace "$second_namespace"
-expect_can_i_as_operator yes patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$second_namespace"
+expect_can_i_as_operator no patch certhubcertificates.certs.torob.dev --subresource=finalizers --namespace "$second_namespace"
 expect_can_i_as_operator yes get secrets/arbitrary-tls --namespace "$second_namespace"
 expect_can_i_as_operator yes create secrets --namespace "$second_namespace"
 expect_can_i_as_operator yes update secrets/arbitrary-tls --namespace "$second_namespace"

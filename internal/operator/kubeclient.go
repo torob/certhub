@@ -30,7 +30,12 @@ type CertificateLister interface {
 }
 
 type CertificateWatcher interface {
-	WatchCertificateChanges(ctx context.Context, namespace string) (<-chan struct{}, error)
+	WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error)
+}
+
+type CertificateWatchEvent struct {
+	Type        string
+	Certificate *CerthubCertificate
 }
 
 type RESTKubeClient struct {
@@ -165,7 +170,16 @@ func (c *RESTKubeClient) UpdateFinalizers(ctx context.Context, cert *CerthubCert
 		"resourceVersion": cert.Metadata.ResourceVersion,
 		"finalizers":      finalizers,
 	}}
-	return c.doPatch(ctx, crPath(cert.Metadata.Namespace, cert.Metadata.Name), body, nil, http.StatusOK)
+	var updated CerthubCertificate
+	if err := c.doPatch(ctx, crPath(cert.Metadata.Namespace, cert.Metadata.Name), body, &updated, http.StatusOK); err != nil {
+		return err
+	}
+	if updated.Metadata.ResourceVersion == "" {
+		return errors.New("Kubernetes finalizer patch response is missing resourceVersion")
+	}
+	cert.Metadata.ResourceVersion = updated.Metadata.ResourceVersion
+	cert.Metadata.Finalizers = append([]string(nil), updated.Metadata.Finalizers...)
+	return nil
 }
 
 func (c *RESTKubeClient) EmitEvent(ctx context.Context, event Event) error {
@@ -213,8 +227,8 @@ func (c *RESTKubeClient) ListCertificates(ctx context.Context, namespace string)
 	return out, nil
 }
 
-func (c *RESTKubeClient) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan struct{}, error) {
-	ch := make(chan struct{}, 1)
+func (c *RESTKubeClient) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error) {
+	ch := make(chan CertificateWatchEvent, 16)
 	go func() {
 		defer close(ch)
 		for ctx.Err() == nil {
@@ -243,13 +257,27 @@ func (c *RESTKubeClient) WatchCertificateChanges(ctx context.Context, namespace 
 			}
 			dec := json.NewDecoder(resp.Body)
 			for ctx.Err() == nil {
-				var event map[string]any
-				if err := dec.Decode(&event); err != nil {
+				var envelope struct {
+					Type   string          `json:"type"`
+					Object json.RawMessage `json:"object"`
+				}
+				if err := dec.Decode(&envelope); err != nil {
 					break
 				}
-				select {
-				case ch <- struct{}{}:
+				switch envelope.Type {
+				case "ADDED", "MODIFIED", "DELETED":
 				default:
+					continue
+				}
+				var cert CerthubCertificate
+				if err := json.Unmarshal(envelope.Object, &cert); err != nil {
+					continue
+				}
+				select {
+				case ch <- CertificateWatchEvent{Type: envelope.Type, Certificate: &cert}:
+				case <-ctx.Done():
+					_ = resp.Body.Close()
+					return
 				}
 			}
 			_ = resp.Body.Close()

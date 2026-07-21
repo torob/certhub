@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -255,7 +256,12 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 				t.Fatalf("unexpected finalizer patch: %#v", body)
 			}
 			sawFinalizers = true
-			w.WriteHeader(http.StatusOK)
+			writeKubeJSON(t, w, CerthubCertificate{Metadata: Metadata{
+				Name:            "gateway",
+				Namespace:       "ns",
+				ResourceVersion: "rv-finalizer",
+				Finalizers:      []string{Finalizer},
+			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/apis/certs.torob.dev/v1alpha1/namespaces/ns/certhubcertificates" && r.URL.RawQuery == "":
 			writeKubeJSON(t, w, map[string]any{"items": []CerthubCertificate{*testCertificate()}})
 		case r.Method == http.MethodGet && r.URL.Path == "/apis/certs.torob.dev/v1alpha1/namespaces/ns/certhubcertificates" && r.URL.Query().Get("watch") == "true":
@@ -281,6 +287,9 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 	if err := client.UpdateFinalizers(ctx, cert, []string{Finalizer}); err != nil {
 		t.Fatalf("finalizer update failed: %v", err)
 	}
+	if cert.Metadata.ResourceVersion != "rv-finalizer" || !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
+		t.Fatalf("finalizer response metadata not adopted: %#v", cert.Metadata)
+	}
 	items, err := client.ListCertificates(ctx, "ns")
 	if err != nil {
 		t.Fatalf("list failed: %v", err)
@@ -293,7 +302,10 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 		t.Fatalf("watch failed: %v", err)
 	}
 	select {
-	case <-watch:
+	case event := <-watch:
+		if event.Type != "ADDED" || event.Certificate == nil || event.Certificate.Metadata.Name != "gateway" {
+			t.Fatalf("unexpected watch event: %#v", event)
+		}
 	case <-time.After(time.Second):
 		t.Fatalf("watch did not publish change")
 	}
