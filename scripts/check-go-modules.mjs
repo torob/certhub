@@ -49,7 +49,7 @@ const approvedCompiledModules = versionMap({
   "golang.org/x/net": "v0.55.0",
   "golang.org/x/sync": "v0.21.0",
   "golang.org/x/sys": "v0.46.0",
-  "golang.org/x/text": "v0.38.0"
+  "golang.org/x/text": "v0.39.0"
 });
 
 // Reviewed unused modules retained by optional dependency graphs, such as
@@ -120,9 +120,9 @@ const reviewedUnusedGooseModules = versionMap({
   "go.opentelemetry.io/otel/trace": "v1.43.0",
   "go.yaml.in/yaml/v3": "v3.0.4",
   "golang.org/x/exp": "v0.0.0-20260410095643-746e56fc9e2f",
-  "golang.org/x/mod": "v0.36.0",
+  "golang.org/x/mod": "v0.37.0",
   "golang.org/x/term": "v0.44.0",
-  "golang.org/x/tools": "v0.45.0",
+  "golang.org/x/tools": "v0.47.0",
   "google.golang.org/genproto/googleapis/rpc": "v0.0.0-20260420184626-e10c466a9529",
   "google.golang.org/grpc": "v1.80.0",
   "google.golang.org/protobuf": "v1.36.11",
