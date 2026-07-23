@@ -1,0 +1,20 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: stale-generation
+  namespace: default
+  generation: 2
+spec:
+  domains:
+    - stale.example.test
+  secretName: stale-generation
+status:
+  observedGeneration: 1
+  phase: Ready
+  conditions:
+    - type: Ready
+      status: "True"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "True"
+      lastTransitionTime: "2026-01-01T00:00:00Z"

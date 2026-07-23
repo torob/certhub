@@ -56,6 +56,9 @@ spec:
                 secretName:
                   type: string
                   pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: spec.secretName is immutable
                 keyType:
                   type: string
                   enum:
@@ -76,6 +79,10 @@ spec:
             status:
               type: object
               properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  minimum: 0
                 phase:
                   type: string
                   enum:

@@ -1,0 +1,21 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: incomplete-ready
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - incomplete.example.test
+  secretName: incomplete-ready
+status:
+  observedGeneration: 1
+  phase: Ready
+  conditions:
+    - type: Ready
+      status: "True"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "False"
+      reason: SecretWriteFailed
+      lastTransitionTime: "2026-01-01T00:00:00Z"

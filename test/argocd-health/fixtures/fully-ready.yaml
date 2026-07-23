@@ -1,0 +1,20 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: fully-ready
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - ready.example.test
+  secretName: fully-ready
+status:
+  observedGeneration: 1
+  phase: Ready
+  conditions:
+    - type: Ready
+      status: "True"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "True"
+      lastTransitionTime: "2026-01-01T00:00:00Z"

@@ -7,6 +7,8 @@ helm_bin="${HELM_BIN:-helm}"
 kubeconform_bin="${KUBECONFORM_BIN:-kubeconform}"
 kubectl_bin="${KUBECTL_BIN:-kubectl}"
 valid_values="$chart/ci/values.yaml"
+health_script="$chart/argocd/health.lua"
+argocd_cm_patch="$chart/argocd/argocd-cm-patch.yaml"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -79,8 +81,22 @@ for expected in \
     exit 1
   fi
 done
+expect_contains "$default_rendered" 'observedGeneration:'
+expect_contains "$default_rendered" 'format: int64'
+secret_name_schema="$tmp_dir/secret-name-schema.yaml"
+sed -n '/^                secretName:/,/^                keyType:/p' \
+  "$default_rendered" >"$secret_name_schema"
+expect_contains "$secret_name_schema" 'x-kubernetes-validations:'
+expect_contains "$secret_name_schema" 'rule: self == oldSelf'
+expect_contains "$secret_name_schema" 'message: spec.secretName is immutable'
+if [ "$(grep -Fc 'rule: self == oldSelf' "$secret_name_schema")" != "1" ]; then
+  echo "secretName schema must contain exactly one immutability transition rule" >&2
+  exit 1
+fi
 expect_not_contains "$default_rendered" 'kind: NetworkPolicy'
 expect_not_contains "$default_rendered" 'kind: CiliumNetworkPolicy'
+expect_not_contains "$default_rendered" 'name: argocd-cm'
+expect_not_contains "$default_rendered" 'resource.customizations.health.certs.torob.dev_CerthubCertificate'
 expect_not_contains "$default_rendered" 'CERTHUB_ALLOWED_SECRET_NAMES'
 expect_not_contains "$default_rendered" 'CERTHUB_TOKEN_SECRET_'
 expect_not_contains "$default_rendered" 'resourceNames:'
@@ -460,6 +476,14 @@ mkdir -p "$package_dir"
   --app-version 9.8.7 \
   --destination "$package_dir" >/dev/null
 packaged_chart="$package_dir/certhub-operator-9.8.7.tgz"
+for packaged_asset in \
+  certhub-operator/argocd/health.lua \
+  certhub-operator/argocd/argocd-cm-patch.yaml; do
+  if ! tar -tzf "$packaged_chart" | grep -Fx "$packaged_asset" >/dev/null; then
+    echo "packaged operator chart is missing $packaged_asset" >&2
+    exit 1
+  fi
+done
 packaged_rendered="$tmp_dir/packaged.yaml"
 "$helm_bin" template test-operator "$packaged_chart" \
   --namespace certhub \
@@ -479,6 +503,18 @@ packaged_policy="$tmp_dir/packaged-network-policy.yaml"
 for expected in 'kind: NetworkPolicy' '- Egress' 'egress:' '[]'; do
   expect_contains "$packaged_policy" "$expected"
 done
+
+sed -n \
+  '/^  resource.customizations.health.certs.torob.dev_CerthubCertificate: |$/,$p' \
+  "$argocd_cm_patch" | tail -n +2 | sed 's/^    //' >"$tmp_dir/embedded-health.lua"
+if ! cmp -s "$health_script" "$tmp_dir/embedded-health.lua"; then
+  echo "standalone and argocd-cm CerthubCertificate health scripts differ" >&2
+  exit 1
+fi
+
+if [ -n "${ARGOCD_BIN:-}" ]; then
+  ARGOCD_BIN="$ARGOCD_BIN" "$repo_root/test/argocd-health/check.sh"
+fi
 
 if command -v "$kubeconform_bin" >/dev/null 2>&1; then
   "$kubeconform_bin" -strict -summary -ignore-missing-schemas "$default_rendered" >/dev/null

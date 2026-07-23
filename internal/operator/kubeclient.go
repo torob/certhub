@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -113,19 +114,28 @@ func (c *RESTKubeClient) CreateOrUpdateSecret(ctx context.Context, secret *Secre
 	return c.do(ctx, http.MethodPut, coreNamespacedPath(secret.Metadata.Namespace, "secrets", secret.Metadata.Name), secret, nil, http.StatusOK)
 }
 
-func (c *RESTKubeClient) ClearSecretOwnerReferences(ctx context.Context, secret *Secret) error {
+func (c *RESTKubeClient) SetSecretOwnerReferences(ctx context.Context, secret *Secret, ownerReferences []OwnerReference) error {
 	if secret == nil {
 		return errors.New("Secret is required")
 	}
 	if secret.Metadata.ResourceVersion == "" {
-		return errors.New("clear Secret owner references requires resourceVersion")
+		return errors.New("set Secret owner references requires resourceVersion")
 	}
 	namespace := c.resolveNamespace(secret.Metadata.Namespace)
 	body := map[string]any{"metadata": map[string]any{
 		"resourceVersion": secret.Metadata.ResourceVersion,
-		"ownerReferences": []OwnerReference{},
+		"ownerReferences": ownerReferences,
 	}}
-	return c.doPatch(ctx, coreNamespacedPath(namespace, "secrets", secret.Metadata.Name), body, nil, http.StatusOK)
+	var updated Secret
+	if err := c.doPatch(ctx, coreNamespacedPath(namespace, "secrets", secret.Metadata.Name), body, &updated, http.StatusOK); err != nil {
+		return err
+	}
+	if err := validateSecretOwnerReferencePatchResponse(secret, &updated, ownerReferences); err != nil {
+		return err
+	}
+	secret.Metadata.ResourceVersion = updated.Metadata.ResourceVersion
+	secret.Metadata.OwnerReferences = append([]OwnerReference(nil), updated.Metadata.OwnerReferences...)
+	return nil
 }
 
 func (c *RESTKubeClient) DeleteSecret(ctx context.Context, namespace, name string, expected *Secret) error {
@@ -148,7 +158,20 @@ func (c *RESTKubeClient) DeleteSecret(ctx context.Context, namespace, name strin
 			"resourceVersion": existing.Metadata.ResourceVersion,
 		},
 	}
-	return c.do(ctx, http.MethodDelete, coreNamespacedPath(namespace, "secrets", name), body, nil, http.StatusOK, http.StatusAccepted, http.StatusNoContent)
+	if err := c.do(ctx, http.MethodDelete, coreNamespacedPath(namespace, "secrets", name), body, nil, http.StatusOK, http.StatusAccepted, http.StatusNoContent); err != nil {
+		return err
+	}
+	remaining, err := c.GetSecret(ctx, namespace, name)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("confirm Secret deletion: %w", err)
+	}
+	if remaining.Metadata.UID != existing.Metadata.UID {
+		return fmt.Errorf("confirm Secret deletion: replacement Secret has UID %q, expected deleted UID %q", remaining.Metadata.UID, existing.Metadata.UID)
+	}
+	return fmt.Errorf("%w: Secret %s/%s with UID %q still exists", ErrDeletionPending, namespace, name, existing.Metadata.UID)
 }
 
 func (c *RESTKubeClient) UpdateStatus(ctx context.Context, cert *CerthubCertificate) error {
@@ -177,9 +200,76 @@ func (c *RESTKubeClient) UpdateFinalizers(ctx context.Context, cert *CerthubCert
 	if updated.Metadata.ResourceVersion == "" {
 		return errors.New("Kubernetes finalizer patch response is missing resourceVersion")
 	}
+	if !equalStringMultiset(updated.Metadata.Finalizers, finalizers) {
+		return fmt.Errorf("Kubernetes finalizer patch response does not match requested finalizers: requested=%q returned=%q", finalizers, updated.Metadata.Finalizers)
+	}
 	cert.Metadata.ResourceVersion = updated.Metadata.ResourceVersion
 	cert.Metadata.Finalizers = append([]string(nil), updated.Metadata.Finalizers...)
 	return nil
+}
+
+func validateSecretOwnerReferencePatchResponse(before, updated *Secret, requested []OwnerReference) error {
+	if updated.Metadata.ResourceVersion == "" {
+		return errors.New("Kubernetes Secret owner-reference patch response is missing resourceVersion")
+	}
+	if !equalOwnerReferenceMultiset(updated.Metadata.OwnerReferences, requested) {
+		return fmt.Errorf("Kubernetes Secret owner-reference patch response does not match requested owner references")
+	}
+	if updated.Metadata.Name != before.Metadata.Name ||
+		updated.Metadata.Namespace != before.Metadata.Namespace ||
+		updated.Metadata.UID != before.Metadata.UID ||
+		updated.Metadata.Generation != before.Metadata.Generation ||
+		!equalTimes(updated.Metadata.CreationTimestamp, before.Metadata.CreationTimestamp) ||
+		!reflect.DeepEqual(updated.Metadata.Labels, before.Metadata.Labels) ||
+		!reflect.DeepEqual(updated.Metadata.Annotations, before.Metadata.Annotations) ||
+		!equalStringMultiset(updated.Metadata.Finalizers, before.Metadata.Finalizers) ||
+		!equalTimes(updated.Metadata.DeletionTimestamp, before.Metadata.DeletionTimestamp) ||
+		updated.Type != before.Type ||
+		!reflect.DeepEqual(updated.Data, before.Data) {
+		return errors.New("Kubernetes Secret owner-reference patch response changed fields outside ownerReferences/resourceVersion")
+	}
+	return nil
+}
+
+func equalStringMultiset(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, value := range left {
+		counts[value]++
+	}
+	for _, value := range right {
+		counts[value]--
+		if counts[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func equalOwnerReferenceMultiset(left, right []OwnerReference) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[OwnerReference]int, len(left))
+	for _, value := range left {
+		counts[value]++
+	}
+	for _, value := range right {
+		counts[value]--
+		if counts[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func equalTimes(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func (c *RESTKubeClient) EmitEvent(ctx context.Context, event Event) error {

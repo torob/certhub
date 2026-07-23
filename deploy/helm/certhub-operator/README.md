@@ -6,7 +6,7 @@ material to same-namespace Kubernetes TLS Secrets selected by each resource.
 
 ## Prerequisites
 
-- Kubernetes with the `apiextensions.k8s.io/v1` CRD API.
+- Kubernetes 1.25 or newer with CRD CEL validation rules enabled.
 - Helm 3.
 - A Certhub Application token stored in a Kubernetes Secret.
 - An HTTPS Certhub server URL.
@@ -81,6 +81,12 @@ target field. Users authorized to create or update `CerthubCertificate`
 resources are therefore trusted to choose certificate Secret names in that
 namespace.
 
+`spec.secretName` is immutable after creation. This guarantees that every
+owner-referenced Secret remains discoverable through the deleting
+Certificate's single target name. To move certificate material to another
+Secret, create a new `CerthubCertificate` with the new target, update consumers,
+and then delete the old resource under its selected deletion policy.
+
 The generated RBAC grants Secret create, get, update, patch, and delete
 throughout each watched namespace without granting Secret list or watch.
 Existing Secrets are mutated or deleted only after their type, owner UID,
@@ -91,16 +97,26 @@ namespaces.
 The operator patches the main `CerthubCertificate` resource only to add or
 remove its cleanup finalizer. Kubernetes CRDs do not expose a separate
 `/finalizers` REST endpoint, so the generated RBAC grants main-resource
-`patch` but does not grant main-resource `update`.
+`patch` but does not grant main-resource `update`. The finalizer is persisted
+on every valid, non-deleting Certificate before the operator creates a Secret
+or attaches the Certificate owner reference to an existing Secret.
 
-Managed TLS Secrets have no Kubernetes owner reference. The default
-`secretDeletionPolicy: Retain` therefore leaves the Secret in place when its
-`CerthubCertificate` is removed. `secretDeletionPolicy: Delete` uses an
-operator finalizer and explicit ownership-checked deletion. Existing managed
-Secrets with legacy owner references are migrated during reconciliation.
-After upgrading from an older chart, allow the operator to reconcile existing
-resources before deleting a `Retain` resource so the legacy reference is
-removed before Kubernetes garbage collection can act.
+Managed TLS Secrets carry an owner reference to their
+`CerthubCertificate`. This makes each Secret visible as a child in Kubernetes
+resource graphs, including the Argo CD resource tree. During deletion the
+finalizer makes both deletion policies explicit and ordered:
+
+- `Retain` verifies ownership and removes only the matching Certificate owner
+  reference before releasing the finalizer. An already unreferenced owned
+  Secret also remains in place.
+- `Delete` verifies ownership and deletes the Secret with UID and resource
+  version preconditions before releasing the finalizer.
+
+If either cleanup operation fails, the finalizer remains so Kubernetes cannot
+bypass the selected policy. Existing managed Secrets created by `v0.10.0`
+without owner references are patched in place after the finalizer is
+persisted; that migration does not replace the Secret or rewrite its TLS
+material.
 
 Set `rbac.create=false` to supply all RBAC resources outside the chart. Set
 `serviceAccount.create=false` and `serviceAccount.name` to use an existing
@@ -205,6 +221,55 @@ kubectl apply --server-side \
 
 Review CRD changes before applying them, particularly changes to served or
 storage versions.
+
+For this release, applying the CRD first is required because the operator
+writes `status.observedGeneration` and relies on admission enforcement of the
+immutable `spec.secretName`. The CEL transition rule permits unchanged updates
+of existing `v0.10.0` resources while rejecting later target-name changes.
+Wait for the CRD update to succeed before upgrading the operator Deployment.
+Existing `v0.10.0` Secrets are then adopted in place; their UID and TLS data
+are preserved.
+
+## Argo CD health and resource tree
+
+The packaged `argocd/argocd-cm-patch.yaml` adds a health assessment for
+`certs.torob.dev/CerthubCertificate`. It reports:
+
+- `Healthy` only when `status.observedGeneration` equals
+  `metadata.generation` and both `Ready=True` and `SecretSynced=True` exist.
+- `Degraded` for a current-generation terminal `phase: Failed`.
+- `Progressing` for missing or stale status, validation and issuance phases,
+  and incomplete Secret synchronization.
+
+The Certhub operator chart deliberately does not own `argocd-cm`. Have the
+Argo CD administrator review and merge the packaged data key into the existing
+ConfigMap, for example:
+
+```bash
+kubectl --namespace argocd patch configmap argocd-cm \
+  --type merge \
+  --patch-file deploy/helm/certhub-operator/argocd/argocd-cm-patch.yaml
+```
+
+Restarting Argo CD is not normally required because it watches its ConfigMap.
+The customization can be checked locally with the Argo CD `v3.4.2` CLI:
+
+```bash
+ARGOCD_BIN=/path/to/argocd-v3.4.2 test/argocd-health/check.sh
+```
+
+The generated Secret appears beneath its Certificate after the operator adds
+the Kubernetes owner reference. When an AppProject uses a restrictive
+`namespaceResourceWhitelist`, allow both the custom resource and core
+Secrets:
+
+```yaml
+namespaceResourceWhitelist:
+  - group: certs.torob.dev
+    kind: CerthubCertificate
+  - group: ""
+    kind: Secret
+```
 
 ## Selected values
 

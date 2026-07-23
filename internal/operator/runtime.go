@@ -277,11 +277,13 @@ func certificateWatchKey(cert *CerthubCertificate) string {
 func certificateReconcileInput(cert *CerthubCertificate) string {
 	value := struct {
 		Spec              CerthubCertificateSpec `json:"spec"`
+		Generation        int64                  `json:"generation,omitempty"`
 		RetryID           string                 `json:"retryId,omitempty"`
 		Finalizers        []string               `json:"finalizers,omitempty"`
 		DeletionTimestamp *time.Time             `json:"deletionTimestamp,omitempty"`
 	}{
 		Spec:              cert.Spec,
+		Generation:        cert.Metadata.Generation,
 		RetryID:           cert.Metadata.Annotations[AnnotationRetryID],
 		Finalizers:        cert.Metadata.Finalizers,
 		DeletionTimestamp: cert.Metadata.DeletionTimestamp,

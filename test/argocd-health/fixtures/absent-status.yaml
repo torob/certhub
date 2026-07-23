@@ -1,0 +1,10 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: absent-status
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - absent.example.test
+  secretName: absent-status

@@ -58,7 +58,8 @@ spec:
 Spec fields:
 
 - `domains`: required list of requested certificate SANs.
-- `secretName`: required target Kubernetes Secret name.
+- `secretName`: required immutable target Kubernetes Secret name. Moving to a
+  different target requires a new `CerthubCertificate` resource.
 - `keyType`: optional, default `ecdsa-p256`.
 - `issuer`: optional. When omitted, the operator omits issuer from Certhub requests and the backend selects the single active default issuer.
 - `secretDeletionPolicy`: optional enum `Retain` or `Delete`, default `Retain`. Controls what happens to an operator-owned target Secret when the `CerthubCertificate` is deleted.
@@ -67,6 +68,10 @@ CRD validation:
 
 - `domains`: non-empty list; each item must match the backend `certificate_identifier` validation after backend normalization. The operator may prevalidate but the backend remains authoritative.
 - `secretName`: valid Kubernetes Secret name using Kubernetes DNS label validation.
+- `secretName` updates are rejected by a CEL transition rule requiring
+  `self == oldSelf`. Installing this rule during a CRD-first upgrade permits
+  unchanged updates of existing objects while preventing an old
+  owner-referenced Secret from becoming unreachable through the mutable spec.
 - `keyType`: enum `rsa-2048`, `rsa-3072`, `rsa-4096`, `ecdsa-p256`, `ecdsa-p384`.
 - `issuer`: backend `machine_name` validation.
 - `secretDeletionPolicy`: enum `Retain` or `Delete`.
@@ -74,6 +79,8 @@ CRD validation:
 
 Status fields:
 
+- `observedGeneration`: the `metadata.generation` reconciled by every persisted
+  status update.
 - `phase`: `Pending`, `ValidatingDNS`, `Issuing`, `Ready`, `Failed`.
 - `certificateId`.
 - `observedDomains`.
@@ -103,6 +110,11 @@ type: kubernetes.io/tls
 metadata:
   name: gateway-tls
   namespace: gateway
+  ownerReferences:
+    - apiVersion: certs.torob.dev/v1alpha1
+      kind: CerthubCertificate
+      name: gateway-tls
+      uid: <certhub-certificate-uid>
   labels:
     app.kubernetes.io/managed-by: certhub-operator
     certhub.torob.dev/certhub-certificate-name: gateway-tls
@@ -138,9 +150,17 @@ Mutation and deletion require all ownership checks to pass:
 - Secret name equals `spec.secretName`.
 - `certhub.torob.dev/owner-uid` equals the current CR UID.
 - Required management labels are present and match the current CR.
-- New managed Secrets have no owner references. A legacy owner reference must
-  point to the current CR UID and is removed after all ownership checks pass.
+- The managed owner reference uses API version
+  `certs.torob.dev/v1alpha1`, kind `CerthubCertificate`, and the current CR name
+  and UID. An owner reference for a different CerthubCertificate is an
+  ownership conflict.
 - Secret type is `kubernetes.io/tls`, or absent only before initial creation.
+
+Every newly created managed Secret includes the matching owner reference.
+Existing managed Secrets without that reference are patched in place only
+after the cleanup finalizer has been persisted on the Certificate. Migration
+must preserve the Secret UID, TLS data, type, labels, annotations, and all
+metadata other than the expected owner-reference change.
 
 ## Authentication
 
@@ -204,24 +224,32 @@ Human User permissions in Certhub do not authorize the operator's backend calls.
 The Kubernetes ServiceAccount used by the operator pod is only for Kubernetes API RBAC and is separate from the Certhub Application.
 
 Permission to create or update a `CerthubCertificate` authorizes selecting any
-valid same-namespace target Secret name. The operator never targets another
-namespace and never overwrites or deletes a Secret that fails its ownership
-checks.
+valid same-namespace target Secret name at creation. Admission rejects later
+changes to `spec.secretName`. The operator never targets another namespace and
+never overwrites or deletes a Secret that fails its ownership checks.
 
 ## Reconcile Flow
 
 1. Watch `CerthubCertificate` resources.
-2. Normalize desired certificate criteria locally for stable comparison.
-3. Read existing target Secret, if present, and use `certhub.torob.dev/material-etag` as `If-None-Match`.
-4. Call `POST /v1/sync/certificates/tls-material` with the Certhub Application token, CR criteria, and optional `If-None-Match`.
-5. If backend returns `204 No Content`, leave the target Secret unchanged and update CR status/conditions as synced.
-6. If backend returns `200 OK`, write or update the target TLS Secret, including `certhub.torob.dev/material-etag`, and update CR status.
-7. If backend returns `404 certificate_not_found`, call `POST /v1/sync/certificates` with the same criteria, store `certificateId` when present for observability, and requeue.
-8. If backend returns `409 certificate_not_ready`, do not call `POST /v1/sync/certificates`; record the returned status metadata and requeue.
-9. If backend returns `409 certificate_issuance_failed`, set a failed condition with backend failure metadata and stop retrying until the backend Certificate is repaired through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
-10. If backend returns `409 certificate_no_active_version`, set a failed condition and stop retrying until the backend Certificate is reissued through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
-11. On each later reconcile, retry `POST /v1/sync/certificates/tls-material` with the same CR criteria and latest stored `material_etag`.
-12. Update CR status and conditions.
+2. For every valid, non-deleting resource, persist the cleanup finalizer before
+   creating a Secret or adding its owner reference. Stop reconciliation if the
+   finalizer patch fails.
+3. Normalize desired certificate criteria locally for stable comparison.
+4. Read the existing target Secret, if present. After ownership validation,
+   migrate a managed Secret that lacks the owner reference with an in-place,
+   resource-version-guarded metadata patch. Never attach the owner reference
+   until step 2 is observable through the Kubernetes API.
+5. Use `certhub.torob.dev/material-etag` as `If-None-Match`.
+6. Call `POST /v1/sync/certificates/tls-material` with the Certhub Application token, CR criteria, and optional `If-None-Match`.
+7. If backend returns `204 No Content`, leave certificate material unchanged and update CR status/conditions as synced; owner-reference migration may still update metadata.
+8. If backend returns `200 OK`, create or update the target TLS Secret with the matching owner reference and `certhub.torob.dev/material-etag`, then update CR status.
+9. If backend returns `404 certificate_not_found`, call `POST /v1/sync/certificates` with the same criteria, store `certificateId` when present for observability, and requeue.
+10. If backend returns `409 certificate_not_ready`, do not call `POST /v1/sync/certificates`; record the returned status metadata and requeue.
+11. If backend returns `409 certificate_issuance_failed`, set a failed condition with backend failure metadata and stop retrying until the backend Certificate is repaired through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
+12. If backend returns `409 certificate_no_active_version`, set a failed condition and stop retrying until the backend Certificate is reissued through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
+13. On each later reconcile, retry `POST /v1/sync/certificates/tls-material` with the same CR criteria and latest stored `material_etag`.
+14. Persist status and conditions with `status.observedGeneration` equal to the
+    `metadata.generation` that produced them.
 
 Manual retry:
 
@@ -245,7 +273,8 @@ The operator should periodically inspect managed certificates and refresh Secret
 - `not_after` changes.
 - Backend reports the certificate is renewing or ready with newer material.
 - Backend reports `certificate_no_active_version`; the operator should keep the existing Kubernetes Secret unchanged and wait for User reissue or criteria change.
-- CR spec changes and maps to a different certificate identity.
+- Mutable certificate-criteria fields in the CR spec change and map to a
+  different certificate identity; `secretName` remains immutable.
 
 Default resync interval:
 
@@ -283,11 +312,24 @@ If Secret update fails:
 
 Delete behavior:
 
-- Default `secretDeletionPolicy=Retain` leaves the target Secret in place when the `CerthubCertificate` is deleted.
-- Managed Secrets do not use Kubernetes owner references; Secret lifetime is controlled only by `secretDeletionPolicy`.
-- Existing owned Secrets with legacy owner references are migrated with a resource-version-guarded metadata patch, including when certificate material is already current.
-- `secretDeletionPolicy=Delete` deletes only a Secret that the operator can prove it owns through the required labels, `certhub.torob.dev/owner-uid`, and same-namespace/name checks.
-- Finalizers are required only when needed to honor `secretDeletionPolicy=Delete` safely.
+- The cleanup finalizer is required on every valid, non-deleting Certificate so
+  Kubernetes garbage collection cannot race either deletion policy.
+- Default `secretDeletionPolicy=Retain` verifies Secret ownership and removes
+  the matching Certificate owner reference with a resource-version-guarded
+  metadata patch. Only after that patch succeeds, the owned Secret is confirmed
+  to have no matching reference, or the target Secret is confirmed absent may
+  the operator release the finalizer. The retained Secret keeps the same UID
+  and data.
+- `secretDeletionPolicy=Delete` deletes only a Secret that the operator can
+  prove it owns through the required labels,
+  `certhub.torob.dev/owner-uid`, Secret type, and same-namespace/name checks. If
+  a CerthubCertificate owner reference is present, it must match the current
+  CR. Deletion uses both UID and resource-version preconditions; only confirmed
+  deletion or absence permits finalizer release.
+- A policy transition changes the cleanup action selected when deletion begins
+  but never permits finalizer release before that action completes.
+- Owner-reference mutation, Secret deletion, ownership verification, or
+  finalizer patch failures leave the finalizer in place and are retried.
 - The operator must never delete, clear, or rewrite an unowned Secret, a Secret with an owner-reference UID mismatch, or a Secret missing the expected management labels/annotations.
 - Deleting the Kubernetes CR never deletes or revokes the Certhub backend Certificate. It only affects the local Kubernetes Secret according to `secretDeletionPolicy`.
 
@@ -302,6 +344,30 @@ The operator should expose:
 - Structured logs with namespace, resource name, Certificate ID when known, backend error code, reconcile ID, and result.
 
 Logs and metrics must not include private keys, raw Application tokens, or full certificate material.
+
+## Upgrades and Argo CD
+
+The CRD must be applied explicitly before upgrading the operator because Helm
+does not update files in a chart's `crds/` directory. The updated CRD adds the
+optional integer `status.observedGeneration`; only after that schema is
+accepted may an operator that writes the field start. Upgrading from `v0.10.0`
+then adds owner references to existing managed Secrets in place, after each
+Certificate finalizer is persisted.
+
+The chart packages, but does not install or own, an `argocd-cm` health
+customization. Platform administrators merge it into their existing Argo CD
+configuration. Health is mapped as follows:
+
+- `Healthy`: `status.observedGeneration` equals `metadata.generation` and the
+  current conditions include both `Ready=True` and `SecretSynced=True`.
+- `Degraded`: current-generation terminal `phase: Failed`.
+- `Progressing`: status is absent or stale, the Certificate is pending,
+  validating, or issuing, or either readiness condition is incomplete.
+
+The Secret's matching Kubernetes owner reference makes it a child of the
+Certificate in the Argo CD resource tree. Restrictive AppProjects must allow
+both `certs.torob.dev/CerthubCertificate` and core-group `Secret` resources in
+their `namespaceResourceWhitelist`.
 
 ## RBAC
 
@@ -352,14 +418,31 @@ Required operator scenarios:
 - Operator rejects plain HTTP Certhub URLs by default, verifies TLS certificates, and does not forward Authorization headers across redirects to different hosts, ports, or schemes.
 - The operator never logs or emits Kubernetes Events containing raw Application tokens, Authorization headers, private keys, certificate PEM, backend material JSON, or Secret data.
 - Existing Secret is updated when backend certificate material changes.
-- Existing Secret data and certificate metadata are left unchanged when the backend returns `204 No Content` for a matching stored `material_etag`; legacy owner-reference cleanup may still patch Kubernetes metadata.
+- Existing Secret data and certificate metadata are left unchanged when the backend returns `204 No Content` for a matching stored `material_etag`; owner-reference migration may still patch Kubernetes metadata.
 - Existing Secret is preserved unchanged when authorization fails, backend is unavailable, material is not ready, issuance fails, or a Secret update write fails before commit.
 - Existing Secret is preserved unchanged when backend reports `certificate_no_active_version`; status records the terminal backend state and no stale Secret rewrite occurs.
 - Existing target Secrets that are not owned or explicitly managed by the matching `CerthubCertificate` are not overwritten.
 - Owner-reference UID mismatch, `certhub.torob.dev/owner-uid` mismatch, missing required management labels, or conflicting Secret type causes a failed condition instead of mutating the existing Secret.
-- Newly created managed Secrets have no owner references, and a valid legacy Certhub owner reference is removed without changing Secret data even when the backend returns `204 No Content`.
-- Deleting a CR with default `secretDeletionPolicy=Retain` leaves the target Secret unchanged and does not require a finalizer.
-- Deleting a CR with `secretDeletionPolicy=Delete` deletes only an owned target Secret after owner UID, labels, annotations, namespace, name, and Secret type checks pass.
+- Every valid live CR persists its finalizer before a managed Secret is created
+  or gains the matching owner reference; finalizer patch failure prevents both
+  operations.
+- Newly created managed Secrets have the matching owner reference. An owned
+  `v0.10.0` Secret without one gains it through an in-place metadata patch
+  without changing UID, data, type, labels, or annotations, including when the
+  backend returns `204 No Content`.
+- Deleting a CR with default `secretDeletionPolicy=Retain` removes the matching
+  owner reference before releasing the finalizer and preserves the same Secret
+  UID and data.
+- Deleting a CR with `secretDeletionPolicy=Delete` deletes only an owned target
+  Secret with UID and resource-version preconditions before releasing the
+  finalizer.
+- Cleanup and finalizer-patch failure matrices prove that the finalizer remains
+  until the selected retention or deletion action is complete.
+- Policy transitions, ownership conflicts, and repeated reconciles preserve
+  ordering and are idempotent.
+- CRD admission accepts unchanged `spec.secretName` values on resources that
+  predate the transition rule and rejects attempts to change the target name,
+  so no previously owner-referenced Secret can be orphaned from cleanup.
 - Deleting a CR never calls Certhub certificate revoke/delete APIs.
 - Operator writes only the referenced same-namespace target Secret and never writes Secrets in namespaces not selected by its deployment mode and RBAC.
 - Operator refuses CRs whose `secretName` targets another namespace by path-like, URL-like, or annotation-driven indirection.
@@ -367,7 +450,14 @@ Required operator scenarios:
 - Operator reads the Certhub Application token only from `CERTHUB_TOKEN`, which the chart injects from a same-namespace Secret. It never reads that token through the Kubernetes API, lists Secrets, or watches Secrets.
 - Operator never sends `Forwarded`, `X-Forwarded-For`, or other headers that attempt to claim a different source IP.
 - Managed Secret contains only expected TLS data keys and non-secret Certhub annotations; status contains no private key or PEM material.
-- Managed Secret labels and annotations cannot point at objects outside the CR namespace or include raw certificate material, private keys, Application tokens, or backend material JSON; managed Secrets contain no owner references.
+- Managed Secret labels, annotations, and owner references cannot point at
+  objects outside the CR namespace or include raw certificate material,
+  private keys, Application tokens, or backend material JSON.
+- Every persisted status reports the current reconciled
+  `status.observedGeneration`.
+- Argo CD health fixtures cover absent and stale status, pending, DNS
+  validation, issuing, failed, incompletely synced Ready, and fully synced
+  Ready states; only the final state is `Healthy`.
 - Status messages and Kubernetes Events sanitize backend failure messages before storing them in the Kubernetes API.
 - Repeated reconciles do not create duplicate logical Certificates.
 - Backend outage preserves existing Secret and retries with backoff.
@@ -377,4 +467,5 @@ Required operator scenarios:
 - RBAC tests verify equivalent permissions in every selected namespace, no Secret access outside watched namespaces, no main-resource update permission, finalizer-only main-resource patches in the implementation, and no access to issuer, DNS provider, User, Application admin, or audit APIs.
 - Multi-namespace and single-namespace deployment tests verify independent list/watch behavior, partial-failure isolation, and Secret writes constrained by the selected deployment mode.
 - Delete/finalizer tests verify the operator never deletes or clears an unowned Secret and never logs Secret data during cleanup.
-- CR spec change requests a new certificate identity and syncs new material.
+- A mutable certificate-criteria spec change requests a new certificate
+  identity and syncs new material without changing the immutable Secret target.

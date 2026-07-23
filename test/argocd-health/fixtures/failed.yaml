@@ -1,0 +1,21 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: failed
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - failed.example.test
+  secretName: failed
+status:
+  observedGeneration: 1
+  phase: Failed
+  message: Certificate issuance failed
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"

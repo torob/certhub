@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -104,21 +105,26 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 				t.Fatalf("owner-reference patch content type = %q", r.Header.Get("Content-Type"))
 			}
 			var patch struct {
-				Metadata Metadata `json:"metadata"`
+				Metadata Metadata          `json:"metadata"`
+				Type     string            `json:"type"`
+				Data     map[string][]byte `json:"data"`
 			}
 			decodeKubeJSON(t, r, &patch)
-			if patch.Metadata.ResourceVersion != "rv-1" || patch.Metadata.OwnerReferences == nil || len(patch.Metadata.OwnerReferences) != 0 {
+			if patch.Metadata.ResourceVersion != "rv-1" || !slices.Equal(patch.Metadata.OwnerReferences, []OwnerReference{certhubOwnerReference(testCertificate())}) {
 				t.Fatalf("unexpected owner-reference patch: %#v", patch.Metadata)
 			}
-			stored.Metadata.OwnerReferences = nil
-			stored.Metadata.ResourceVersion = "rv-cleaned"
+			if patch.Type != "" || patch.Data != nil || patch.Metadata.Labels != nil || patch.Metadata.Annotations != nil {
+				t.Fatalf("owner-reference migration included non-ownership fields: %#v", patch)
+			}
+			stored.Metadata.OwnerReferences = append([]OwnerReference(nil), patch.Metadata.OwnerReferences...)
+			stored.Metadata.ResourceVersion = "rv-owned"
 			sawOwnerReferencePatch = true
 			writeKubeJSON(t, w, stored)
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			requireKubeContentType(t, r, "application/json")
 			var updated Secret
 			decodeKubeJSON(t, r, &updated)
-			if updated.Metadata.ResourceVersion != "rv-cleaned" {
+			if updated.Metadata.ResourceVersion != "rv-owned" {
 				t.Fatalf("update did not carry resourceVersion: %#v", updated.Metadata)
 			}
 			if got := string(updated.Data["tls.key"]); got != "KEY2" {
@@ -162,12 +168,12 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 	if !sawPost {
 		t.Fatalf("create did not POST")
 	}
-	stored.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
-	if err := client.ClearSecretOwnerReferences(ctx, stored); err != nil {
-		t.Fatalf("owner-reference cleanup failed: %v", err)
+	stored.Metadata.OwnerReferences = nil
+	if err := client.SetSecretOwnerReferences(ctx, stored, []OwnerReference{certhubOwnerReference(cert)}); err != nil {
+		t.Fatalf("owner-reference migration failed: %v", err)
 	}
 	if !sawOwnerReferencePatch {
-		t.Fatalf("owner-reference cleanup did not PATCH")
+		t.Fatalf("owner-reference migration did not PATCH")
 	}
 
 	updated := ownedSecret(cert, "etag-2")
@@ -189,11 +195,136 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 
 func TestRESTKubeClientOwnerReferenceCleanupRequiresVersionedSecret(t *testing.T) {
 	client := &RESTKubeClient{}
-	if err := client.ClearSecretOwnerReferences(context.Background(), nil); err == nil {
+	if err := client.SetSecretOwnerReferences(context.Background(), nil, nil); err == nil {
 		t.Fatal("nil Secret accepted for owner-reference cleanup")
 	}
-	if err := client.ClearSecretOwnerReferences(context.Background(), &Secret{Metadata: Metadata{Name: "gateway-tls", Namespace: "ns"}}); err == nil {
+	if err := client.SetSecretOwnerReferences(context.Background(), &Secret{Metadata: Metadata{Name: "gateway-tls", Namespace: "ns"}}, nil); err == nil {
 		t.Fatal("unversioned Secret accepted for owner-reference cleanup")
+	}
+}
+
+func TestRESTKubeClientRejectsAlteredOwnerReferencePatchResponse(t *testing.T) {
+	created := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	requested := []OwnerReference{certhubOwnerReference(testCertificate())}
+	tests := []struct {
+		name   string
+		alter  func(*Secret)
+		needle string
+	}{
+		{
+			name: "requested owner reference omitted",
+			alter: func(updated *Secret) {
+				updated.Metadata.OwnerReferences = nil
+			},
+			needle: "does not match requested owner references",
+		},
+		{
+			name: "TLS data changed",
+			alter: func(updated *Secret) {
+				updated.Metadata.OwnerReferences = append([]OwnerReference(nil), requested...)
+				updated.Data["tls.key"] = []byte("ALTERED")
+			},
+			needle: "changed fields outside",
+		},
+		{
+			name: "labels changed",
+			alter: func(updated *Secret) {
+				updated.Metadata.OwnerReferences = append([]OwnerReference(nil), requested...)
+				updated.Metadata.Labels["admission.example/altered"] = "true"
+			},
+			needle: "changed fields outside",
+		},
+		{
+			name: "owner reference shape changed",
+			alter: func(updated *Secret) {
+				updated.Metadata.OwnerReferences = append([]OwnerReference(nil), requested...)
+				updated.Metadata.OwnerReferences[0].Controller = true
+			},
+			needle: "does not match requested owner references",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := ownedSecret(testCertificate(), "etag")
+			secret.Metadata.OwnerReferences = nil
+			secret.Metadata.UID = "secret-uid"
+			secret.Metadata.ResourceVersion = "rv-before"
+			secret.Metadata.CreationTimestamp = &created
+			secret.Metadata.Finalizers = []string{"example.test/secret-protection"}
+			beforeData := append([]byte(nil), secret.Data["tls.key"]...)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requireKubeAuth(t, r)
+				if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/namespaces/ns/secrets/gateway-tls" {
+					t.Fatalf("unexpected Kubernetes request: %s %s", r.Method, r.URL.String())
+				}
+				updated := cloneKubeSecret(t, secret)
+				updated.Metadata.ResourceVersion = "rv-after"
+				tt.alter(updated)
+				writeKubeJSON(t, w, updated)
+			}))
+			defer server.Close()
+
+			err := testRESTKubeClient(server.URL).SetSecretOwnerReferences(context.Background(), secret, requested)
+			if err == nil || !strings.Contains(err.Error(), tt.needle) {
+				t.Fatalf("altered patch response error = %v", err)
+			}
+			if secret.Metadata.ResourceVersion != "rv-before" || len(secret.Metadata.OwnerReferences) != 0 || string(secret.Data["tls.key"]) != string(beforeData) {
+				t.Fatalf("rejected response was adopted by caller: %#v", secret)
+			}
+		})
+	}
+}
+
+func TestRESTKubeClientDeleteWaitsForConfirmedAbsence(t *testing.T) {
+	tests := []struct {
+		name         string
+		stillPresent bool
+		wantPending  bool
+	}{
+		{name: "accepted and absent", stillPresent: false, wantPending: false},
+		{name: "accepted but terminating", stillPresent: true, wantPending: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert := testCertificate()
+			secret := ownedSecret(cert, "etag")
+			secret.Metadata.UID = "secret-uid"
+			secret.Metadata.ResourceVersion = "rv-secret"
+			getCalls := 0
+			deleteCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requireKubeAuth(t, r)
+				switch r.Method {
+				case http.MethodGet:
+					getCalls++
+					if getCalls == 2 && !tt.stillPresent {
+						http.NotFound(w, r)
+						return
+					}
+					response := cloneKubeSecret(t, secret)
+					if getCalls == 2 {
+						now := time.Now().UTC()
+						response.Metadata.DeletionTimestamp = &now
+						response.Metadata.ResourceVersion = "rv-terminating"
+					}
+					writeKubeJSON(t, w, response)
+				case http.MethodDelete:
+					deleteCalls++
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					t.Fatalf("unexpected Kubernetes request: %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer server.Close()
+
+			err := testRESTKubeClient(server.URL).DeleteSecret(context.Background(), "ns", "gateway-tls", secret)
+			if tt.wantPending != errors.Is(err, ErrDeletionPending) {
+				t.Fatalf("delete error = %v, want pending=%v", err, tt.wantPending)
+			}
+			if getCalls != 2 || deleteCalls != 1 {
+				t.Fatalf("GET calls=%d DELETE calls=%d, want 2 and 1", getCalls, deleteCalls)
+			}
+		})
 	}
 }
 
@@ -239,7 +370,7 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 			requireKubeContentType(t, r, "application/json")
 			var body CerthubCertificate
 			decodeKubeJSON(t, r, &body)
-			if body.APIVersion != APIVersion || body.Kind != Kind || body.Metadata.ResourceVersion != "rv-cert" || body.Status.Phase != PhaseReady {
+			if body.APIVersion != APIVersion || body.Kind != Kind || body.Metadata.ResourceVersion != "rv-cert" || body.Status.Phase != PhaseReady || body.Status.ObservedGeneration != 4 {
 				t.Fatalf("unexpected status body: %#v", body)
 			}
 			sawStatus = true
@@ -281,6 +412,7 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 	cert := testCertificate()
 	cert.Metadata.ResourceVersion = "rv-cert"
 	cert.Status.Phase = PhaseReady
+	cert.Status.ObservedGeneration = 4
 	if err := client.UpdateStatus(ctx, cert); err != nil {
 		t.Fatalf("status update failed: %v", err)
 	}
@@ -323,6 +455,48 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 	}
 }
 
+func TestRESTKubeClientRejectsAlteredFinalizerPatchResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		before    []string
+		requested []string
+		returned  []string
+	}{
+		{name: "addition omitted", requested: []string{Finalizer}},
+		{name: "removal denied", before: []string{Finalizer}, returned: []string{Finalizer}},
+		{
+			name:      "unexpected finalizer added",
+			before:    []string{"example.test/existing"},
+			requested: []string{"example.test/existing", Finalizer},
+			returned:  []string{"example.test/existing", Finalizer, "example.test/injected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requireKubeAuth(t, r)
+				if r.Method != http.MethodPatch {
+					t.Fatalf("method = %s; want PATCH", r.Method)
+				}
+				writeKubeJSON(t, w, CerthubCertificate{Metadata: Metadata{
+					Name: "gateway", Namespace: "ns", ResourceVersion: "rv-after", Finalizers: tt.returned,
+				}})
+			}))
+			defer server.Close()
+			cert := testCertificate()
+			cert.Metadata.ResourceVersion = "rv-before"
+			cert.Metadata.Finalizers = append([]string(nil), tt.before...)
+			err := testRESTKubeClient(server.URL).UpdateFinalizers(context.Background(), cert, tt.requested)
+			if err == nil || !strings.Contains(err.Error(), "does not match requested finalizers") {
+				t.Fatalf("altered finalizer response error = %v", err)
+			}
+			if cert.Metadata.ResourceVersion != "rv-before" || !slices.Equal(cert.Metadata.Finalizers, tt.before) {
+				t.Fatalf("rejected response was adopted: %#v", cert.Metadata)
+			}
+		})
+	}
+}
+
 func testRESTKubeClient(baseURL string) *RESTKubeClient {
 	return &RESTKubeClient{
 		baseURL:          baseURL,
@@ -355,6 +529,19 @@ func decodeKubeJSON(t *testing.T, r *http.Request, out any) {
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
 		t.Fatalf("decode request body: %v", err)
 	}
+}
+
+func cloneKubeSecret(t *testing.T, secret *Secret) *Secret {
+	t.Helper()
+	encoded, err := json.Marshal(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clone Secret
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		t.Fatal(err)
+	}
+	return &clone
 }
 
 func writeKubeJSON(t *testing.T, w http.ResponseWriter, value any) {

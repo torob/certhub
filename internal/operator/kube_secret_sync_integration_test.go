@@ -101,8 +101,8 @@ spec:
 	if secret.Metadata.Annotations[AnnotationOwnerUID] != cert.Metadata.UID {
 		t.Fatalf("Secret owner UID annotation = %q, want %q", secret.Metadata.Annotations[AnnotationOwnerUID], cert.Metadata.UID)
 	}
-	if len(secret.Metadata.OwnerReferences) != 0 {
-		t.Fatalf("Retain Secret has garbage-collection owner references: %#v", secret.Metadata.OwnerReferences)
+	if len(secret.Metadata.OwnerReferences) != 1 || secret.Metadata.OwnerReferences[0] != certhubOwnerReference(cert) {
+		t.Fatalf("Retain Secret owner reference = %#v", secret.Metadata.OwnerReferences)
 	}
 
 	updated, err := kube.ListCertificates(ctx, namespace)
@@ -115,14 +115,28 @@ spec:
 	if !hasCondition(updated[0].Status, ConditionSecretSynced, ConditionTrue) {
 		t.Fatalf("updated status is missing true SecretSynced condition: %#v", updated[0].Status.Conditions)
 	}
+	if updated[0].Status.ObservedGeneration != updated[0].Metadata.Generation {
+		t.Fatalf("status observedGeneration=%d, metadata.generation=%d", updated[0].Status.ObservedGeneration, updated[0].Metadata.Generation)
+	}
 
-	runKubectl(ctx, t, kubectl, nil, "delete", "certhubcertificate", "gateway", "--namespace", namespace, "--wait=true")
+	runKubectl(ctx, t, kubectl, nil, "delete", "certhubcertificate", "gateway", "--namespace", namespace, "--wait=false")
+	deleting, err := kube.ListCertificates(ctx, namespace)
+	if err != nil || len(deleting) != 1 || deleting[0].Metadata.DeletionTimestamp == nil {
+		t.Fatalf("get terminating CerthubCertificate: items=%#v err=%v", deleting, err)
+	}
+	if _, err := reconciler.Reconcile(ctx, deleting[0]); err != nil {
+		t.Fatalf("reconcile Retain deletion: %v", err)
+	}
+	runKubectl(ctx, t, kubectl, nil, "wait", "--for=delete", "certhubcertificate/gateway", "--namespace", namespace, "--timeout=30s")
 	retained, err := kube.GetSecret(ctx, namespace, "gateway-tls")
 	if err != nil {
 		t.Fatalf("Retain Secret disappeared after CerthubCertificate deletion: %v", err)
 	}
 	if retained.Metadata.Annotations[AnnotationOwnerUID] != cert.Metadata.UID {
 		t.Fatalf("retained Secret ownership metadata changed: %#v", retained.Metadata.Annotations)
+	}
+	if len(retained.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("retained Secret still has owner reference: %#v", retained.Metadata.OwnerReferences)
 	}
 }
 

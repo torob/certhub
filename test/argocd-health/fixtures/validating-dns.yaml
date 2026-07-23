@@ -1,0 +1,20 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: validating-dns
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - validating.example.test
+  secretName: validating-dns
+status:
+  observedGeneration: 1
+  phase: ValidatingDNS
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"

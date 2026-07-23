@@ -1,0 +1,21 @@
+apiVersion: certs.torob.dev/v1alpha1
+kind: CerthubCertificate
+metadata:
+  name: pending
+  namespace: default
+  generation: 1
+spec:
+  domains:
+    - pending.example.test
+  secretName: pending
+status:
+  observedGeneration: 1
+  phase: Pending
+  message: Waiting for certificate issuance
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"
+    - type: SecretSynced
+      status: "False"
+      lastTransitionTime: "2026-01-01T00:00:00Z"

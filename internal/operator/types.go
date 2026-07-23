@@ -29,6 +29,8 @@ type Metadata struct {
 	Namespace         string            `json:"namespace,omitempty"`
 	UID               string            `json:"uid,omitempty"`
 	ResourceVersion   string            `json:"resourceVersion,omitempty"`
+	Generation        int64             `json:"generation,omitempty"`
+	CreationTimestamp *time.Time        `json:"creationTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
 	OwnerReferences   []OwnerReference  `json:"ownerReferences,omitempty"`
@@ -37,10 +39,12 @@ type Metadata struct {
 }
 
 type OwnerReference struct {
-	APIVersion string `json:"apiVersion,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Name       string `json:"name,omitempty"`
-	UID        string `json:"uid,omitempty"`
+	APIVersion         string `json:"apiVersion,omitempty"`
+	Kind               string `json:"kind,omitempty"`
+	Name               string `json:"name,omitempty"`
+	UID                string `json:"uid,omitempty"`
+	Controller         bool   `json:"controller,omitempty"`
+	BlockOwnerDeletion bool   `json:"blockOwnerDeletion,omitempty"`
 }
 
 type CerthubCertificate struct {
@@ -60,15 +64,16 @@ type CerthubCertificateSpec struct {
 }
 
 type CerthubCertificateStatus struct {
-	Phase           string      `json:"phase,omitempty"`
-	CertificateID   string      `json:"certificateId,omitempty"`
-	ObservedDomains []string    `json:"observedDomains,omitempty"`
-	NotBefore       string      `json:"notBefore,omitempty"`
-	NotAfter        string      `json:"notAfter,omitempty"`
-	RenewalTime     string      `json:"renewalTime,omitempty"`
-	Message         string      `json:"message,omitempty"`
-	ObservedRetryID string      `json:"observedRetryId,omitempty"`
-	Conditions      []Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
+	Phase              string      `json:"phase,omitempty"`
+	CertificateID      string      `json:"certificateId,omitempty"`
+	ObservedDomains    []string    `json:"observedDomains,omitempty"`
+	NotBefore          string      `json:"notBefore,omitempty"`
+	NotAfter           string      `json:"notAfter,omitempty"`
+	RenewalTime        string      `json:"renewalTime,omitempty"`
+	Message            string      `json:"message,omitempty"`
+	ObservedRetryID    string      `json:"observedRetryId,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 }
 
 type Condition struct {
