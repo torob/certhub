@@ -210,6 +210,7 @@ storage versions.
 
 | Value | Default | Description |
 | --- | --- | --- |
+| `revisionHistoryLimit` | `3` | Number of old Deployment ReplicaSets to retain |
 | `image.tag` | `""` | Explicit image tag; empty uses chart `appVersion` |
 | `image.digest` | `""` | Optional `sha256:` image digest |
 | `clusterScoped` | `false` | Watch all namespaces and create cluster RBAC |

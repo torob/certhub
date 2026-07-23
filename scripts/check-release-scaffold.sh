@@ -116,12 +116,22 @@ for expected in \
   "automountServiceAccountToken: false" \
   "fsGroup: 65532" \
   "fsGroupChangePolicy: OnRootMismatch" \
+  "revisionHistoryLimit: 3" \
   "defaultMode: 0440"; do
   if ! grep -F "$expected" "$server_rendered" "$tmp_dir/certhub/deploy/helm/certhub-server/values.yaml" >/dev/null; then
     echo "server chart render/defaults missing: $expected" >&2
     exit 1
   fi
 done
+server_zero_revision_history="$tmp_dir/server-zero-revision-history.yaml"
+"$helm_bin" template test-server "$tmp_dir/certhub/deploy/helm/certhub-server" \
+  --namespace certhub \
+  --set revisionHistoryLimit=0 \
+  --show-only templates/deployment.yaml >"$server_zero_revision_history"
+if ! grep -F "revisionHistoryLimit: 0" "$server_zero_revision_history" >/dev/null; then
+  echo "server chart did not render revisionHistoryLimit override" >&2
+  exit 1
+fi
 "$node_bin" - "$tmp_dir/certhub/deploy/helm/certhub-server/values.yaml" "$tmp_dir/certhub/deploy/helm/certhub-operator/values.yaml" <<'NODE'
 const fs = require("fs");
 for (const valuesPath of process.argv.slice(2)) {

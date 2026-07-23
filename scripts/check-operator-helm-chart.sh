@@ -61,6 +61,7 @@ default_rendered="$tmp_dir/default.yaml"
 
 for expected in \
   'replicas: 1' \
+  'revisionHistoryLimit: 3' \
   'type: Recreate' \
   'terminationGracePeriodSeconds: 30' \
   'image: "ghcr.io/torob/certhub-operator:0.1.0"' \
@@ -107,8 +108,18 @@ expect_not_contains "$custom_token_ref" 'CERTHUB_TOKEN_SECRET_'
 
 expect_template_failure multiple-replicas --set replicaCount=2
 expect_template_failure zero-replicas --set replicaCount=0
+expect_template_failure negative-revision-history-limit --set revisionHistoryLimit=-1
+expect_template_failure non-integer-revision-history-limit --set revisionHistoryLimit=invalid
 expect_template_failure insecure-url --set certhub.url=http://certhub.example.test
 expect_template_failure malformed-duration --set certhub.resyncInterval=soon
+
+zero_revision_history="$tmp_dir/zero-revision-history.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set revisionHistoryLimit=0 \
+  --show-only templates/deployment.yaml >"$zero_revision_history"
+expect_contains "$zero_revision_history" 'revisionHistoryLimit: 0'
 
 short_resync="$tmp_dir/short-resync.yaml"
 "$helm_bin" template test-operator "$chart" \

@@ -4,6 +4,7 @@
   "additionalProperties": false,
   "required": [
     "replicaCount",
+    "revisionHistoryLimit",
     "image",
     "clusterScoped",
     "watchNamespaces",
@@ -28,6 +29,10 @@
     "replicaCount": {
       "type": "integer",
       "const": 1
+    },
+    "revisionHistoryLimit": {
+      "type": "integer",
+      "minimum": 0
     },
     "image": {
       "type": "object",
