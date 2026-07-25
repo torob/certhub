@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,6 +146,16 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	ready, err := client.WaitOrder(context.Background(), WaitOrderParams{
+		OrderClientParams: common,
+		OrderURL:          order.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != xacme.StatusReady {
+		t.Fatalf("ready status = %q", ready.Status)
+	}
 	bundle, err := client.FinalizeOrder(context.Background(), FinalizeOrderParams{
 		OrderClientParams: common,
 		FinalizeURL:       order.FinalizeURL,
@@ -177,6 +188,51 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 		if !containsString(calls, want) {
 			t.Fatalf("calls %v did not include %s", calls, want)
 		}
+	}
+}
+
+func TestOrderClientWaitsUntilOrderReady(t *testing.T) {
+	server, polls := newOrderPollingServer(t, xacme.StatusPending, xacme.StatusReady)
+	defer server.Close()
+	_, keyPEM, err := newECDSAPrivateKeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	order, err := NewOrderClient(server.Client()).WaitOrder(context.Background(), WaitOrderParams{
+		OrderClientParams: OrderClientParams{
+			DirectoryURL:         server.URL + "/directory",
+			AccountURL:           server.URL + "/acct/1",
+			AccountPrivateKeyPEM: keyPEM,
+		},
+		OrderURL: server.URL + "/order/1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != xacme.StatusReady || *polls != 2 {
+		t.Fatalf("order=%#v polls=%d", order, *polls)
+	}
+}
+
+func TestOrderClientClassifiesInvalidOrder(t *testing.T) {
+	server, _ := newOrderPollingServer(t, xacme.StatusInvalid)
+	defer server.Close()
+	_, keyPEM, err := newECDSAPrivateKeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewOrderClient(server.Client()).WaitOrder(context.Background(), WaitOrderParams{
+		OrderClientParams: OrderClientParams{
+			DirectoryURL:         server.URL + "/directory",
+			AccountURL:           server.URL + "/acct/1",
+			AccountPrivateKeyPEM: keyPEM,
+		},
+		OrderURL: server.URL + "/order/1",
+	})
+	if !errors.Is(err, ErrOrderInvalid) {
+		t.Fatalf("error = %v; want ErrOrderInvalid", err)
 	}
 }
 
@@ -229,4 +285,41 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func newOrderPollingServer(t *testing.T, statuses ...string) (*httptest.Server, *int) {
+	t.Helper()
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/directory" {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"newNonce":   "http://" + r.Host + "/new-nonce",
+				"newAccount": "http://" + r.Host + "/new-account",
+				"newOrder":   "http://" + r.Host + "/new-order",
+			})
+			return
+		}
+		w.Header().Set("Replay-Nonce", "nonce")
+		if r.Method == http.MethodHead && r.URL.Path == "/new-nonce" {
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/order/1" {
+			t.Fatalf("unexpected ACME request: %s %s", r.Method, r.URL.Path)
+		}
+		statusIndex := polls
+		if statusIndex >= len(statuses) {
+			statusIndex = len(statuses) - 1
+		}
+		status := statuses[statusIndex]
+		polls++
+		w.Header().Set("Location", "http://"+r.Host+"/order/1")
+		w.Header().Set("Retry-After", time.Now().Add(-time.Second).UTC().Format(http.TimeFormat))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":         status,
+			"identifiers":    []map[string]string{{"type": "dns", "value": "example.com"}},
+			"authorizations": []string{"http://" + r.Host + "/authz/1"},
+			"finalize":       "http://" + r.Host + "/finalize/1",
+		})
+	}))
+	return server, &polls
 }

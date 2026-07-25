@@ -3219,11 +3219,12 @@ Worker rules:
 14. lego calls each selected DNS provider `Present` to create the required `_acme-challenge` TXT records through Cloudflare or ArvanCloud.
 15. Certhub must durably track each presented challenge record name, DNS provider, provider zone, and exact TXT value before validation is attempted.
 16. Issuer worker waits for DNS propagation with the resolver configured for the selected DNS provider type, records resolver metadata and sanitized lookup failures in CertificateVersion events, and then asks Let's Encrypt to validate.
-17. Issuer worker finalizes the order and stores certificate material, including `material_etag`, in a new CertificateVersion.
-18. Issuer worker deletes DNS challenge records through lego `CleanUp` for each provider/zone used. Cleanup must remove only the exact TXT values Certhub presented for this order and must preserve unrelated `_acme-challenge` values.
-19. Certificate status becomes `ready`.
-20. The next material/archive retry returns the latest valid material or `204 No Content` if `If-None-Match` already matches.
-21. If issuance fails, material/archive retries return `409 certificate_issuance_failed` with failure metadata; clients should stop after their own timeout or failure policy.
+17. After accepting all required challenges, the issuer worker polls the ACME order within the configured order timeout until it reaches `ready`; it must not submit the finalize request while the order is `pending` or `processing`. A terminal `invalid` order fails issuance without retrying, while transient polling failures remain retryable. If a resumed order is already `valid`, the worker fetches its existing certificate instead of finalizing it again.
+18. Issuer worker finalizes a `ready` order and stores certificate material, including `material_etag`, in a new CertificateVersion.
+19. Issuer worker deletes DNS challenge records through lego `CleanUp` for each provider/zone used. Cleanup must remove only the exact TXT values Certhub presented for this order and must preserve unrelated `_acme-challenge` values.
+20. Certificate status becomes `ready`.
+21. The next material/archive retry returns the latest valid material or `204 No Content` if `If-None-Match` already matches.
+22. If issuance fails, material/archive retries return `409 certificate_issuance_failed` with failure metadata; clients should stop after their own timeout or failure policy.
 
 Every step from CertificateVersion creation or reuse through material storage or failure must be visible through `GET /v1/certificates/{certificate_id}/versions/{certificate_version_id}/events`. This timeline is operational state, not an audit log. It must be safe for managers to inspect when troubleshooting DNS propagation, issuer, provider, or ACME failures.
 

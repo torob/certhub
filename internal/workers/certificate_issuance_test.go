@@ -190,6 +190,7 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 	}
 	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_version_loaded")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_private_key_ready")
+	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_loaded")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_ready")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_version_prepared")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_authorization_fetched")
@@ -205,6 +206,12 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 	assertRecordedIssuanceEvent(t, fixture.store.events, "acme_order_finalized")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_material_stored")
 	assertRecordedIssuanceEvent(t, fixture.store.events, "certificate_dns_cleanup_queued")
+	assertEventBefore(t, fixture.recorder.events, "accept:token-cf", "wait-order:https://acme.test/order/1")
+	assertEventBefore(t, fixture.recorder.events, "wait-order:https://acme.test/order/1", "finalize:https://acme.test/order/1/finalize")
+	readyMetadata := recordedEventMetadata(t, fixture.store.events, "acme_order_ready")
+	if readyMetadata["status"] != "ready" {
+		t.Fatalf("acme order ready metadata = %#v", readyMetadata)
+	}
 	for _, event := range fixture.store.events {
 		if event.CertificateVersionID == nil || *event.CertificateVersionID != fixture.version.ID {
 			t.Fatalf("event %s missing certificate version id: %#v", event.EventType, event)
@@ -214,6 +221,67 @@ func TestCompleteNextIssuanceJobSucceedsAndEnqueuesDNSCleanupWithoutInlineCleanu
 				t.Fatalf("event %s metadata leaked %s in %s", event.EventType, leaked, string(event.Metadata))
 			}
 		}
+	}
+}
+
+func TestIssuanceOrderWaitFailureRetriesWithoutFinalizing(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.order.waitOrderErr = errors.New("order poll failed")
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed || job.Status != certificates.JobStatusPending {
+		t.Fatalf("processed=%v job=%#v", processed, job)
+	}
+	if len(fixture.store.failJobCalls) != 1 || fixture.store.failJobCalls[0].FailureCode != "acme_order_wait_failed" {
+		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
+	}
+	if fixture.order.finalizeCalls != 0 {
+		t.Fatalf("finalize calls = %d", fixture.order.finalizeCalls)
+	}
+}
+
+func TestIssuanceInvalidOrderFailsWithoutRetryOrFinalize(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.order.waitOrderErr = acmedomain.ErrOrderInvalid
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed || job.Status != certificates.JobStatusFailed {
+		t.Fatalf("processed=%v job=%#v", processed, job)
+	}
+	if len(fixture.store.failJobCalls) != 1 || fixture.store.failJobCalls[0].FailureCode != "acme_order_invalid" {
+		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
+	}
+	if fixture.order.finalizeCalls != 0 {
+		t.Fatalf("finalize calls = %d", fixture.order.finalizeCalls)
+	}
+}
+
+func TestFinalizeOrderFetchesCertificateForAlreadyValidOrder(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	fixture.order.fetchCertificateChain = [][]byte{[]byte("existing-leaf")}
+	order := acmedomain.Order{
+		URL:            "https://acme.test/order/1",
+		Status:         "valid",
+		CertificateURL: "https://acme.test/cert/1",
+	}
+
+	bundle, err := fixture.service.finalizeOrder(context.Background(), acmedomain.OrderClientParams{}, order, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.CertificateURL != order.CertificateURL || len(bundle.DERChain) != 1 || string(bundle.DERChain[0]) != "existing-leaf" {
+		t.Fatalf("bundle = %#v", bundle)
+	}
+	if fixture.order.fetchCertificateCalls != 1 || fixture.order.finalizeCalls != 0 {
+		t.Fatalf("fetch calls=%d finalize calls=%d", fixture.order.fetchCertificateCalls, fixture.order.finalizeCalls)
 	}
 }
 
@@ -612,10 +680,16 @@ func (o fakeArvanCloudOperator) CleanUp(_ context.Context, _ dnsdomain.ArvanClou
 }
 
 type fakeOrderManager struct {
-	authz          map[string]acmedomain.Authorization
-	order          acmedomain.Order
-	selfSignBundle bool
-	recorder       *challengeRecorder
+	authz                 map[string]acmedomain.Authorization
+	order                 acmedomain.Order
+	waitOrder             acmedomain.Order
+	waitOrderErr          error
+	waitOrderCalls        int
+	finalizeCalls         int
+	fetchCertificateChain [][]byte
+	fetchCertificateCalls int
+	selfSignBundle        bool
+	recorder              *challengeRecorder
 }
 
 func (m *fakeOrderManager) CreateOrder(context.Context, acmedomain.CreateOrderParams) (acmedomain.Order, error) {
@@ -624,6 +698,22 @@ func (m *fakeOrderManager) CreateOrder(context.Context, acmedomain.CreateOrderPa
 
 func (m *fakeOrderManager) FetchOrder(context.Context, acmedomain.FetchOrderParams) (acmedomain.Order, error) {
 	return m.order, nil
+}
+
+func (m *fakeOrderManager) WaitOrder(_ context.Context, params acmedomain.WaitOrderParams) (acmedomain.Order, error) {
+	m.waitOrderCalls++
+	if m.recorder != nil {
+		m.recorder.events = append(m.recorder.events, "wait-order:"+params.OrderURL)
+	}
+	if m.waitOrderErr != nil {
+		return acmedomain.Order{}, m.waitOrderErr
+	}
+	if m.waitOrder.URL != "" {
+		return m.waitOrder, nil
+	}
+	order := m.order
+	order.Status = "ready"
+	return order, nil
 }
 
 func (m *fakeOrderManager) FetchAuthorization(_ context.Context, params acmedomain.FetchAuthorizationParams) (acmedomain.Authorization, error) {
@@ -640,6 +730,10 @@ func (m *fakeOrderManager) AcceptChallenge(_ context.Context, params acmedomain.
 }
 
 func (m *fakeOrderManager) FinalizeOrder(_ context.Context, params acmedomain.FinalizeOrderParams) (acmedomain.CertificateBundle, error) {
+	m.finalizeCalls++
+	if m.recorder != nil {
+		m.recorder.events = append(m.recorder.events, "finalize:"+params.FinalizeURL)
+	}
 	if !m.selfSignBundle {
 		return acmedomain.CertificateBundle{}, nil
 	}
@@ -651,7 +745,8 @@ func (m *fakeOrderManager) FinalizeOrder(_ context.Context, params acmedomain.Fi
 }
 
 func (m *fakeOrderManager) FetchCertificate(context.Context, acmedomain.FetchCertificateParams) ([][]byte, error) {
-	return nil, nil
+	m.fetchCertificateCalls++
+	return m.fetchCertificateChain, nil
 }
 
 func (m *fakeOrderManager) RevokeCertificate(context.Context, acmedomain.RevokeCertificateParams) error {

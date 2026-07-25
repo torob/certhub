@@ -19,6 +19,7 @@ import (
 var (
 	ErrOrderClientUnavailable = errors.New("acme order client unavailable")
 	ErrOrderOperation         = errors.New("acme order operation failed")
+	ErrOrderInvalid           = errors.New("acme order is invalid")
 )
 
 type OrderClientParams struct {
@@ -33,6 +34,11 @@ type CreateOrderParams struct {
 }
 
 type FetchOrderParams struct {
+	OrderClientParams
+	OrderURL string
+}
+
+type WaitOrderParams struct {
 	OrderClientParams
 	OrderURL string
 }
@@ -99,6 +105,7 @@ type CertificateBundle struct {
 type OrderManager interface {
 	CreateOrder(context.Context, CreateOrderParams) (Order, error)
 	FetchOrder(context.Context, FetchOrderParams) (Order, error)
+	WaitOrder(context.Context, WaitOrderParams) (Order, error)
 	FetchAuthorization(context.Context, FetchAuthorizationParams) (Authorization, error)
 	AcceptChallenge(context.Context, AcceptChallengeParams) error
 	FinalizeOrder(context.Context, FinalizeOrderParams) (CertificateBundle, error)
@@ -155,6 +162,25 @@ func (c *OrderClient) FetchOrder(ctx context.Context, params FetchOrderParams) (
 	}
 	order, err := client.GetOrder(ctx, params.OrderURL)
 	if err != nil {
+		return Order{}, ErrOrderOperation
+	}
+	return mapOrder(order), nil
+}
+
+func (c *OrderClient) WaitOrder(ctx context.Context, params WaitOrderParams) (Order, error) {
+	client, err := c.acmeClient(params.OrderClientParams)
+	if err != nil {
+		return Order{}, err
+	}
+	if params.OrderURL == "" {
+		return Order{}, ErrOrderOperation
+	}
+	order, err := client.WaitOrder(ctx, params.OrderURL)
+	if err != nil {
+		var orderErr *xacme.OrderError
+		if errors.As(err, &orderErr) && orderErr.Status == xacme.StatusInvalid {
+			return Order{}, ErrOrderInvalid
+		}
 		return Order{}, ErrOrderOperation
 	}
 	return mapOrder(order), nil

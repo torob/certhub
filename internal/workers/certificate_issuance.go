@@ -342,8 +342,9 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
-	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_ready", certificates.EventResultSuccess, map[string]any{
+	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_loaded", certificates.EventResultSuccess, map[string]any{
 		"authorization_count": len(order.AuthorizationURLs),
+		"status":              order.Status,
 	})
 	encryptedKey := deref(version.PrivateKeyPEMEncrypted)
 	if encryptedKey == "" {
@@ -368,6 +369,13 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err := s.presentAndValidate(ctx, orderParams, job, version, order); err != nil {
 		return err
 	}
+	order, err = s.waitForOrderReady(ctx, orderParams, order)
+	if err != nil {
+		return err
+	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_ready", certificates.EventResultSuccess, map[string]any{
+		"status": order.Status,
+	})
 	_, _ = s.Certificates.UpdateCertificateIssuanceStatus(ctx, certificates.UpdateCertificateIssuanceStatusParams{CertificateID: cert.ID, Status: certificates.StatusIssuing})
 	csrDER, err := csrForCertificate(signer, cert.NormalizedSANs)
 	if err != nil {
@@ -377,7 +385,11 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
-	_ = s.recordVersionEvent(ctx, job, version.ID, "acme_order_finalized", certificates.EventResultSuccess, map[string]any{
+	completionEvent := "acme_order_finalized"
+	if strings.EqualFold(order.Status, "valid") {
+		completionEvent = "acme_certificate_fetched"
+	}
+	_ = s.recordVersionEvent(ctx, job, version.ID, completionEvent, certificates.EventResultSuccess, map[string]any{
 		"certificate_url": bundle.CertificateURL,
 	})
 	material, err := materialFromBundle(bundle, privateKeyPEM, keyFingerprint, s.KeySet)
@@ -585,6 +597,31 @@ func (s *CertificateIssuanceService) orderForVersion(ctx context.Context, params
 		return acmedomain.Order{}, issuanceFailure{code: "acme_order_invalid", err: errors.New("acme order is missing required URLs")}
 	}
 	return order, nil
+}
+
+func (s *CertificateIssuanceService) waitForOrderReady(ctx context.Context, params acmedomain.OrderClientParams, order acmedomain.Order) (acmedomain.Order, error) {
+	orderCtx, cancel := s.orderContext(ctx)
+	defer cancel()
+	readyOrder, err := s.OrderManager.WaitOrder(orderCtx, acmedomain.WaitOrderParams{OrderClientParams: params, OrderURL: order.URL})
+	if err != nil {
+		if errors.Is(err, acmedomain.ErrOrderInvalid) {
+			return acmedomain.Order{}, issuanceFailure{code: "acme_order_invalid", err: err}
+		}
+		return acmedomain.Order{}, issuanceFailure{code: "acme_order_wait_failed", err: err}
+	}
+	switch {
+	case strings.EqualFold(readyOrder.Status, "ready"):
+		if readyOrder.FinalizeURL == "" {
+			return acmedomain.Order{}, issuanceFailure{code: "acme_order_invalid", err: errors.New("ready acme order is missing finalize URL")}
+		}
+	case strings.EqualFold(readyOrder.Status, "valid"):
+		if readyOrder.CertificateURL == "" {
+			return acmedomain.Order{}, issuanceFailure{code: "acme_order_invalid", err: errors.New("valid acme order is missing certificate URL")}
+		}
+	default:
+		return acmedomain.Order{}, issuanceFailure{code: "acme_order_invalid", err: errors.New("acme order did not become ready")}
+	}
+	return readyOrder, nil
 }
 
 func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, params acmedomain.OrderClientParams, job certificates.IssuanceJob, version certificates.CertificateVersion, order acmedomain.Order) error {
@@ -972,6 +1009,13 @@ func (s *CertificateIssuanceService) recordedZone(ctx context.Context, record ce
 func (s *CertificateIssuanceService) finalizeOrder(ctx context.Context, params acmedomain.OrderClientParams, order acmedomain.Order, csrDER []byte) (acmedomain.CertificateBundle, error) {
 	orderCtx, cancel := s.orderContext(ctx)
 	defer cancel()
+	if strings.EqualFold(order.Status, "valid") {
+		chain, err := s.OrderManager.FetchCertificate(orderCtx, acmedomain.FetchCertificateParams{OrderClientParams: params, CertificateURL: order.CertificateURL, Bundle: true})
+		if err != nil {
+			return acmedomain.CertificateBundle{}, issuanceFailure{code: "acme_certificate_fetch_failed", err: err}
+		}
+		return acmedomain.CertificateBundle{CertificateURL: order.CertificateURL, DERChain: chain}, nil
+	}
 	bundle, err := s.OrderManager.FinalizeOrder(orderCtx, acmedomain.FinalizeOrderParams{OrderClientParams: params, FinalizeURL: order.FinalizeURL, CSRDER: csrDER, Bundle: true})
 	if err != nil {
 		return acmedomain.CertificateBundle{}, issuanceFailure{code: "acme_finalize_failed", err: err}
@@ -1265,7 +1309,7 @@ func retryableIssuanceFailure(code string) bool {
 	switch code {
 	case "dns_validation_failed", "dns_provider_not_found", "dns_challenge_present_failed", "dns_challenge_record_read_failed",
 		"dns_provider_credentials_unavailable", "dns_provider_zone_not_found", "dns_propagation_timeout",
-		"acme_order_fetch_failed", "acme_order_create_failed", "acme_authorization_fetch_failed",
+		"acme_order_fetch_failed", "acme_order_create_failed", "acme_order_wait_failed", "acme_authorization_fetch_failed",
 		"acme_finalize_failed", "acme_certificate_fetch_failed", "issuer_account_unavailable",
 		"acme_revocation_failed", "acme_revocation_record_failed", "dns_challenge_cleanup_failed":
 		return true
