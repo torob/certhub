@@ -15,6 +15,9 @@ const allowedLicenses = new Set([
   "Python-2.0"
 ]);
 const reviewedLicenseExpressions = new Set(["(MIT OR CC0-1.0)"]);
+const reviewedPackageLicenses = new Map([
+  ["node_modules/minimatch", "BlueOak-1.0.0"]
+]);
 const failures = [];
 const licenses = new Map();
 
@@ -32,7 +35,7 @@ for (const [pkgPath, meta] of Object.entries(lock.packages || {})) {
     failures.push(`${pkgPath} is missing license metadata`);
     continue;
   }
-  if (!isAllowedExpression(license)) {
+  if (!isAllowedExpression(license) && reviewedPackageLicenses.get(pkgPath) !== license) {
     failures.push(`${pkgPath} has unreviewed license ${license}`);
   }
 }
