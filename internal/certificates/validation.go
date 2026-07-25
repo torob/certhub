@@ -207,6 +207,19 @@ func validateClaimJob(params ClaimIssuanceJobParams) error {
 	return nil
 }
 
+func validateRenewIssuanceJobLease(params RenewIssuanceJobLeaseParams) error {
+	if err := storage.ValidateUUID(params.JobID, "issuance_job_id"); err != nil {
+		return err
+	}
+	if err := storage.ValidateHumanString(params.WorkerID, "locked_by", 1, 255); err != nil {
+		return err
+	}
+	if params.LockedUntil.IsZero() || !params.LockedUntil.After(time.Now()) {
+		return errors.New("locked_until must be in the future")
+	}
+	return nil
+}
+
 func validateSucceedJob(params SucceedIssuanceJobParams) error {
 	if err := storage.ValidateUUID(params.JobID, "issuance_job_id"); err != nil {
 		return err

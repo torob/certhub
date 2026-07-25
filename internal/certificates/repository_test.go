@@ -179,6 +179,40 @@ func TestEnsureAndClaimIssuanceJobsUseActiveVersionLease(t *testing.T) {
 	}
 }
 
+func TestRenewIssuanceJobLeaseRequiresCurrentUnexpiredOwner(t *testing.T) {
+	now := testTime()
+	worker := "worker-1"
+	versionID := "32345678-1234-4234-9234-123456789abc"
+	db := &fakeDB{row: fakeRow{values: issuanceJobRowValues(now, string(JobStatusRunning), &versionID, &worker)}}
+	repo := NewRepository(db)
+	lockedUntil := time.Now().Add(10 * time.Minute)
+
+	job, err := repo.RenewIssuanceJobLease(context.Background(), RenewIssuanceJobLeaseParams{
+		JobID:       "12345678-1234-4234-9234-123456789abc",
+		WorkerID:    worker,
+		LockedUntil: lockedUntil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != JobStatusRunning || job.LockedBy == nil || *job.LockedBy != worker {
+		t.Fatalf("job = %#v", job)
+	}
+	for _, required := range []string{
+		"status = 'running'",
+		"locked_by = $2",
+		"locked_until > now()",
+		"greatest(j.locked_until, $3)",
+	} {
+		if !strings.Contains(db.query, required) {
+			t.Fatalf("renew query missing %q: %s", required, db.query)
+		}
+	}
+	if len(db.args) != 3 || db.args[0] != "12345678-1234-4234-9234-123456789abc" || db.args[1] != worker || db.args[2] != lockedUntil {
+		t.Fatalf("renew args = %#v", db.args)
+	}
+}
+
 func TestRecordDNSChallengeNormalizesAndUsesExactValueConflict(t *testing.T) {
 	now := testTime()
 	db := &fakeDB{row: fakeRow{values: dnsChallengeRowValues(now, string(DNSChallengeStatusPresented), nil, nil)}}

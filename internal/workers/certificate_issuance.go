@@ -42,6 +42,7 @@ const (
 
 type CertificateIssuanceStore interface {
 	ClaimNextIssuanceJob(context.Context, certificates.ClaimIssuanceJobParams) (certificates.IssuanceJob, error)
+	RenewIssuanceJobLease(context.Context, certificates.RenewIssuanceJobLeaseParams) (certificates.IssuanceJob, error)
 	Get(context.Context, string) (certificates.Certificate, error)
 	GetVersion(context.Context, string) (certificates.CertificateVersion, error)
 	ListVersions(context.Context, certificates.ListVersionsParams) ([]certificates.CertificateVersion, error)
@@ -121,6 +122,15 @@ type issuanceFailure struct {
 func (e issuanceFailure) Error() string { return e.err.Error() }
 func (e issuanceFailure) Unwrap() error { return e.err }
 
+type issuanceLeaseHeartbeat struct {
+	cancelHeartbeat context.CancelFunc
+	cancelWork      context.CancelFunc
+	done            chan struct{}
+
+	mu  sync.Mutex
+	err error
+}
+
 func StartCertificateIssuanceWorkers(ctx context.Context, cfg CertificateIssuanceConfig) (*CertificateIssuanceRunner, error) {
 	if cfg.Service == nil {
 		return nil, fmt.Errorf("certificate issuance service is required")
@@ -172,10 +182,7 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 	if err := s.ready(); err != nil {
 		return certificates.IssuanceJob{}, false, err
 	}
-	lease := s.LeaseDuration
-	if lease <= 0 {
-		lease = defaultIssuanceLeaseDuration
-	}
+	lease := s.leaseDuration()
 	job, err := s.Certificates.ClaimNextIssuanceJob(ctx, certificates.ClaimIssuanceJobParams{
 		WorkerID:    workerID,
 		LockedUntil: time.Now().UTC().Add(lease),
@@ -186,9 +193,17 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 		}
 		return certificates.IssuanceJob{}, false, err
 	}
-	_ = s.recordEvent(ctx, job, "certificate_issuance_started", certificates.EventResultSuccess, nil)
-	if err := s.completeClaimedJob(ctx, workerID, job); err != nil {
-		_ = s.cleanupRecordedChallenges(ctx, job)
+	workCtx, heartbeat := s.startIssuanceLeaseHeartbeat(ctx, job.ID, workerID, lease)
+	_ = s.recordEvent(workCtx, job, "certificate_issuance_started", certificates.EventResultSuccess, nil)
+	if err := s.completeClaimedJob(workCtx, workerID, job); err != nil {
+		if leaseErr := heartbeat.Err(); leaseErr != nil {
+			_ = heartbeat.Stop()
+			return job, true, leaseErr
+		}
+		_ = s.cleanupRecordedChallenges(workCtx, job)
+		if leaseErr := heartbeat.Stop(); leaseErr != nil {
+			return job, true, leaseErr
+		}
 		code, message := sanitizedFailure(err)
 		failureMetadata := issuanceFailureMetadata(err)
 		retryable := retryableIssuanceFailure(code)
@@ -217,6 +232,9 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 		}
 		return failed, true, err
 	}
+	if leaseErr := heartbeat.Stop(); leaseErr != nil {
+		return job, true, leaseErr
+	}
 	succeeded, err := s.Certificates.SucceedIssuanceJob(ctx, certificates.SucceedIssuanceJobParams{JobID: job.ID, WorkerID: workerID})
 	if err != nil {
 		return succeeded, true, err
@@ -236,6 +254,75 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 		}
 	}
 	return succeeded, true, nil
+}
+
+func (s *CertificateIssuanceService) leaseDuration() time.Duration {
+	if s.LeaseDuration > 0 {
+		return s.LeaseDuration
+	}
+	return defaultIssuanceLeaseDuration
+}
+
+func (s *CertificateIssuanceService) startIssuanceLeaseHeartbeat(ctx context.Context, jobID, workerID string, lease time.Duration) (context.Context, *issuanceLeaseHeartbeat) {
+	workCtx, cancelWork := context.WithCancel(ctx)
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	heartbeat := &issuanceLeaseHeartbeat{cancelHeartbeat: cancelHeartbeat, cancelWork: cancelWork, done: make(chan struct{})}
+	interval := lease / 3
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	go func() {
+		defer close(heartbeat.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				_, err := s.Certificates.RenewIssuanceJobLease(heartbeatCtx, certificates.RenewIssuanceJobLeaseParams{
+					JobID:       jobID,
+					WorkerID:    workerID,
+					LockedUntil: time.Now().UTC().Add(lease),
+				})
+				if err == nil {
+					continue
+				}
+				if heartbeatCtx.Err() != nil {
+					return
+				}
+				heartbeat.setError(fmt.Errorf("certificate issuance lease heartbeat failed: %w", err))
+				cancelWork()
+				return
+			}
+		}
+	}()
+	return workCtx, heartbeat
+}
+
+func (h *issuanceLeaseHeartbeat) setError(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.err = err
+}
+
+func (h *issuanceLeaseHeartbeat) Err() error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+func (h *issuanceLeaseHeartbeat) Stop() error {
+	if h == nil {
+		return nil
+	}
+	h.cancelHeartbeat()
+	h.cancelWork()
+	<-h.done
+	return h.Err()
 }
 
 func shouldEnqueueDNSCleanup(reason certificates.JobReason) bool {

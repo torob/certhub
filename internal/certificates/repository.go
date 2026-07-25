@@ -127,6 +127,12 @@ type ClaimIssuanceJobParams struct {
 	LockedUntil time.Time
 }
 
+type RenewIssuanceJobLeaseParams struct {
+	JobID       string
+	WorkerID    string
+	LockedUntil time.Time
+}
+
 type SucceedIssuanceJobParams struct {
 	JobID    string
 	WorkerID string
@@ -861,6 +867,25 @@ with candidate as (
 select * from job`, params.WorkerID, params.LockedUntil))
 	if err != nil {
 		return IssuanceJob{}, fmt.Errorf("claim certificate issuance job: %w", err)
+	}
+	return job, nil
+}
+
+func (r Repository) RenewIssuanceJobLease(ctx context.Context, params RenewIssuanceJobLeaseParams) (IssuanceJob, error) {
+	if err := validateRenewIssuanceJobLease(params); err != nil {
+		return IssuanceJob{}, err
+	}
+	job, err := scanIssuanceJob(r.db.QueryRow(ctx, `
+update certificate_issuance_jobs j
+set locked_until = greatest(j.locked_until, $3),
+    updated_at = now()
+where j.id = $1
+  and j.status = 'running'
+  and j.locked_by = $2
+  and j.locked_until > now()
+returning `+prefixedIssuanceJobColumnsSQL("j"), params.JobID, params.WorkerID, params.LockedUntil))
+	if err != nil {
+		return IssuanceJob{}, fmt.Errorf("renew certificate issuance job lease: %w", err)
 	}
 	return job, nil
 }

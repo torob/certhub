@@ -244,6 +244,72 @@ func TestIssuanceOrderWaitFailureRetriesWithoutFinalizing(t *testing.T) {
 	}
 }
 
+func TestIssuanceLeaseHeartbeatRenewsWhileWorkIsActive(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	fixture.store.renewLeaseCalls = make(chan certificates.RenewIssuanceJobLeaseParams, 1)
+	workCtx, heartbeat := fixture.service.startIssuanceLeaseHeartbeat(
+		context.Background(),
+		"12345678-1234-4234-9234-123456789abc",
+		"worker-1",
+		60*time.Millisecond,
+	)
+	defer func() {
+		if err := heartbeat.Stop(); err != nil {
+			t.Errorf("stop heartbeat: %v", err)
+		}
+	}()
+
+	select {
+	case renewal := <-fixture.store.renewLeaseCalls:
+		if renewal.JobID != "12345678-1234-4234-9234-123456789abc" || renewal.WorkerID != "worker-1" {
+			t.Fatalf("renewal = %#v", renewal)
+		}
+		if remaining := time.Until(renewal.LockedUntil); remaining <= 0 || remaining > 60*time.Millisecond {
+			t.Fatalf("renewed lease remaining = %s", remaining)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lease heartbeat did not renew")
+	}
+	select {
+	case <-workCtx.Done():
+		t.Fatalf("work context canceled after successful renewal: %v", workCtx.Err())
+	default:
+	}
+}
+
+func TestIssuanceLeaseRenewalFailureCancelsWorkWithoutTerminalMutation(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.service.LeaseDuration = 90 * time.Millisecond
+	fixture.store.renewLeaseErr = storage.ErrNoRows
+	fixture.store.renewLeaseCalls = make(chan certificates.RenewIssuanceJobLeaseParams, 1)
+	fixture.order.waitOrderBlock = true
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if !errors.Is(err, storage.ErrNoRows) {
+		t.Fatalf("error = %v; want lease ownership error", err)
+	}
+	if !processed || job.Status != certificates.JobStatusRunning {
+		t.Fatalf("processed=%v job=%#v", processed, job)
+	}
+	select {
+	case renewal := <-fixture.store.renewLeaseCalls:
+		if renewal.JobID != fixture.job.ID || renewal.WorkerID != "worker-1" || !renewal.LockedUntil.After(time.Now()) {
+			t.Fatalf("renewal = %#v", renewal)
+		}
+	default:
+		t.Fatal("lease was not renewed")
+	}
+	if len(fixture.store.failJobCalls) != 0 || len(fixture.store.succeedJobCalls) != 0 || len(fixture.store.storeMaterialCalls) != 0 {
+		t.Fatalf("fail=%#v succeed=%#v material=%#v", fixture.store.failJobCalls, fixture.store.succeedJobCalls, fixture.store.storeMaterialCalls)
+	}
+	for _, event := range fixture.recorder.events {
+		if strings.HasPrefix(event, "cleanup:") {
+			t.Fatalf("stale worker cleaned challenge after losing lease: %#v", fixture.recorder.events)
+		}
+	}
+}
+
 func TestIssuanceInvalidOrderFailsWithoutRetryOrFinalize(t *testing.T) {
 	fixture := newIssuanceWorkerFixture(t)
 	configureSuccessfulIssuance(t, &fixture)
@@ -684,6 +750,7 @@ type fakeOrderManager struct {
 	order                 acmedomain.Order
 	waitOrder             acmedomain.Order
 	waitOrderErr          error
+	waitOrderBlock        bool
 	waitOrderCalls        int
 	finalizeCalls         int
 	fetchCertificateChain [][]byte
@@ -700,10 +767,14 @@ func (m *fakeOrderManager) FetchOrder(context.Context, acmedomain.FetchOrderPara
 	return m.order, nil
 }
 
-func (m *fakeOrderManager) WaitOrder(_ context.Context, params acmedomain.WaitOrderParams) (acmedomain.Order, error) {
+func (m *fakeOrderManager) WaitOrder(ctx context.Context, params acmedomain.WaitOrderParams) (acmedomain.Order, error) {
 	m.waitOrderCalls++
 	if m.recorder != nil {
 		m.recorder.events = append(m.recorder.events, "wait-order:"+params.OrderURL)
+	}
+	if m.waitOrderBlock {
+		<-ctx.Done()
+		return acmedomain.Order{}, ctx.Err()
 	}
 	if m.waitOrderErr != nil {
 		return acmedomain.Order{}, m.waitOrderErr
@@ -877,6 +948,8 @@ type fakeIssuanceStore struct {
 	succeedJobCalls    []certificates.SucceedIssuanceJobParams
 	failJobCalls       []certificates.FailIssuanceJobParams
 	events             []certificates.RecordEventParams
+	renewLeaseErr      error
+	renewLeaseCalls    chan certificates.RenewIssuanceJobLeaseParams
 }
 
 func (s *fakeIssuanceStore) ClaimNextIssuanceJob(_ context.Context, params certificates.ClaimIssuanceJobParams) (certificates.IssuanceJob, error) {
@@ -891,6 +964,21 @@ func (s *fakeIssuanceStore) ClaimNextIssuanceJob(_ context.Context, params certi
 		s.claimJob.StartedAt = &now
 	}
 	return s.claimJob, nil
+}
+
+func (s *fakeIssuanceStore) RenewIssuanceJobLease(_ context.Context, params certificates.RenewIssuanceJobLeaseParams) (certificates.IssuanceJob, error) {
+	if s.renewLeaseCalls != nil {
+		select {
+		case s.renewLeaseCalls <- params:
+		default:
+		}
+	}
+	if s.renewLeaseErr != nil {
+		return certificates.IssuanceJob{}, s.renewLeaseErr
+	}
+	job := s.claimJob
+	job.LockedUntil = &params.LockedUntil
+	return job, nil
 }
 
 func (s *fakeIssuanceStore) Get(_ context.Context, id string) (certificates.Certificate, error) {

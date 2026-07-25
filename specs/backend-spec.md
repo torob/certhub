@@ -3197,6 +3197,7 @@ Worker rules:
 
 - Workers claim jobs through PostgreSQL row-level locking or an equivalent lease pattern, such as `SELECT ... FOR UPDATE SKIP LOCKED`.
 - Each claimed job must record `locked_by` and `locked_until`.
+- While a claimed issuance job is active, its worker must periodically extend `locked_until` with an owner-fenced update that requires the same `locked_by` value and an unexpired running lease. A worker that cannot renew its lease must cancel in-flight work and must not perform cleanup or terminal job writes under uncertain ownership.
 - Expired leases are reclaimable by another worker.
 - Completed issuance steps must be idempotent when retried after a worker crash.
 - DNS challenge cleanup must use the recorded TXT record names and exact TXT values from the database, not recompute or guess them from current order state.

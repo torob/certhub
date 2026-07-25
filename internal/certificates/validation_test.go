@@ -1,6 +1,9 @@
 package certificates
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNormalizeSANsSortsDedupesAndNormalizes(t *testing.T) {
 	got, err := NormalizeSANs([]string{"API.Example.COM.", "bücher.example", "api.example.com"})
@@ -58,5 +61,20 @@ func TestStoreMaterialValidationRequiresStrongETagAndFingerprints(t *testing.T) 
 	})
 	if err == nil {
 		t.Fatalf("invalid material was accepted")
+	}
+}
+
+func TestRenewIssuanceJobLeaseValidationRequiresFutureExpiry(t *testing.T) {
+	params := RenewIssuanceJobLeaseParams{
+		JobID:       "12345678-1234-4234-9234-123456789abc",
+		WorkerID:    "worker-1",
+		LockedUntil: time.Now().Add(-time.Second),
+	}
+	if err := validateRenewIssuanceJobLease(params); err == nil {
+		t.Fatal("expired lease renewal was accepted")
+	}
+	params.LockedUntil = time.Now().Add(time.Minute)
+	if err := validateRenewIssuanceJobLease(params); err != nil {
+		t.Fatalf("valid lease renewal was rejected: %v", err)
 	}
 }
