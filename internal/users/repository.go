@@ -270,6 +270,27 @@ func (r Repository) Get(ctx context.Context, id string) (User, error) {
 	return r.getWhere(ctx, "u.id = $1", id)
 }
 
+// GetForUpdate serializes authentication changes with session and login setup
+// creation. Callers must hold a transaction until those operations complete.
+func (r Repository) GetForUpdate(ctx context.Context, id string) (User, error) {
+	if err := storage.ValidateUUID(id, "user_id"); err != nil {
+		return User{}, err
+	}
+	user, err := scanUser(r.db.QueryRow(ctx, `
+select u.id, u.email, u.display_name, u.password_hash, u.password_2fa_enabled,
+    u.totp_secret_encrypted, u.pending_totp_secret_encrypted,
+    u.oidc_issuer, u.oidc_subject, u.global_role, u.status,
+    u.created_at, u.updated_at, u.last_login_at,
+    (select count(*) from application_user_grants where user_id = u.id)::bigint
+from users u
+where u.id = $1
+for update of u`, id))
+	if err != nil {
+		return User{}, fmt.Errorf("lock user: %w", err)
+	}
+	return user, nil
+}
+
 func (r Repository) LookupByNormalizedEmail(ctx context.Context, email string) (User, error) {
 	normalized, err := storage.NormalizeEmail(email)
 	if err != nil {

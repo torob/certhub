@@ -1566,6 +1566,13 @@ func (f *oidcFakeRepo) ConsumeOIDCHandoff(_ context.Context, handoffHash string)
 	return f.handoff, nil
 }
 
+func (f *oidcFakeRepo) GetActiveOIDCHandoffByHash(_ context.Context, handoffHash string) (OIDCLoginHandoff, error) {
+	if f.handoffConsumed || f.handoff.HandoffHash == "" || handoffHash != f.handoff.HandoffHash {
+		return OIDCLoginHandoff{}, storage.ErrNoRows
+	}
+	return f.handoff, nil
+}
+
 func (f *oidcFakeRepo) CreatePasswordReset(context.Context, CreatePasswordResetParams) (PasswordResetToken, error) {
 	return PasswordResetToken{}, errors.New("not implemented")
 }
@@ -1595,6 +1602,10 @@ func (f *oidcFakeRepo) Get(_ context.Context, userID string) (users.User, error)
 		return f.user, nil
 	}
 	return users.User{}, storage.ErrNoRows
+}
+
+func (f *oidcFakeRepo) GetForUpdate(ctx context.Context, userID string) (users.User, error) {
+	return f.Get(ctx, userID)
 }
 
 func (f *oidcFakeRepo) LookupByNormalizedEmail(_ context.Context, email string) (users.User, error) {

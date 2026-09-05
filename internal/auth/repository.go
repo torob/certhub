@@ -348,6 +348,20 @@ func (r Repository) RevokeUserSessions(ctx context.Context, userID string, reaso
 	if err := validateRevokedReason(reason); err != nil {
 		return 0, err
 	}
+	// Recovery also terminates unfinished logins, including users who do not
+	// yet have any sessions. Otherwise those tokens could recreate access.
+	if _, err := r.db.Exec(ctx, `
+update password_2fa_login_setups
+set status = 'superseded'
+where user_id = $1 and status = 'active'`, userID); err != nil {
+		return 0, fmt.Errorf("invalidate password 2fa login setups: %w", err)
+	}
+	if _, err := r.db.Exec(ctx, `
+update oidc_login_handoffs
+set status = 'expired'
+where user_id = $1 and status = 'active'`, userID); err != nil {
+		return 0, fmt.Errorf("invalidate oidc login handoffs: %w", err)
+	}
 	rows, err := r.db.Query(ctx, `
 update user_sessions
 set status = 'revoked',
@@ -503,8 +517,7 @@ func (r Repository) GetActivePassword2FASetupByHash(ctx context.Context, setupHa
 	setup, err := scanPassword2FASetup(r.db.QueryRow(ctx, password2FASetupSelectSQL()+`
 where setup_hash = $1
   and status = 'active'
-  and expires_at > now()
-for update`, setupHash))
+  and expires_at > now()`, setupHash))
 	if err != nil {
 		return Password2FALoginSetup{}, fmt.Errorf("get password 2fa login setup: %w", err)
 	}
@@ -709,6 +722,22 @@ returning id, handoff_hash, user_id, oidc_login_state_id,
 		params.FrontendReturnURL, params.ExpiresAt, params.SourceIP, params.UserAgent))
 	if err != nil {
 		return OIDCLoginHandoff{}, fmt.Errorf("create oidc login handoff: %w", err)
+	}
+	return handoff, nil
+}
+
+func (r Repository) GetActiveOIDCHandoffByHash(ctx context.Context, handoffHash string) (OIDCLoginHandoff, error) {
+	if err := storage.ValidateTokenHash(handoffHash, "handoff_hash"); err != nil {
+		return OIDCLoginHandoff{}, err
+	}
+	handoff, err := scanOIDCHandoff(r.db.QueryRow(ctx, `
+select id, handoff_hash, user_id, oidc_login_state_id,
+    frontend_return_url, status, created_at, expires_at,
+    consumed_at, source_ip, user_agent
+from oidc_login_handoffs
+where handoff_hash = $1 and status = 'active' and expires_at > now()`, handoffHash))
+	if err != nil {
+		return OIDCLoginHandoff{}, fmt.Errorf("get oidc login handoff: %w", err)
 	}
 	return handoff, nil
 }

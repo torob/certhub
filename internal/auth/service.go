@@ -75,6 +75,7 @@ type SessionRepository interface {
 	CreateOIDCState(context.Context, CreateOIDCStateParams) (OIDCLoginState, error)
 	ConsumeOIDCState(context.Context, string) (OIDCLoginState, error)
 	CreateOIDCHandoff(context.Context, CreateOIDCHandoffParams) (OIDCLoginHandoff, error)
+	GetActiveOIDCHandoffByHash(context.Context, string) (OIDCLoginHandoff, error)
 	ConsumeOIDCHandoff(context.Context, string) (OIDCLoginHandoff, error)
 	CreatePasswordReset(context.Context, CreatePasswordResetParams) (PasswordResetToken, error)
 	GetActivePasswordResetByHash(context.Context, string) (PasswordResetToken, error)
@@ -86,6 +87,7 @@ type SessionRepository interface {
 
 type UserRepository interface {
 	Get(context.Context, string) (users.User, error)
+	GetForUpdate(context.Context, string) (users.User, error)
 	LookupByNormalizedEmail(context.Context, string) (users.User, error)
 	LookupByOIDC(context.Context, string, string) (users.User, error)
 	Update(context.Context, string, users.UpdateUserParams) (users.User, error)
@@ -222,6 +224,11 @@ func (s *Service) passwordLogin(ctx context.Context, params PasswordLoginParams)
 		return LoginResult{}, ErrPasswordAuthDisabled
 	}
 	user, lookupErr := s.userRepo.LookupByNormalizedEmail(ctx, params.Email)
+	if lookupErr == nil {
+		// A reset must either revoke this login or finish before we verify the
+		// password; an earlier, unlocked password snapshot is not sufficient.
+		user, lookupErr = s.userRepo.GetForUpdate(ctx, user.ID)
+	}
 	if lookupErr != nil {
 		_ = verifyDummyPassword(params.Password)
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "invalid_credentials"})
@@ -574,7 +581,7 @@ func (s *Service) completePasswordReset(ctx context.Context, token, password str
 	if err != nil {
 		return ErrInvalidPasswordReset
 	}
-	user, err := s.userRepo.Get(ctx, reset.UserID)
+	user, err := s.userRepo.GetForUpdate(ctx, reset.UserID)
 	if err != nil {
 		return ErrInvalidPasswordReset
 	}
@@ -616,7 +623,7 @@ func (s *Service) adminResetPassword2FA(ctx context.Context, current Authenticat
 	if current.User.GlobalRole != users.GlobalRoleAdmin {
 		return users.User{}, ErrForbidden
 	}
-	target, err := s.userRepo.Get(ctx, userID)
+	target, err := s.userRepo.GetForUpdate(ctx, userID)
 	if err != nil {
 		return users.User{}, ErrNotFound
 	}
@@ -651,6 +658,9 @@ func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, 
 	if err := s.ready(); err != nil {
 		return LoginResult{}, err
 	}
+	if !s.cfg.Password.Enabled {
+		return LoginResult{}, ErrPasswordAuthDisabled
+	}
 	if err := validatePresentedPassword2FASetupToken(setupToken); err != nil {
 		return LoginResult{}, ErrInvalidToken
 	}
@@ -659,9 +669,18 @@ func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, 
 	if err != nil {
 		return LoginResult{}, ErrInvalidToken
 	}
-	user, err := s.userRepo.Get(ctx, setup.UserID)
+	user, err := s.userRepo.GetForUpdate(ctx, setup.UserID)
 	if err != nil || user.Status != users.StatusActive {
 		return LoginResult{}, ErrUserDisabled
+	}
+	if user.PasswordHash == nil || user.Password2FAEnabled || user.TOTPSecretEncrypted != nil {
+		return LoginResult{}, ErrInvalidToken
+	}
+	// A credential reset may have invalidated the setup while we waited for
+	// the user lock. Always recheck it after acquiring that lock.
+	setup, err = s.authRepo.GetActivePassword2FASetupByHash(ctx, setupHash)
+	if err != nil {
+		return LoginResult{}, ErrInvalidToken
 	}
 	secret, err := s.keys.DecryptTOTPSecret(setup.PendingTOTPSecretEncrypted, totpAAD(user.ID))
 	if err != nil {
@@ -853,14 +872,18 @@ func (s *Service) exchangeOIDCHandoff(ctx context.Context, handoffID string, aud
 	if !strings.HasPrefix(handoffID, OIDCHandoffPrefix) {
 		return LoginResult{}, ErrInvalidCredentials
 	}
-	handoff, err := s.authRepo.ConsumeOIDCHandoff(ctx, s.keys.HashToken(handoffID))
+	handoffHash := s.keys.HashToken(handoffID)
+	handoff, err := s.authRepo.GetActiveOIDCHandoffByHash(ctx, handoffHash)
 	if err != nil {
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, auditCtx, map[string]any{"method": string(AuthMethodOIDC), "reason": "invalid_handoff"})
 		return LoginResult{}, ErrInvalidCredentials
 	}
-	user, err := s.userRepo.Get(ctx, handoff.UserID)
+	user, err := s.userRepo.GetForUpdate(ctx, handoff.UserID)
 	if err != nil || user.Status != users.StatusActive {
 		return LoginResult{}, ErrUserDisabled
+	}
+	if _, err := s.authRepo.ConsumeOIDCHandoff(ctx, handoffHash); err != nil {
+		return LoginResult{}, ErrInvalidCredentials
 	}
 	tokens, session, err := s.createSession(ctx, user.ID, AuthMethodOIDC, auditCtx)
 	if err != nil {

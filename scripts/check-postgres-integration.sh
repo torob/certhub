@@ -5,13 +5,13 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 export CODEX_TOOLS="${CODEX_TOOLS:-$HOME/.tools}"
-export PATH="$CODEX_TOOLS/go/1.26.5/bin:$CODEX_TOOLS/bin:$PATH"
+export PATH="$CODEX_TOOLS/go/1.26.6/bin:$CODEX_TOOLS/bin:$PATH"
 export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
 export GOPATH="${GOPATH:-$HOME/go}"
 export GOMODCACHE="${GOMODCACHE:-$HOME/go/pkg/mod}"
 export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 
-go_bin="${GO_BIN:-$CODEX_TOOLS/go/1.26.5/bin/go}"
+go_bin="${GO_BIN:-$CODEX_TOOLS/go/1.26.6/bin/go}"
 if [ ! -x "$go_bin" ]; then
   go_bin="go"
 fi
@@ -54,7 +54,7 @@ fi
 export CERTHUB_TEST_DATABASE_URL="postgres://certhub:${password}@127.0.0.1:${port}/certhub?sslmode=disable"
 
 "$go_bin" test ./internal/migrations ./internal/storage ./internal/auth ./internal/commands \
-  -run 'Test(PostgresMigrationsApplyIdempotently|Milestone3RepositoriesWithPostgres|Milestone4RepositoriesWithPostgres|Milestone5CertificateLifecycleRepositoryWithPostgres|ApplicationHardDeleteWithPostgres|OIDCLoginFlowWithPostgresServiceTransactions|MigrateWithPostgresIntegration|RunMigrationModeWithPostgresIntegration)$' \
+  -run 'Test(PostgresMigrationsApplyIdempotently|Milestone3RepositoriesWithPostgres|Milestone4RepositoriesWithPostgres|Milestone5CertificateLifecycleRepositoryWithPostgres|ApplicationHardDeleteWithPostgres|OIDCLoginFlowWithPostgresServiceTransactions|LoginRecoveryWithPostgres|ConcurrentLoginRecoveryWithPostgres|MigrateWithPostgresIntegration|RunMigrationModeWithPostgresIntegration)$' \
   -count=1 -v
 
 echo "PostgreSQL integration certification passed."

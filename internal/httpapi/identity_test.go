@@ -343,6 +343,10 @@ func (f *identityFakeAuthRepo) ConsumeOIDCHandoff(context.Context, string) (auth
 	return auth.OIDCLoginHandoff{}, errors.New("not implemented")
 }
 
+func (f *identityFakeAuthRepo) GetActiveOIDCHandoffByHash(context.Context, string) (auth.OIDCLoginHandoff, error) {
+	return auth.OIDCLoginHandoff{}, errors.New("not implemented")
+}
+
 func (f *identityFakeAuthRepo) CreatePasswordReset(context.Context, auth.CreatePasswordResetParams) (auth.PasswordResetToken, error) {
 	return auth.PasswordResetToken{}, errors.New("not implemented")
 }
@@ -373,6 +377,10 @@ type identityFakeUserRepo struct {
 }
 
 func (f *identityFakeUserRepo) Get(context.Context, string) (userdomain.User, error) {
+	return f.user, nil
+}
+
+func (f *identityFakeUserRepo) GetForUpdate(context.Context, string) (userdomain.User, error) {
 	return f.user, nil
 }
 

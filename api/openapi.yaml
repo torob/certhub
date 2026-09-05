@@ -2164,6 +2164,7 @@ paths:
       tags: [Applications]
       operationId: createApplicationDomainScope
       summary: Add an immutable domain scope to an Application.
+      description: Requires a global administrator. Application managers cannot expand the domains authorized for certificate issuance.
       security:
         - UserBearerAuth: []
       requestBody:
@@ -2212,6 +2213,7 @@ paths:
       tags: [Applications]
       operationId: deleteApplicationDomainScope
       summary: Delete an Application domain scope.
+      description: Requires a global administrator.
       security:
         - UserBearerAuth: []
       responses:

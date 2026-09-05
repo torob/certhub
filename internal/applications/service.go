@@ -543,6 +543,11 @@ func (s *Service) createDomainScope(ctx context.Context, actor Actor, applicatio
 	if err := s.ready(); err != nil {
 		return DomainScope{}, err
 	}
+	// Domain scopes authorize use of the server's shared DNS credentials.
+	// Application managers must not be able to expand that authorization.
+	if !actor.admin() {
+		return DomainScope{}, ErrForbidden
+	}
 	app, err := s.requireMutableManager(ctx, actor, applicationID)
 	if err != nil {
 		return DomainScope{}, err
@@ -574,6 +579,9 @@ func (s *Service) DeleteDomainScope(ctx context.Context, actor Actor, applicatio
 func (s *Service) deleteDomainScope(ctx context.Context, actor Actor, applicationID, scopeID string, auditCtx AuditContext) error {
 	if err := s.ready(); err != nil {
 		return err
+	}
+	if !actor.admin() {
+		return ErrForbidden
 	}
 	app, err := s.requireMutableManager(ctx, actor, applicationID)
 	if err != nil {

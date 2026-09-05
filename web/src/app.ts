@@ -24,6 +24,7 @@ import {
 import QRCode from "qrcode";
 import { createElement, useEffect, useMemo, useState } from "react";
 import type { components } from "./api-types";
+import { apiRequestURL } from "./api-url";
 
 type ErrorBody = components["schemas"]["ErrorEnvelope"];
 type Identity = components["schemas"]["UserIdentity"] | components["schemas"]["ApplicationIdentity"];
@@ -349,10 +350,14 @@ async function refreshSession(session: Session): Promise<boolean> {
 }
 
 async function api<T>(path: string, session: Session | undefined, init: RequestInit = {}, allowRefresh = true): Promise<APIResult<T>> {
-  const url = new URL(path, window.location.origin);
-  if (url.origin !== window.location.origin) return clientError("cross-origin API requests are blocked");
+  let requestURL: string;
+  try {
+    requestURL = apiRequestURL(path, window.location.origin);
+  } catch {
+    return clientError("API requests must target this server's API.");
+  }
+  const url = new URL(requestURL);
   const rid = requestID();
-  const requestPath = `${url.pathname}${url.search}`;
   const canRefresh = Boolean(allowRefresh && session?.accessToken && isRefreshableRequest(url.pathname));
   if (canRefresh && session && shouldRefreshAccess(session)) {
     const refreshed = await refreshSession(session);
@@ -365,7 +370,7 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   if (session?.accessToken) headers.set("Authorization", `Bearer ${session.accessToken}`);
   let response: Response;
   try {
-    response = await fetch(requestPath, { ...init, headers, cache: "no-store", redirect: "error" });
+    response = await fetch(requestURL, { ...init, headers, cache: "no-store", redirect: "error" });
   } catch (err) {
     return clientError(`network error: ${(err as Error).message}`, true);
   }
@@ -1214,6 +1219,7 @@ function ApplicationDetailPage(props: PageProps) {
   const app = detail.data?.application || {};
   const reserved = app.system_kind === "certhub_server" || app.name === "certhub_server";
   const canManage = !reserved && canManageApplication(app, props.session);
+  const canManageScopes = !reserved && isAdmin(props.session);
   const appLoaded = Boolean(detail.data?.application);
   const rawTab = props.route.query.get("tab") || "overview";
   const requestedTab = applicationTab(rawTab);
@@ -1302,8 +1308,8 @@ function ApplicationDetailPage(props: PageProps) {
     activeTab === "overview" ? overview :
     activeTab === "scopes" ? createElement("section", { className: "tab-panel" },
       createElement("div", { className: "section-head" }, createElement("h2", null, "Domain scopes")),
-      canManage ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh((value) => value + 1)) }) : null,
-      table(scopes, ["value", "kind", "created_at", canManage ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
+      canManageScopes ? createElement(GenericCreate, { title: "Add scope", fields: ["value"], onSubmit: (body: Record<string, string>) => post({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes`, body, () => setRefresh((value) => value + 1)) }) : createElement("p", null, "A global administrator manages the domains authorized for this application."),
+      table(scopes, ["value", "kind", "created_at", canManageScopes ? actionsColumn((scope) => rowAction("Delete", () => del({ session: props.session, setNotice: props.setNotice }, `${base}/domain-scopes/${scope.id}`, () => setRefresh((value) => value + 1)), { icon: Trash2, danger: true, label: `Delete ${scope.value}` })) : null].filter(Boolean) as TableColumn[])
     ) :
 	    activeTab === "tokens" ? createElement("section", { className: "tab-panel" },
 	      createElement("div", { className: "section-head" }, createElement("h2", null, "Tokens")),

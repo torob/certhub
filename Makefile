@@ -4,8 +4,8 @@ CODEX_TOOLS ?= $(HOME)/.tools
 export CODEX_TOOLS
 export PATH := $(CODEX_TOOLS)/bin:$(PATH)
 
-LOCAL_GO := $(CODEX_TOOLS)/go/1.26.5/bin/go
-LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.26.5/bin/gofmt
+LOCAL_GO := $(CODEX_TOOLS)/go/1.26.6/bin/go
+LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.26.6/bin/gofmt
 LOCAL_NODE_DIR := $(CODEX_TOOLS)/node/24.15.0/bin
 LOCAL_NODE := $(LOCAL_NODE_DIR)/node
 LOCAL_NPM := $(LOCAL_NODE_DIR)/npm
@@ -31,7 +31,7 @@ GO_READONLY_ENV := $(GO_BUILD_ENV) GOFLAGS=-mod=readonly
 GO_BUILD_FLAGS := -trimpath -buildvcs=false -ldflags "-s -w"
 GO_PACKAGE_ROOTS := ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...
 
-.PHONY: check fmt go-fmt go-test go-lockfile-check build build-go build-server build-cli build-operator web-ci web-install web-typecheck web-build web-build-release web-embed-release release-artifacts dependency-check go-dependency-check go-vulnerability-check go-license-check web-dependency-check web-vulnerability-check web-license-check web-lockfile-check web-asset-check operator-chart-check release-scaffold-check contract openapi-validate contract-baseline tools-redocly tools-govulncheck tools-helm clean
+.PHONY: check fmt go-fmt go-test go-lockfile-check build build-go build-server build-cli build-operator web-ci web-install web-typecheck web-test web-build web-build-release web-embed-release release-artifacts dependency-check go-dependency-check go-vulnerability-check go-license-check web-dependency-check web-vulnerability-check web-license-check web-lockfile-check web-asset-check operator-chart-check release-scaffold-check contract openapi-validate contract-baseline tools-redocly tools-govulncheck tools-helm clean
 
 check: fmt dependency-check contract web-ci build web-asset-check release-scaffold-check
 
@@ -80,7 +80,7 @@ build-operator:
 	mkdir -p "$(DIST_DIR)/bin"
 	$(GO_READONLY_ENV) $(GO) build $(GO_BUILD_FLAGS) -o "$(DIST_DIR)/bin/certhub-operator" ./cmd/certhub-operator
 
-web-ci: web-lockfile-check web-install web-typecheck web-build
+web-ci: web-lockfile-check web-install web-typecheck web-test web-build
 
 web-install:
 	cd "$(WEB_DIR)" && $(NPM) ci --ignore-scripts --registry https://registry.npmjs.org
@@ -98,6 +98,9 @@ web-lockfile-check:
 
 web-typecheck:
 	cd "$(WEB_DIR)" && $(NPM) run typecheck
+
+web-test:
+	cd "$(WEB_DIR)" && $(NPM) test
 
 web-build:
 	cd "$(WEB_DIR)" && $(NPM) run build

@@ -291,6 +291,12 @@ func (r *passwordFlowRepo) RevokeSession(_ context.Context, sessionID string, re
 }
 
 func (r *passwordFlowRepo) RevokeUserSessions(_ context.Context, userID string, reason SessionRevokedReason) (int64, error) {
+	for hash, setup := range r.setupByHash {
+		if setup.UserID == userID && setup.Status == OneTimeTokenStatusActive {
+			setup.Status = OneTimeTokenStatusSuperseded
+			r.setupByHash[hash] = setup
+		}
+	}
 	var count int64
 	for id, session := range r.sessions {
 		if session.UserID != userID || session.Status != SessionStatusActive {
@@ -321,6 +327,10 @@ func (r *passwordFlowRepo) CreateOIDCHandoff(context.Context, CreateOIDCHandoffP
 }
 
 func (r *passwordFlowRepo) ConsumeOIDCHandoff(context.Context, string) (OIDCLoginHandoff, error) {
+	return OIDCLoginHandoff{}, errors.New("not implemented")
+}
+
+func (r *passwordFlowRepo) GetActiveOIDCHandoffByHash(context.Context, string) (OIDCLoginHandoff, error) {
 	return OIDCLoginHandoff{}, errors.New("not implemented")
 }
 
@@ -413,6 +423,10 @@ func (r *passwordFlowRepo) Get(_ context.Context, userID string) (users.User, er
 		return users.User{}, storage.ErrNoRows
 	}
 	return user, nil
+}
+
+func (r *passwordFlowRepo) GetForUpdate(ctx context.Context, userID string) (users.User, error) {
+	return r.Get(ctx, userID)
 }
 
 func (r *passwordFlowRepo) LookupByNormalizedEmail(_ context.Context, email string) (users.User, error) {
