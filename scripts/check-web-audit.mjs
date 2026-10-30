@@ -17,7 +17,7 @@ function executable(filePath) {
 }
 
 function resolveNpm() {
-  const versionedNpm = path.join(toolsDir, "node", "24.15.0", "bin", "npm");
+  const versionedNpm = path.join(toolsDir, "node", "24.22.2", "bin", "npm");
   const toolsBinNpm = path.join(toolsDir, "bin", "npm");
   if (executable(versionedNpm)) return versionedNpm;
   if (executable(toolsBinNpm)) return toolsBinNpm;

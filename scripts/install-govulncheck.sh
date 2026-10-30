@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-1.5.0}"
+GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-1.9.0}"
 GOVULNCHECK_MODULE_VERSION="${GOVULNCHECK_MODULE_VERSION:-v$GOVULNCHECK_VERSION}"
 CODEX_TOOLS="${CODEX_TOOLS:-$HOME/.tools}"
-GO_VERSION="${GO_VERSION:-1.26.6}"
+GO_VERSION="${GO_VERSION:-1.27.3}"
 INSTALL_DIR="$CODEX_TOOLS/govulncheck/$GOVULNCHECK_VERSION"
 GOVULNCHECK_BIN="$INSTALL_DIR/bin/govulncheck"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +61,9 @@ assert_go_files_unchanged() {
 verify_govulncheck() {
   local bin="$1"
   [ -x "$bin" ] || return 1
-  "$bin" -version 2>/dev/null | grep -qx "Scanner: govulncheck@$GOVULNCHECK_MODULE_VERSION"
+  "$bin" -version 2>/dev/null | grep -qx "Scanner: govulncheck@$GOVULNCHECK_MODULE_VERSION" || return 1
+  # govulncheck cannot analyze code written for a newer Go than the one that built it.
+  [ "$("$go_bin" version "$bin" 2>/dev/null)" = "$bin: $("$go_bin" env GOVERSION)" ]
 }
 
 before_mod="$(snapshot_file go.mod)"

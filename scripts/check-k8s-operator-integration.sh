@@ -10,7 +10,7 @@ if [ "${CERTHUB_EXTERNAL_K8S:-}" != "1" ]; then
 fi
 
 export CODEX_TOOLS="${CODEX_TOOLS:-$HOME/.tools}"
-export PATH="$CODEX_TOOLS/helm/3.16.2/linux-amd64:$CODEX_TOOLS/bin:$PATH"
+export PATH="$CODEX_TOOLS/helm/3.22.1/linux-amd64:$CODEX_TOOLS/bin:$PATH"
 
 kubectl_bin="${KUBECTL_BIN:-kubectl}"
 helm_bin="${HELM_BIN:-helm}"

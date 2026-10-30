@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REDOCLY_VERSION="${REDOCLY_VERSION:-2.35.1}"
+REDOCLY_VERSION="${REDOCLY_VERSION:-2.72.1}"
 CODEX_TOOLS="${CODEX_TOOLS:-$HOME/.tools}"
-NODE_VERSION="${NODE_VERSION:-24.15.0}"
+NODE_VERSION="${NODE_VERSION:-24.22.2}"
 INSTALL_DIR="$CODEX_TOOLS/redocly-cli/$REDOCLY_VERSION"
 REDOCLY_BIN="$INSTALL_DIR/node_modules/.bin/redocly"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

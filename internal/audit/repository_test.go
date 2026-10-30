@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestAppendDefaultsMetadataAndUsesScopeColumns(t *testing.T) {
@@ -112,6 +113,7 @@ func (fakeRows) Scan(...any) error                            { return errors.Ne
 func (fakeRows) Values() ([]any, error)                       { return nil, errors.New("no rows") }
 func (fakeRows) RawValues() [][]byte                          { return nil }
 func (fakeRows) Conn() *pgx.Conn                              { return nil }
+func (fakeRows) TypeMap() *pgtype.Map                         { return nil }
 
 type fakeRow struct {
 	values []any

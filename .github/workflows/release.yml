@@ -40,7 +40,7 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
-          version: v3.16.2
+          version: v3.22.1
 
       - name: Compute release version
         id: release

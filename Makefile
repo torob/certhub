@@ -4,12 +4,12 @@ CODEX_TOOLS ?= $(HOME)/.tools
 export CODEX_TOOLS
 export PATH := $(CODEX_TOOLS)/bin:$(PATH)
 
-LOCAL_GO := $(CODEX_TOOLS)/go/1.26.6/bin/go
-LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.26.6/bin/gofmt
-LOCAL_NODE_DIR := $(CODEX_TOOLS)/node/24.15.0/bin
+LOCAL_GO := $(CODEX_TOOLS)/go/1.27.3/bin/go
+LOCAL_GOFMT := $(CODEX_TOOLS)/go/1.27.3/bin/gofmt
+LOCAL_NODE_DIR := $(CODEX_TOOLS)/node/24.22.2/bin
 LOCAL_NODE := $(LOCAL_NODE_DIR)/node
 LOCAL_NPM := $(LOCAL_NODE_DIR)/npm
-LOCAL_HELM := $(CODEX_TOOLS)/helm/3.16.2/linux-amd64/helm
+LOCAL_HELM := $(CODEX_TOOLS)/helm/3.22.1/linux-amd64/helm
 TOOLS_NODE := $(CODEX_TOOLS)/bin/node
 TOOLS_NPM := $(CODEX_TOOLS)/bin/npm
 GO ?= $(if $(wildcard $(LOCAL_GO)),$(LOCAL_GO),go)
@@ -20,8 +20,8 @@ HELM ?= $(LOCAL_HELM)
 export NPM
 export NODE
 export HELM
-GOVULNCHECK_VERSION ?= 1.5.0
-HELM_VERSION ?= 3.16.2
+GOVULNCHECK_VERSION ?= 1.9.0
+HELM_VERSION ?= 3.22.1
 DIST_DIR ?= dist
 WEB_DIR := web
 WEB_DIST_DIR := $(DIST_DIR)/web

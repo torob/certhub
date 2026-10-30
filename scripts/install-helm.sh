@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${HELM_VERSION:-3.16.2}"
+version="${HELM_VERSION:-3.22.1}"
 tools_dir="${CODEX_TOOLS:-$HOME/.tools}"
 install_dir="$tools_dir/helm/$version"
 helm_bin="$install_dir/linux-amd64/helm"
 case "$version" in
-  3.16.2)
-    expected_sha256="9318379b847e333460d33d291d4c088156299a26cd93d570a7f5d0c36e50b5bb"
+  3.22.1)
+    expected_sha256="896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea"
     ;;
   *)
     echo "unsupported Helm version for checksum-pinned install: $version" >&2

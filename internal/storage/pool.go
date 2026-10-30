@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -188,6 +189,10 @@ func (s sanitizedRows) RawValues() [][]byte {
 
 func (s sanitizedRows) Conn() *pgx.Conn {
 	return s.rows.Conn()
+}
+
+func (s sanitizedRows) TypeMap() *pgtype.Map {
+	return s.rows.TypeMap()
 }
 
 type Beginner interface {
