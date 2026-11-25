@@ -1155,7 +1155,7 @@ func (s *CertificateIssuanceService) finalizeOrder(ctx context.Context, params a
 		}
 		return acmedomain.CertificateBundle{CertificateURL: order.CertificateURL, DERChain: chain}, nil
 	}
-	bundle, err := s.OrderManager.FinalizeOrder(orderCtx, acmedomain.FinalizeOrderParams{OrderClientParams: params, FinalizeURL: order.FinalizeURL, CSRDER: csrDER, Bundle: true})
+	bundle, err := s.OrderManager.FinalizeOrder(orderCtx, acmedomain.FinalizeOrderParams{OrderClientParams: params, OrderURL: order.URL, FinalizeURL: order.FinalizeURL, CSRDER: csrDER, Bundle: true})
 	if err != nil {
 		return acmedomain.CertificateBundle{}, issuanceFailure{code: "acme_finalize_failed", err: err}
 	}

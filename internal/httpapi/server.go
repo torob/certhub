@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
@@ -120,6 +121,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", requestID)
 	reqctx := s.deriveRequestContext(r, requestID)
 	r = r.WithContext(context.WithValue(r.Context(), requestContextKey{}, reqctx))
+	w = &requestResponseWriter{ResponseWriter: w, ctx: r.Context()}
 
 	route := routeTemplate(r.URL.Path)
 	status := http.StatusOK
@@ -187,9 +189,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/audit-events":
 		status, errorCode = s.serveAuditEvents(w, r, reqctx)
 	case isReservedBackendPath(r.URL.Path):
-		status, errorCode = writeError(w, http.StatusNotFound, Error{
-			Code: "certificate_not_found", Message: "Resource does not exist or is not visible.", Retryable: false, Details: map[string]any{},
-		})
+		status, errorCode = writeUnknownRoute(w)
 	default:
 		status = s.serveStatic(w, r)
 	}
@@ -200,6 +200,7 @@ type RequestContext struct {
 	SourceIP           netip.Addr
 	EffectiveScheme    string
 	EffectiveHost      string
+	EffectivePort      string // port sent with EffectiveHost, or ""; used only for links, not Host checks
 	TrustedProxyPeer   bool
 	ForwardedMalformed bool
 }
@@ -229,9 +230,9 @@ func (s *Server) deriveRequestContext(r *http.Request, requestID string) Request
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	host, hostOK := normalizeHost(r.Host)
+	host, port, hostOK := normalizeHost(r.Host)
 	if !hostOK {
-		host = ""
+		host, port = "", ""
 	}
 
 	malformed := false
@@ -270,13 +271,15 @@ func (s *Server) deriveRequestContext(r *http.Request, requestID string) Request
 		}
 
 		xForwardedHost := ""
+		xForwardedPort := ""
 		xForwardedHostHeaders := r.Header.Values("X-Forwarded-Host")
 		if len(xForwardedHostHeaders) > 0 {
-			forwardedHost, ok := parseForwardedHost(xForwardedHostHeaders)
+			forwardedHost, forwardedPort, ok := parseForwardedHost(xForwardedHostHeaders)
 			if !ok {
 				malformed = true
 			} else {
 				xForwardedHost = forwardedHost
+				xForwardedPort = forwardedPort
 			}
 		}
 
@@ -304,10 +307,14 @@ func (s *Server) deriveRequestContext(r *http.Request, requestID string) Request
 		if forwarded.Host != "" && xForwardedHost != "" && forwarded.Host != xForwardedHost {
 			malformed = true
 		}
+		// The port always comes from the same header value as the host, so a
+		// proxied host never takes the port of the internal Host header.
 		if forwarded.Host != "" {
 			host = forwarded.Host
+			port = forwarded.Port
 		} else if xForwardedHost != "" {
 			host = xForwardedHost
+			port = xForwardedPort
 		}
 	}
 
@@ -316,6 +323,7 @@ func (s *Server) deriveRequestContext(r *http.Request, requestID string) Request
 		SourceIP:           sourceIP,
 		EffectiveScheme:    scheme,
 		EffectiveHost:      host,
+		EffectivePort:      port,
 		TrustedProxyPeer:   trusted,
 		ForwardedMalformed: malformed,
 	}
@@ -350,6 +358,7 @@ type forwardedValues struct {
 	For   []netip.Addr
 	Proto string
 	Host  string
+	Port  string
 }
 
 func parseRemoteAddr(remoteAddr string) (netip.Addr, bool) {
@@ -366,6 +375,7 @@ func parseForwardedHeader(values []string) (forwardedValues, bool) {
 	seenElement := false
 	lastProto := ""
 	lastHost := ""
+	lastPort := ""
 	for _, header := range values {
 		for _, rawElement := range strings.Split(header, ",") {
 			element := strings.TrimSpace(rawElement)
@@ -376,6 +386,7 @@ func parseForwardedHeader(values []string) (forwardedValues, bool) {
 			seenParams := map[string]bool{}
 			elementProto := ""
 			elementHost := ""
+			elementPort := ""
 			for _, param := range params {
 				key, raw, ok := strings.Cut(strings.TrimSpace(param), "=")
 				if !ok {
@@ -415,16 +426,18 @@ func parseForwardedHeader(values []string) (forwardedValues, bool) {
 						return forwardedValues{}, false
 					}
 					seenParams[key] = true
-					host, ok := normalizeHost(value)
+					host, port, ok := normalizeHost(value)
 					if !ok {
 						return forwardedValues{}, false
 					}
 					elementHost = host
+					elementPort = port
 				}
 			}
 			seenElement = true
 			lastProto = elementProto
 			lastHost = elementHost
+			lastPort = elementPort
 		}
 	}
 	if !seenElement {
@@ -432,6 +445,7 @@ func parseForwardedHeader(values []string) (forwardedValues, bool) {
 	}
 	out.Proto = lastProto
 	out.Host = lastHost
+	out.Port = lastPort
 	return out, true
 }
 
@@ -521,52 +535,68 @@ func normalizeForwardedProto(value string) (string, bool) {
 	}
 }
 
-func parseForwardedHost(values []string) (string, bool) {
-	out := ""
+func parseForwardedHost(values []string) (string, string, bool) {
+	outHost, outPort := "", ""
 	for _, header := range values {
 		for _, part := range strings.Split(header, ",") {
-			host, ok := normalizeHost(strings.TrimSpace(part))
+			host, port, ok := normalizeHost(strings.TrimSpace(part))
 			if !ok {
-				return "", false
+				return "", "", false
 			}
-			out = host
+			outHost, outPort = host, port
 		}
 	}
-	return out, true
+	return outHost, outPort, true
 }
 
-func normalizeHost(value string) (string, bool) {
+// normalizeHost parses a hostname[:port] value. It returns the normalized
+// hostname and the port in canonical decimal form. The port is empty when the
+// value has no port or the port is not a valid TCP port; an invalid port does
+// not reject the hostname, so Host checks compare only the hostname.
+func normalizeHost(value string) (string, string, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.Contains(value, "://") || strings.ContainsAny(value, "/?#") {
-		return "", false
+		return "", "", false
 	}
 	host := value
+	rawPort := ""
 	if strings.HasPrefix(value, "[") {
 		parsedHost, _, err := net.SplitHostPort(value)
 		if err != nil {
-			return "", false
+			return "", "", false
 		}
 		host = parsedHost
 	} else if strings.Contains(value, ":") {
 		parsedHost, port, err := net.SplitHostPort(value)
 		if err != nil || port == "" {
-			return "", false
+			return "", "", false
 		}
 		host = parsedHost
+		rawPort = port
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	if host == "" || strings.HasPrefix(host, "*.") {
-		return "", false
+		return "", "", false
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
-		return "", false
+		return "", "", false
 	}
 	for _, label := range strings.Split(host, ".") {
 		if label == "" {
-			return "", false
+			return "", "", false
 		}
 	}
-	return host, true
+	return host, normalizePort(rawPort), true
+}
+
+// normalizePort returns a TCP port in canonical decimal form, or "" when the
+// value is empty or not a port in the range 1-65535.
+func normalizePort(value string) string {
+	n, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || n == 0 {
+		return ""
+	}
+	return strconv.FormatUint(n, 10)
 }
 
 func nearestUntrusted(chain []netip.Addr, peer netip.Addr, trusted func(netip.Addr) bool) netip.Addr {
@@ -702,6 +732,56 @@ func writeError(w http.ResponseWriter, status int, err Error) (int, string) {
 		},
 	})
 	return status, err.Code
+}
+
+// writeUnknownRoute writes the error for a backend path, or a method on a
+// backend path, that no API route serves. It must not use
+// certificate_not_found: Application clients treat that code as a missing
+// certificate and then call POST /v1/sync/certificates.
+func writeUnknownRoute(w http.ResponseWriter) (int, string) {
+	return writeError(w, http.StatusNotFound, Error{
+		Code: "invalid_request", Message: "Unknown API route.", Retryable: false, Details: map[string]any{},
+	})
+}
+
+// authenticatedUnknownRoute writes the unknown route error after User
+// authentication, so an unauthenticated request still gets 401 first.
+func (s *Server) authenticatedUnknownRoute(w http.ResponseWriter, r *http.Request) (int, string) {
+	if _, status, code, ok := s.authenticateUser(w, r); !ok {
+		return status, code
+	}
+	return writeUnknownRoute(w)
+}
+
+// statusClientClosedRequest is the nginx "client closed request" status. Logs
+// and metrics record it when the client closed the request before the
+// response.
+const statusClientClosedRequest = 499
+
+// requestResponseWriter is the http.ResponseWriter that serve gives to the
+// handlers. It keeps the request context for writeClientClosedRequest.
+type requestResponseWriter struct {
+	http.ResponseWriter
+	ctx context.Context
+}
+
+func (w *requestResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// writeClientClosedRequest handles err when the client closed the request.
+// This is true only when err is context.Canceled and the request context is
+// canceled too. A canceled server-side context, or a deadline, stays a server
+// error. The client is gone, so it writes the status with no body and returns
+// no error code. Every write*Error mapper calls it first.
+func writeClientClosedRequest(w http.ResponseWriter, err error) (int, string, bool) {
+	rw, ok := w.(*requestResponseWriter)
+	if !ok || !errors.Is(err, context.Canceled) || !errors.Is(rw.ctx.Err(), context.Canceled) {
+		return 0, "", false
+	}
+	noStoreHeaders(w.Header())
+	w.WriteHeader(statusClientClosedRequest)
+	return statusClientClosedRequest, "", true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

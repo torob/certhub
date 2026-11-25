@@ -112,7 +112,7 @@ func (s *Server) serveIssuers(w http.ResponseWriter, r *http.Request, reqctx Req
 	}
 	parts, ok := singleResourcePathPart(r.URL.Path, "/v1/issuers/")
 	if !ok {
-		return s.authenticatedIssuerNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -120,7 +120,7 @@ func (s *Server) serveIssuers(w http.ResponseWriter, r *http.Request, reqctx Req
 	case http.MethodPatch:
 		return s.handlePatchIssuer(w, r, reqctx, parts)
 	default:
-		return s.authenticatedIssuerNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 }
 
@@ -218,7 +218,7 @@ func (s *Server) serveDNSProviders(w http.ResponseWriter, r *http.Request, reqct
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/dns-providers/"), "/")
 	if len(parts) == 0 || parts[0] == "" || strings.TrimPrefix(r.URL.Path, "/v1/dns-providers/") == r.URL.Path {
-		return s.authenticatedDNSProviderNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 	providerID := parts[0]
 	switch {
@@ -237,7 +237,7 @@ func (s *Server) serveDNSProviders(w http.ResponseWriter, r *http.Request, reqct
 	case len(parts) == 3 && parts[1] == "zones" && r.Method == http.MethodDelete:
 		return s.handleDeleteDNSProviderZone(w, r, reqctx, providerID, parts[2])
 	default:
-		return s.authenticatedDNSProviderNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 }
 
@@ -406,20 +406,6 @@ func (s *Server) handleRefreshDNSProviderZones(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Retry-After", strconv.Itoa(s.cfg.API.DefaultRetryAfterSeconds))
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": serializeRefreshJob(job)})
 	return http.StatusAccepted, ""
-}
-
-func (s *Server) authenticatedIssuerNotFound(w http.ResponseWriter, r *http.Request) (int, string) {
-	if _, status, code, ok := s.authenticateUser(w, r); !ok {
-		return status, code
-	}
-	return writeIssuerError(w, issuerdomain.ErrNotFound)
-}
-
-func (s *Server) authenticatedDNSProviderNotFound(w http.ResponseWriter, r *http.Request) (int, string) {
-	if _, status, code, ok := s.authenticateUser(w, r); !ok {
-		return status, code
-	}
-	return writeDNSProviderError(w, dnsdomain.ErrNotFound)
 }
 
 func parseListIssuersParams(r *http.Request) (issuerdomain.ListIssuersParams, error) {
@@ -637,11 +623,17 @@ func serializeRefreshJob(job dnsdomain.RefreshJob) apiRefreshJob {
 }
 
 func writeIssuerError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	status, code, message := domainError(err, "service_unavailable")
 	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter(status), Details: map[string]any{}})
 }
 
 func writeDNSProviderError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	status, code, message := domainError(err, "service_unavailable")
 	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter(status), Details: map[string]any{}})
 }

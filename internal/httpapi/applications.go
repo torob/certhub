@@ -111,7 +111,7 @@ func (s *Server) serveApplications(w http.ResponseWriter, r *http.Request, reqct
 	}
 	parts, ok := applicationPathParts(r.URL.Path)
 	if !ok {
-		return s.authenticatedApplicationNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 	applicationID := parts[0]
 	switch {
@@ -142,15 +142,8 @@ func (s *Server) serveApplications(w http.ResponseWriter, r *http.Request, reqct
 	case len(parts) == 3 && parts[1] == "users" && r.Method == http.MethodDelete:
 		return s.handleDeleteApplicationGrant(w, r, reqctx, applicationID, parts[2])
 	default:
-		return s.authenticatedApplicationNotFound(w, r)
+		return s.authenticatedUnknownRoute(w, r)
 	}
-}
-
-func (s *Server) authenticatedApplicationNotFound(w http.ResponseWriter, r *http.Request) (int, string) {
-	if _, status, code, ok := s.authenticateUser(w, r); !ok {
-		return status, code
-	}
-	return writeApplicationError(w, appdomain.ErrNotFound)
 }
 
 func (s *Server) handleListApplications(w http.ResponseWriter, r *http.Request, _ RequestContext) (int, string) {
@@ -448,10 +441,7 @@ func (s *Server) serveAuditEvents(w http.ResponseWriter, r *http.Request, _ Requ
 		return writeAuditError(w, auditdomain.ErrAuditServiceUnavailable)
 	}
 	if r.Method != http.MethodGet {
-		if _, status, code, ok := s.authenticateUser(w, r); !ok {
-			return status, code
-		}
-		return writeAuditError(w, appdomain.ErrNotFound)
+		return s.authenticatedUnknownRoute(w, r)
 	}
 	current, status, code, ok := s.authenticateUser(w, r)
 	if !ok {
@@ -496,6 +486,9 @@ func (s *Server) authenticateApplication(w http.ResponseWriter, r *http.Request,
 }
 
 func writeApplicationError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "Internal server error."
@@ -539,6 +532,9 @@ func writeApplicationError(w http.ResponseWriter, err error) (int, string) {
 }
 
 func writeAuditError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "Internal server error."

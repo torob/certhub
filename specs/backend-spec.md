@@ -347,6 +347,7 @@ Process configuration requirements:
 - Numeric values must reject zero, negative numbers, non-integers, and values outside implementation-defined safe maximums.
 - `server.public_hostname` must be an exact DNS hostname. It must not include a scheme, port, path, query, fragment, wildcard, IP literal, or public-suffix-only value. Certhub normalizes it to lowercase and trims a trailing root dot.
 - If `server.public_hostname` is non-empty, normal TCP API and web requests must reject effective `Host` values that do not match it. Host validation parses the request host as `hostname[:port]`, compares only the normalized DNS hostname portion, and rejects malformed hosts or IP literals. Host validation must run before route handling, authentication, request body parsing, and SPA fallback. Only trusted proxy headers may influence the effective host.
+- Generated web links (`invite.invite_url` from `POST /v1/users` and `password_reset.reset_url` from `POST /v1/users/{user_id}/password-reset-link`) use the effective scheme and the effective host. They keep the effective host's port when it is not the default port of the effective scheme (`443` for `https`, `80` for `http`) and omit default, missing, or invalid ports. The port always comes from the same value as the effective host: the request `Host`, or, from a trusted proxy only, the `host` parameter of the rightmost `Forwarded` element or the rightmost `X-Forwarded-Host` value, with the same precedence as the effective scheme (`Forwarded` before `X-Forwarded-*`). A forwarded host without a port gives a portless link; the port of the internal request `Host` is not used. If there is no effective host, the link uses the portless `server.public_hostname`; if that is also empty, the link is a relative path. Example: a request to `https://certhub.example.com:8443` gives `https://certhub.example.com:8443/signup?invite=...`, and a request to `https://certhub.example.com` or `https://certhub.example.com:443` gives `https://certhub.example.com/signup?invite=...`.
 - `tls.cert_file` and `tls.key_file` must either both be empty or both be configured. If configured, Certhub serves direct TLS from these local files. If omitted, deployments must use a trusted TLS-terminating proxy or explicit local-development HTTP mode.
 - TLS certificate files may point at `self_certificate.output_dir/current/fullchain.pem` and `self_certificate.output_dir/current/privkey.pem`. Normally, if direct TLS file paths are configured but files are missing or invalid, the direct TLS listener cannot serve traffic. Exception: when `self_certificate.sync_enabled=true` and `tls.cert_file`/`tls.key_file` point at those self-certificate `current` paths, missing files at startup are allowed. The backend must still start internal workers, and the direct TLS listener may start in a pending-certificate state until valid material is written.
 - When `self_certificate.sync_enabled=true`, `server.public_hostname`, `self_certificate.output_dir`, and `self_certificate.issuer` are required. The server must create needed private directories safely, reject unsafe symlinks and world/group-writable parent directories, and write private-key files with mode `0600`.
@@ -494,7 +495,7 @@ Serving rules:
 - The embedded asset set must contain only production frontend build output. It must not include frontend source files, source maps by default, tests, fixtures, local paths, package-manager caches, or development-only assets.
 - The same HTTP listener serves both backend APIs and the web UI.
 - `/v1/...`, `/healthz`, `/readyz`, and `/metrics` are backend routes and must never fall back to `index.html`.
-- Unknown backend route prefixes must return backend-style errors, not the frontend application shell.
+- Unknown backend route prefixes must return backend-style errors, not the frontend application shell. A backend path, or a method on a backend path, that no API route serves returns `404` with error code `invalid_request` and message `Unknown API route.`; it must never return `certificate_not_found`, because Application clients treat that code as a missing certificate.
 - Frontend routes outside backend-reserved prefixes may use SPA fallback to `index.html`, so paths such as `/applications/<id>` can be handled by the CSR router.
 - Static file serving must use the embedded filesystem or another fixed build artifact. It must not serve arbitrary filesystem paths from operator-controlled configuration in production.
 - Directory listing is forbidden.
@@ -877,7 +878,7 @@ Certhub must normalize requested domains before computing identity:
 - Convert IDNs to punycode.
 - Validate as DNS identifiers acceptable for public TLS certificates.
 - Deduplicate.
-- Sort lexicographically.
+- Sort lexicographically by byte value, the same order as Go `slices.Sort` and PostgreSQL `COLLATE "C"`. The order must not depend on the database default collation.
 
 Exact and wildcard identifiers are distinct SANs. Certhub must allow a single Certificate identity to contain both an exact identifier and its corresponding wildcard identifier, such as `torob.dev` and `*.torob.dev`, when both identifiers are valid and independently authorized by Application domain scopes.
 
@@ -1682,6 +1683,7 @@ Description and notes:
 - Error responses are JSON.
 - Archive entry names must be fixed by Certhub and must not be derived from user input.
 - Archive must include `cert.pem`, `chain.pem`, `fullchain.pem`, `privkey.pem`, and `metadata.json`.
+- Archive entry modes must match the CLI on-disk file modes: `privkey.pem` must have mode `0600`; `cert.pem`, `chain.pem`, `fullchain.pem`, and `metadata.json` must have mode `0644`.
 - `metadata.json` contains non-secret certificate metadata such as domains, key type, issuer, Application ID, not-before, not-after, serial number, fingerprint, and `material_etag`.
 - Successful responses must set `Content-Disposition: attachment; filename="<safe_certificate_name>.tar.gz"`, where `<safe_certificate_name>` is derived from the first normalized SAN on the Certificate. If the SAN list is unavailable, Certhub must use the Certificate ID as the basename.
 - `<safe_certificate_name>` must not contain `*` or `.`. Only the fixed `.tar.gz` extension contains dots. Derivation is deterministic:
@@ -2152,7 +2154,7 @@ Description and notes:
 - Admin-only in v1.
 - Does not create the User immediately.
 - Accepts the invited email and selected `global_role` only.
-- Generates a raw invite token once, stores only its HMAC token hash, and returns a signup URL containing the raw token.
+- Generates a raw invite token once, stores only its HMAC token hash, and returns `invite.invite_url`, a signup URL `<scheme>://<host>[:<port>]/signup?invite=<token>` containing the raw token. The scheme, host, and non-default port come from the request as described for generated web links in the configuration rules for `server.public_hostname`.
 - The invite expires after `auth.user_invite_ttl_seconds`, default `86400`.
 - Creating an invite conflicts with an existing User email or an existing active unexpired invite for the same email.
 - User login sessions are created only by login endpoints, not by invite or User administration APIs.
@@ -2301,7 +2303,7 @@ Description and notes:
 
 Expected responses:
 
-- `200 OK`: response includes `password_reset.email`, `password_reset.expires_at`, and one-time `password_reset.reset_url`.
+- `200 OK`: response includes `password_reset.email`, `password_reset.expires_at`, and one-time `password_reset.reset_url` in the form `<scheme>://<host>[:<port>]/reset-password?token=<token>`. The scheme, host, and non-default port come from the request as described for generated web links in the configuration rules for `server.public_hostname`.
 - `401 Unauthorized`, `403 Forbidden`, `404 Not Found` as usual.
 
 #### DELETE /v1/users/{user_id}/password-2fa
@@ -3321,6 +3323,7 @@ Logging requirements:
 
 - Logs must be structured JSON.
 - Every HTTP request log must include timestamp, level, method, path template, status, latency, correlation ID, identity type, identity ID when authenticated, and error code when applicable.
+- When the client closes a request before the response (the request context is canceled and the request fails with `context.Canceled`), the request log and `certhub_http_requests_total` record status `499` with an empty error code, the log level is `warn`, and no error body is written. It is not a server error. A canceled server-side context or a deadline while the request is still open stays `500 internal_error`.
 - Every server outbound HTTP transport error and HTTP `4xx`/`5xx` attempt must emit a structured `outbound_http_request_failed` log with the sanitized destination and path, method, status or error, latency, proxy name, request ID when available, retryability, and parsed `Retry-After`. Outbound logs must omit headers, bodies, credentials, query strings, and proxy URLs.
 - Worker logs must include job type, Certificate ID, CertificateVersion ID when available, issuer ID, DNS provider ID when available, result, duration, correlation ID or job ID, and error code when applicable.
 - Logs must redact private keys, raw tokens, passwords, DNS provider credentials, ACME account keys, and encrypted secret payloads.
@@ -3660,7 +3663,7 @@ Stable logical certificate identities.
 | --- | --- | --- | --- |
 | `id` | UUID | Primary key | Stable Certificate ID. |
 | `enabled` | boolean | Required, default `true` | Whether new initial issuance, renewal, reissue, and key rotation may start. Independent from operational status and validity. |
-| `normalized_sans` | string array | Required, non-empty, sorted, deduplicated | Canonical SAN set. |
+| `normalized_sans` | string array | Required, non-empty, sorted in byte order, deduplicated | Canonical SAN set. |
 | `key_type` | enum | Required, one of `key_type` enum values | Key type used for the private key. |
 | `issuer_id` | UUID | Required, foreign key to `issuers.id` | Issuer used. |
 | `application_id` | UUID | Required, foreign key to `applications.id`, indexed | Application that owns this Certificate. Certificates are not shared across Applications in v1. |
@@ -3673,6 +3676,7 @@ Stable logical certificate identities.
 
 Constraints:
 
+- `certificates_sans_valid`: `normalized_sans` must contain 1 to 100 valid DNS identifiers, deduplicated and sorted in byte order. The check compares with `COLLATE "C"` so that it gives the same result as the backend sort for every database default collation, for example `en_US.utf8`.
 - `uniq_active_certificate_identity_per_application`: exactly one non-deleted Certificate may exist for `(application_id, normalized_sans, key_type, issuer_id)`.
 - `uniq_certhub_server_active_certificate`: at most one non-deleted Certificate may exist for the Application where `system_kind=certhub_server`.
 - For `system_kind=certhub_server`, the non-deleted Certificate identity must match process configuration and is created, deleted, or replaced only by the backend reconcile loop.
@@ -4136,7 +4140,7 @@ Rules:
 | Code | HTTP status | Retryable | CLI exit | Frontend/CLI handling |
 | --- | --- | --- | --- | --- |
 | `invalid_domain` | `400` | No | `2` | Show validation error next to the domain input. |
-| `invalid_request` | `400` | No | `2` | Show request validation error. |
+| `invalid_request` | `400` (`404` for an unknown API route) | No | `2` | Show request validation error. |
 | `invalid_token` | `401` | No | `3` | Clear invalid credential state or ask for a valid token. |
 | `invalid_credentials` | `401` | No | `3` | Show generic login failure without revealing whether the User exists. |
 | `invalid_token` | `401` | No | `3` | Clear local session state and require login. |
@@ -4203,6 +4207,7 @@ Required backend scenarios:
 - Outbound routing tests prove ACME/Lets Encrypt and Cloudflare requests use their configured proxy while ArvanCloud requests go direct when `outbound_http.dns_providers.arvancloud.proxy` is empty.
 - Outbound HTTPS tests prove upstream TLS verification remains enabled through HTTP CONNECT and fails closed on invalid upstream certificates or hostname mismatch.
 - Host allowlist tests prove requests with unconfigured effective hosts are rejected before routing, authentication, body parsing, side effects, and SPA fallback.
+- Generated invite and password-reset link tests prove a non-default effective port is kept, default ports (`443` for `https`, `80` for `http`) and missing ports give links without a port, trusted `Forwarded`/`X-Forwarded-Host` ports follow the forwarded host, and untrusted forwarded ports are ignored.
 - Backend startup rejects invalid `http.trusted_proxy_cidrs`.
 - Backend startup rejects partially configured direct TLS file settings and unsafe self-certificate output directories.
 - Backend startup allows missing direct TLS files only when `self_certificate.sync_enabled=true` and `tls.cert_file`/`tls.key_file` point at `self_certificate.output_dir/current/fullchain.pem` and `self_certificate.output_dir/current/privkey.pem`; otherwise missing configured TLS files fail startup.
@@ -4222,7 +4227,7 @@ Required backend scenarios:
 - Forwarded client IP and scheme headers are ignored from untrusted peers and accepted only from configured trusted proxies.
 - Trusted-proxy tests cover malformed chains, mixed IPv4/IPv6 hops, conflicting `Forwarded` and `X-Forwarded-*` headers, and proxy peers outside every configured CIDR.
 - Embedded web UI serves `/` and frontend routes through `index.html` while `/v1/...`, `/healthz`, `/readyz`, and `/metrics` never use SPA fallback.
-- Unknown API/backend route prefixes return backend-style errors instead of frontend HTML.
+- Unknown API/backend route prefixes return backend-style errors instead of frontend HTML: `404` with error code `invalid_request` and message `Unknown API route.`, never `certificate_not_found`. Unknown sub-routes under authenticated API areas authenticate the User first, so unauthenticated requests still get `401`.
 - Reserved backend prefixes return backend errors even when requests send browser-like `Accept: text/html` headers.
 - Embedded static serving forbids directory listings and cannot read arbitrary filesystem paths from operator-controlled configuration.
 - Embedded static serving rejects traversal-style paths, including raw or URL-encoded `..`, repeated slashes, backslashes, and paths that would escape the embedded asset root.

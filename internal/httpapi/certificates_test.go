@@ -1,11 +1,17 @@
 package httpapi
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +108,75 @@ func TestIDArchiveMatchingETagReturns304WithoutPrivateKeyAudit(t *testing.T) {
 	}
 }
 
+func TestTLSArchiveEndpointsSetEntryModes(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	appHandler, appToken := newCertificateHTTPAppHandler(t, fixture, &certificateHTTPAuditStore{})
+	userHandler, userToken := newCertificateHTTPUserHandler(t, fixture, &certificateHTTPAuditStore{})
+
+	criteriaReq := httptest.NewRequest(http.MethodPost, "/v1/sync/certificates/tls-archive", strings.NewReader(`{"domains":["api.example.com"],"key_type":"ecdsa-p256","issuer":"letsencrypt"}`))
+	criteriaReq.RemoteAddr = "203.0.113.10:1234"
+	criteriaReq.Header.Set("Authorization", "Bearer "+appToken)
+	idReq := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/tls-archive", nil)
+	idReq.Header.Set("Authorization", "Bearer "+userToken)
+	versionReq := httptest.NewRequest(http.MethodGet, "/v1/certificates/"+fixture.cert.ID+"/versions/"+fixture.version.ID+"/tls-archive", nil)
+	versionReq.Header.Set("Authorization", "Bearer "+userToken)
+
+	want := []tlsArchiveEntryMode{
+		{Name: "cert.pem", Mode: 0o644},
+		{Name: "chain.pem", Mode: 0o644},
+		{Name: "fullchain.pem", Mode: 0o644},
+		{Name: "privkey.pem", Mode: 0o600},
+		{Name: "metadata.json", Mode: 0o644},
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.Handler
+		req     *http.Request
+	}{
+		{name: "criteria", handler: appHandler, req: criteriaReq},
+		{name: "certificate_id", handler: userHandler, req: idReq},
+		{name: "certificate_version_id", handler: userHandler, req: versionReq},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Header.Set("Accept", "application/gzip")
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, tc.req)
+			if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/gzip" {
+				t.Fatalf("status = %d content-type = %q body = %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+			}
+			if got := readTLSArchiveEntryModes(t, rec.Body.Bytes()); !slices.Equal(got, want) {
+				t.Fatalf("entries = %v want %v", got, want)
+			}
+		})
+	}
+}
+
+type tlsArchiveEntryMode struct {
+	Name string
+	Mode fs.FileMode
+}
+
+func readTLSArchiveEntryModes(t *testing.T, archive []byte) []tlsArchiveEntryMode {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	var entries []tlsArchiveEntryMode
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return entries
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, tlsArchiveEntryMode{Name: header.Name, Mode: fs.FileMode(header.Mode)})
+	}
+}
+
 func TestIDTLSMaterialEndpointReturnsNotFound(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	handler, userToken := newCertificateHTTPUserHandler(t, fixture, &certificateHTTPAuditStore{})
@@ -111,12 +186,8 @@ func TestIDTLSMaterialEndpointReturnsNotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"code":"certificate_not_found"`) {
-		t.Fatalf("body = %s", rec.Body.String())
-	}
+	// The certificate exists; only the route does not.
+	assertUnknownRoute(t, rec)
 }
 
 func TestPatchCertificateEnabledReturnsBackendStateAndAudit(t *testing.T) {
@@ -279,6 +350,46 @@ func newCertificateHTTPUserHandler(t *testing.T, fixture certificateHTTPFixture,
 		KeySet:            fixture.keys,
 	})
 	return New(testConfig(t, ""), WithIdentityServices(authSvc, nil), WithCertificateService(certSvc)).Handler(), userToken
+}
+
+func newCertificateHTTPAppHandler(t *testing.T, fixture certificateHTTPFixture, auditStore *certificateHTTPAuditStore) (http.Handler, string) {
+	t.Helper()
+	rawAppToken := appdomain.ApplicationTokenPrefix + strings.Repeat("A", 43)
+	appStore := &certificateHTTPAppStore{
+		app: fixture.app,
+		scopes: []appdomain.DomainScope{{
+			ID:            "42345678-1234-4234-9234-123456789abc",
+			ApplicationID: fixture.app.ID,
+			Value:         "*.example.com",
+			Kind:          appdomain.DomainScopeKindWildcard,
+			CreatedAt:     fixture.now,
+		}},
+		tokenIdentity: appdomain.TokenIdentity{
+			Token: appdomain.ApplicationToken{
+				ID:            "52345678-1234-4234-9234-123456789abc",
+				ApplicationID: fixture.app.ID,
+				Name:          "sync",
+				TokenHash:     fixture.keys.HashToken(rawAppToken),
+				Status:        appdomain.TokenStatusActive,
+				CreatedAt:     fixture.now,
+			},
+			Application: fixture.app,
+		},
+	}
+	certSvc := certdomain.NewService(certdomain.ServiceConfig{
+		Repository:        fixture.certStore,
+		ApplicationReader: appStore,
+		IssuerReader:      fixture.issuerStore,
+		AuditRepository:   auditStore,
+		KeySet:            fixture.keys,
+	})
+	appSvc := appdomain.NewService(appdomain.ServiceConfig{
+		Repository:      appStore,
+		AuditRepository: identityFakeAudit{},
+		KeySet:          fixture.keys,
+		Config:          testConfig(t, "").ApplicationToken,
+	})
+	return New(testConfig(t, ""), WithApplicationAccessServices(appSvc, nil), WithCertificateService(certSvc)).Handler(), rawAppToken
 }
 
 func TestCertificateCriteriaRejectsApplicationID(t *testing.T) {

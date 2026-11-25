@@ -40,6 +40,17 @@ certhub:
   httpRetryMaxAttempts: 5
   httpRetryInitialBackoff: 1s
   httpRetryMaxBackoff: 8s
+  # Additional PEM CA certificates to trust, for a Certhub server certificate
+  # from a private CA. Set configMapName or secretName, not both. The object
+  # must exist in the Helm release namespace and contain the key. The chart
+  # mounts only that key read-only at /etc/certhub/ca-bundle/ca.crt and sets
+  # SSL_CERT_DIR=/etc/ssl/certs:/etc/pki/tls/certs:/etc/certhub/ca-bundle.
+  # The image CA bundle stays trusted. The operator process trusts the added
+  # CAs for all its TLS connections. Empty names add nothing.
+  caBundle:
+    configMapName: ""
+    secretName: ""
+    key: ca.crt
 
 metrics:
   service:
@@ -94,6 +105,23 @@ networkPolicy:
     egress:
 
 resources: {}
+
+# Additional operator container environment variables (Kubernetes EnvVar
+# list). Entries come after the chart variables. The chart rejects an entry
+# that redefines a variable it sets: CERTHUB_URL, CERTHUB_TOKEN,
+# WATCH_NAMESPACES, CERTHUB_METRICS_BIND_ADDR, CERTHUB_RESYNC_INTERVAL,
+# CERTHUB_RECONCILE_BACKOFF, CERTHUB_HTTP_TIMEOUT,
+# CERTHUB_HTTP_RETRY_MAX_ATTEMPTS, CERTHUB_HTTP_RETRY_INITIAL_BACKOFF,
+# CERTHUB_HTTP_RETRY_MAX_BACKOFF, and SSL_CERT_DIR when certhub.caBundle is
+# set. Use the dedicated values for these.
+extraEnv: []
+
+# Additional pod volumes (Kubernetes Volume list).
+extraVolumes: []
+
+# Additional operator container volume mounts (Kubernetes VolumeMount list).
+# The root filesystem is read-only, so mount writable paths explicitly.
+extraVolumeMounts: []
 
 podAnnotations: {}
 podLabels: {}

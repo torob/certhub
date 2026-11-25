@@ -520,15 +520,32 @@ func certhubOwnerReference(cert *CerthubCertificate) OwnerReference {
 	}
 }
 
+// readyFailureConditions are the terminal failure conditions that TLS material
+// from Certhub disproves. A Ready Certificate reports each one that is present
+// as False; one that was never set stays absent.
+var readyFailureConditions = []struct {
+	conditionType, reason, message string
+}{
+	{ConditionAuthorizationFailed, "Authorized", "Certhub Application is authorized for this certificate"},
+	{ConditionIssuanceFailed, "Issued", "Certificate material is issued"},
+	{ConditionCertificateRevoked, "ActiveVersionAvailable", "Certificate has an active version"},
+}
+
 func (r *Reconciler) markReady(cert *CerthubCertificate, domains []string, certificateID, message string) {
 	if certificateID != "" {
 		cert.Status.CertificateID = certificateID
 	}
-	r.setStatus(cert, PhaseReady, message,
+	conditions := []Condition{
 		condition(ConditionAccepted, ConditionTrue, "Accepted", "spec accepted", r.Now()),
 		condition(ConditionReady, ConditionTrue, "Ready", "Certificate material is ready", r.Now()),
 		condition(ConditionSecretSynced, ConditionTrue, "SecretSynced", "TLS Secret is synced", r.Now()),
-	)
+	}
+	for _, failure := range readyFailureConditions {
+		if slices.ContainsFunc(cert.Status.Conditions, func(existing Condition) bool { return existing.Type == failure.conditionType }) {
+			conditions = append(conditions, condition(failure.conditionType, ConditionFalse, failure.reason, failure.message, r.Now()))
+		}
+	}
+	r.setStatus(cert, PhaseReady, message, conditions...)
 	cert.Status.ObservedDomains = append([]string(nil), domains...)
 }
 

@@ -158,7 +158,7 @@ func (s *Server) handleCreateApplicationCertificate(w http.ResponseWriter, r *ht
 	}
 	parts, ok := applicationPathParts(r.URL.Path)
 	if !ok || len(parts) != 2 || parts[1] != "certificates" {
-		return writeCertificateError(w, certdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	criteria, err := decodeCertificateCriteria(r)
 	if err != nil {
@@ -264,12 +264,12 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 			writeJSON(w, http.StatusAccepted, map[string]any{"version": serializeCertificateVersion(version)})
 			return http.StatusAccepted, ""
 		default:
-			return writeCertificateError(w, certdomain.ErrNotFound)
+			return writeUnknownRoute(w)
 		}
 	}
 	id, tail, ok := certificatePathID(r.URL.Path)
 	if !ok {
-		return writeCertificateError(w, certdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	switch {
 	case r.Method == http.MethodGet && tail == "":
@@ -342,7 +342,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 	case r.Method == http.MethodGet && tail == "events":
 		return s.handleCertificateEvents(w, r, actor, id)
 	default:
-		return writeCertificateError(w, certdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 }
 
@@ -546,6 +546,9 @@ func (s *Server) authenticateCertificateUser(w http.ResponseWriter, r *http.Requ
 }
 
 func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	var state certdomain.StateError
 	var renewalNotDue certdomain.RenewalNotDueError
 	var renewalOverlap certdomain.RenewalOverlapError

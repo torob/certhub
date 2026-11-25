@@ -593,6 +593,190 @@ func TestConditionTransitionTimeChangesOnlyWithConditionStatus(t *testing.T) {
 	}
 }
 
+func TestReadyClearsLatchedFailureConditions(t *testing.T) {
+	failures := []struct {
+		name          string
+		status        int
+		code          string
+		conditionType string
+		reason        string
+		message       string
+	}{
+		{"domain not authorized", http.StatusForbidden, certerrors.CodeDomainNotAuthorized, ConditionAuthorizationFailed, "Authorized", "Certhub Application is authorized for this certificate"},
+		{"source IP denied", http.StatusForbidden, certerrors.CodeApplicationSourceIPDenied, ConditionAuthorizationFailed, "Authorized", "Certhub Application is authorized for this certificate"},
+		{"application token required", http.StatusForbidden, certerrors.CodeApplicationTokenRequired, ConditionAuthorizationFailed, "Authorized", "Certhub Application is authorized for this certificate"},
+		{"invalid token", http.StatusUnauthorized, certerrors.CodeInvalidToken, ConditionAuthorizationFailed, "Authorized", "Certhub Application is authorized for this certificate"},
+		{"issuance failed", http.StatusConflict, certerrors.CodeCertificateIssuanceFailed, ConditionIssuanceFailed, "Issued", "Certificate material is issued"},
+		{"certificate revoked", http.StatusConflict, certerrors.CodeCertificateRevoked, ConditionCertificateRevoked, "ActiveVersionAvailable", "Certificate has an active version"},
+		{"no active version", http.StatusConflict, certerrors.CodeCertificateNoActiveVersion, ConditionCertificateRevoked, "ActiveVersionAvailable", "Certificate has an active version"},
+	}
+	recoveries := []struct {
+		name     string
+		secret   bool
+		response materialResponse
+		result   string
+	}{
+		{"synced material", false, materialResponse{value: testMaterial("etag-1"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}}, "synced"},
+		{"current material", true, materialResponse{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}, "current"},
+	}
+	failedAt := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	recoveredAt := failedAt.Add(time.Hour)
+	stableAt := recoveredAt.Add(time.Hour)
+	for _, failure := range failures {
+		for _, recovery := range recoveries {
+			t.Run(failure.name+"/"+recovery.name, func(t *testing.T) {
+				kube := newFakeKube()
+				cert := testCertificate()
+				if recovery.secret {
+					kube.secrets["ns/gateway-tls"] = ownedSecret(cert, "etag-1")
+				}
+				backend := &fakeBackend{materials: []materialResponse{
+					{err: apiError(failure.status, failure.code, false, nil)},
+					recovery.response,
+					{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}},
+					{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}},
+				}}
+				reconciler := testReconciler(kube, backend)
+				reconciler.Now = func() time.Time { return failedAt }
+
+				if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+					t.Fatal(err)
+				}
+				if cert.Status.Phase != PhaseFailed || !hasCondition(cert.Status, failure.conditionType, ConditionTrue) {
+					t.Fatalf("failure was not recorded: %#v", cert.Status)
+				}
+
+				reconciler.Now = func() time.Time { return recoveredAt }
+				result, err := reconciler.Reconcile(context.Background(), cert)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Result != recovery.result || cert.Status.Phase != PhaseReady || !hasCondition(cert.Status, ConditionReady, ConditionTrue) {
+					t.Fatalf("Certificate did not become Ready: result=%#v status=%#v", result, cert.Status)
+				}
+				got, ok := findCondition(cert.Status, failure.conditionType)
+				if !ok {
+					t.Fatalf("%s condition was removed: %#v", failure.conditionType, cert.Status.Conditions)
+				}
+				want := Condition{Type: failure.conditionType, Status: ConditionFalse, Reason: failure.reason, Message: failure.message, LastTransitionTime: recoveredAt}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s after Ready = %#v; want %#v", failure.conditionType, got, want)
+				}
+				wantTypes := []string{failure.conditionType, ConditionReady, ConditionAccepted, ConditionSecretSynced}
+				if types := conditionTypes(cert.Status); !reflect.DeepEqual(types, wantTypes) {
+					t.Fatalf("condition types after Ready = %v; want %v", types, wantTypes)
+				}
+				metric := `certhub_operator_condition{namespace="ns",name="gateway",condition="` + failure.conditionType + `"} 0`
+				if lines := metricLines(reconciler.Metrics); !slices.Contains(lines, metric) {
+					t.Fatalf("missing %s in %#v", metric, lines)
+				}
+
+				// The first 204 after a 200 changes only status.message; the
+				// second one is a fully stable Ready reconcile.
+				reconciler.Now = func() time.Time { return stableAt }
+				if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+					t.Fatal(err)
+				}
+				updates := kube.statusUpdates
+				if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+					t.Fatal(err)
+				}
+				if kube.statusUpdates != updates {
+					t.Fatalf("stable Ready reconcile wrote status: updates=%d want %d", kube.statusUpdates, updates)
+				}
+				if got, _ := findCondition(cert.Status, failure.conditionType); !reflect.DeepEqual(got, want) {
+					t.Fatalf("stable Ready changed %s to %#v; want %#v", failure.conditionType, got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestReadyWithoutPriorFailureKeepsConditionList(t *testing.T) {
+	ready := []Condition{
+		{Type: ConditionAccepted, Status: ConditionTrue, Reason: "Accepted", Message: "spec accepted"},
+		{Type: ConditionReady, Status: ConditionTrue, Reason: "Ready", Message: "Certificate material is ready"},
+		{Type: ConditionSecretSynced, Status: ConditionTrue, Reason: "SecretSynced", Message: "TLS Secret is synced"},
+	}
+	cases := []struct {
+		name      string
+		materials []materialResponse
+		ensures   []ensureResponse
+	}{
+		{name: "first sync", materials: []materialResponse{
+			{value: testMaterial("etag-1"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+		}},
+		{name: "after issuing and transient failure", materials: []materialResponse{
+			{err: apiError(http.StatusNotFound, certerrors.CodeCertificateNotFound, false, nil)},
+			{err: apiError(http.StatusConflict, certerrors.CodeCertificateNotReady, true, nil)},
+			{err: stderrors.New("dial tcp 127.0.0.1:443: connect: connection refused")},
+			{value: testMaterial("etag-1"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+		}, ensures: []ensureResponse{{value: &certhubclient.CertificateResponse{}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kube := newFakeKube()
+			cert := testCertificate()
+			backend := &fakeBackend{materials: append(tc.materials, materialResponse{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}), ensures: tc.ensures}
+			reconciler := testReconciler(kube, backend)
+			for len(backend.materials) > 0 {
+				if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if cert.Status.Phase != PhaseReady {
+				t.Fatalf("Certificate did not become Ready: %#v", cert.Status)
+			}
+			got := make([]Condition, 0, len(cert.Status.Conditions))
+			for _, item := range cert.Status.Conditions {
+				item.LastTransitionTime = time.Time{}
+				got = append(got, item)
+			}
+			if !reflect.DeepEqual(got, ready) {
+				t.Fatalf("never-failed conditions = %#v; want %#v", got, ready)
+			}
+			for _, line := range metricLines(reconciler.Metrics) {
+				for _, failure := range []string{ConditionAuthorizationFailed, ConditionIssuanceFailed, ConditionCertificateRevoked} {
+					if strings.Contains(line, `condition="`+failure+`"`) {
+						t.Fatalf("never-failed Certificate exports %s metric: %q", failure, line)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRetryIDKeepsTerminalIssuanceFailureUntilMaterialIsReady(t *testing.T) {
+	kube := newFakeKube()
+	cert := testCertificate()
+	backend := &fakeBackend{materials: []materialResponse{
+		{err: apiError(http.StatusConflict, certerrors.CodeCertificateIssuanceFailed, false, nil)},
+		{err: apiError(http.StatusConflict, certerrors.CodeCertificateIssuanceFailed, false, nil)},
+		{value: testMaterial("etag-1"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}},
+	}}
+	reconciler := testReconciler(kube, backend)
+
+	if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+		t.Fatal(err)
+	}
+	cert.Metadata.Annotations[AnnotationRetryID] = "retry-1"
+	if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+		t.Fatal(err)
+	}
+	if cert.Status.Phase != PhaseFailed || !hasCondition(cert.Status, ConditionIssuanceFailed, ConditionTrue) {
+		t.Fatalf("retry ID cleared terminal issuance failure: %#v", cert.Status)
+	}
+	if cert.Status.ObservedRetryID != retryIDMarker("retry-1") {
+		t.Fatalf("retry ID was not observed: %q", cert.Status.ObservedRetryID)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
+		t.Fatal(err)
+	}
+	if cert.Status.Phase != PhaseReady || !hasCondition(cert.Status, ConditionIssuanceFailed, ConditionFalse) {
+		t.Fatalf("repaired issuance failure was not cleared: %#v", cert.Status)
+	}
+}
+
 func TestRetryIDStoredAsHashMarker(t *testing.T) {
 	kube := newFakeKube()
 	backend := &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}}
@@ -1768,6 +1952,23 @@ func hasCondition(status CerthubCertificateStatus, conditionType, value string) 
 		}
 	}
 	return false
+}
+
+func findCondition(status CerthubCertificateStatus, conditionType string) (Condition, bool) {
+	for _, condition := range status.Conditions {
+		if condition.Type == conditionType {
+			return condition, true
+		}
+	}
+	return Condition{}, false
+}
+
+func conditionTypes(status CerthubCertificateStatus) []string {
+	types := make([]string, 0, len(status.Conditions))
+	for _, condition := range status.Conditions {
+		types = append(types, condition.Type)
+	}
+	return types
 }
 
 func eventMessages(events []Event) []string {

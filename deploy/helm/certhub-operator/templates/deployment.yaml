@@ -2,6 +2,21 @@
 {{- if and (not .Values.clusterScoped) (eq (len $watchNamespaces) 0) -}}
 {{- $watchNamespaces = list .Release.Namespace -}}
 {{- end -}}
+{{- $caBundle := .Values.certhub.caBundle | default dict -}}
+{{- if and $caBundle.configMapName $caBundle.secretName -}}
+{{- fail "certhub.caBundle.configMapName and certhub.caBundle.secretName cannot both be set" -}}
+{{- end -}}
+{{- $caBundleEnabled := or $caBundle.configMapName $caBundle.secretName -}}
+{{- $caBundleDir := "/etc/certhub/ca-bundle" -}}
+{{- $managedEnvNames := list "CERTHUB_URL" "CERTHUB_TOKEN" "WATCH_NAMESPACES" "CERTHUB_METRICS_BIND_ADDR" "CERTHUB_RESYNC_INTERVAL" "CERTHUB_RECONCILE_BACKOFF" "CERTHUB_HTTP_TIMEOUT" "CERTHUB_HTTP_RETRY_MAX_ATTEMPTS" "CERTHUB_HTTP_RETRY_INITIAL_BACKOFF" "CERTHUB_HTTP_RETRY_MAX_BACKOFF" -}}
+{{- if $caBundleEnabled -}}
+{{- $managedEnvNames = append $managedEnvNames "SSL_CERT_DIR" -}}
+{{- end -}}
+{{- range .Values.extraEnv -}}
+{{- if has .name $managedEnvNames -}}
+{{- fail (printf "extraEnv must not redefine chart-managed variable %s" .name) -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,6 +85,16 @@ spec:
               value: {{ default "1s" .Values.certhub.httpRetryInitialBackoff | quote }}
             - name: CERTHUB_HTTP_RETRY_MAX_BACKOFF
               value: {{ default "8s" .Values.certhub.httpRetryMaxBackoff | quote }}
+            {{- if $caBundleEnabled }}
+            {{- /* Go reads SSL_CERT_DIR in addition to the image CA file, so
+            the system CAs stay trusted. The first two entries are Go's
+            default Linux certificate directories. */}}
+            - name: SSL_CERT_DIR
+              value: {{ printf "/etc/ssl/certs:/etc/pki/tls/certs:%s" $caBundleDir | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.service.port }}
@@ -93,6 +118,36 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or $caBundleEnabled .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- if $caBundleEnabled }}
+            - name: certhub-ca-bundle
+              mountPath: {{ $caBundleDir }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or $caBundleEnabled .Values.extraVolumes }}
+      volumes:
+        {{- if $caBundleEnabled }}
+        - name: certhub-ca-bundle
+          {{- if $caBundle.configMapName }}
+          configMap:
+            name: {{ $caBundle.configMapName | quote }}
+          {{- else }}
+          secret:
+            secretName: {{ $caBundle.secretName | quote }}
+          {{- end }}
+            items:
+              - key: {{ $caBundle.key | quote }}
+                path: ca.crt
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -25,8 +25,11 @@ import QRCode from "qrcode";
 import { createElement, useEffect, useMemo, useState } from "react";
 import type { components } from "./api-types";
 import { apiRequestURL } from "./api-url";
+import { asyncEffectDeps, asyncStateIsStale } from "./async-request";
 import { auditTargetTypeOptions } from "./audit-targets";
+import { homeAdminRequestPaths, homeZonesPath } from "./home-requests";
 import { unauthorizedDecision } from "./unauthorized";
+import { versionRevokeBody, versionRevokeStep, type VersionRevokeEvent } from "./version-revoke";
 
 type ErrorBody = components["schemas"]["ErrorEnvelope"];
 type Identity = components["schemas"]["UserIdentity"] | components["schemas"]["ApplicationIdentity"];
@@ -407,7 +410,7 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   return { status: response.status, requestID: requestHeader, retryAfter, data: parsed };
 }
 
-function useAsync<T>(session: Session | undefined, path: string, deps: unknown[] = []) {
+function useAsync<T>(session: Session | undefined, path: string, deps: unknown[] = []): AsyncState<T> {
   const [state, setState] = useState<AsyncState<T>>({ status: 0, requestID: "", loading: true });
   useEffect(() => {
     let canceled = false;
@@ -424,7 +427,8 @@ function useAsync<T>(session: Session | undefined, path: string, deps: unknown[]
     return () => {
       canceled = true;
     };
-  }, deps);
+  }, asyncEffectDeps(path, deps));
+  if (asyncStateIsStale(state.path, path)) return { status: 0, requestID: "", loading: true, path };
   return state;
 }
 
@@ -961,11 +965,13 @@ function HomePage(props: PageProps) {
   const failedCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, "/v1/certificates?limit=1&status=failed", [refresh]);
   const expiresBefore = useMemo(() => new Date(Date.now() + 30 * 86400 * 1000).toISOString(), []);
   const expiringCerts = useAsync<{ certificates: any[]; pagination?: PageMeta }>(props.session, `/v1/certificates?limit=1&expires_before=${encodeURIComponent(expiresBefore)}`, [expiresBefore, refresh]);
-  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=1&status=active" : "", [refresh]);
-  const providers = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
-  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) ? "/v1/dns-providers?limit=1&status=active" : "", [refresh]);
+  const admin = isAdmin(props.session);
+  const adminPaths = homeAdminRequestPaths(admin);
+  const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, adminPaths.activeIssuerCount, [refresh]);
+  const providers = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, adminPaths.providers, [refresh]);
+  const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, adminPaths.activeProviderCount, [refresh]);
   const firstProvider = rowsOf(providers)[0];
-  const zones = useAsync<{ zones: any[]; pagination?: PageMeta }>(props.session, isAdmin(props.session) && firstProvider ? `/v1/dns-providers/${firstProvider.id}/zones?limit=100` : "", [firstProvider?.id, refresh]);
+  const zones = useAsync<{ zones: any[]; pagination?: PageMeta }>(props.session, homeZonesPath(admin, firstProvider?.id), [firstProvider?.id, refresh]);
   const apps = rowsOf(applications).filter((app) => app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const manageableApps = apps.filter((app) => canManageApplication(app, props.session));
   const certs = rowsOf(certificates);
@@ -993,7 +999,7 @@ function HomePage(props: PageProps) {
         `${countText(expiringCerts)} expiring within 30 days`,
         `${countText(failedCerts)} failed`
       ]),
-      isAdmin(props.session) ? readinessCard("Issuance setup", setup, [
+      admin ? readinessCard("Issuance setup", setup, [
         `${countText(activeIssuerCount)} active issuers`,
         `${countText(activeProviderCount)} active DNS providers`,
         firstProvider ? initialLoading(zones) ? `loading zones on ${firstProvider.name}` : `${pageTotal(zones, rowsOf(zones).length)} zones on ${firstProvider.name}` : "no DNS provider selected"
@@ -1062,6 +1068,8 @@ function CertificateDetailPage(props: PageProps) {
   const [actionPending, setActionPending] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<any>(undefined);
+  const [revokePending, setRevokePending] = useState(false);
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
   const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
@@ -1080,6 +1088,16 @@ function CertificateDetailPage(props: PageProps) {
       props.setNotice(r.error ? errorText(r) : "request accepted");
       setRefresh((value) => value + 1);
     }).finally(() => setActionPending(false));
+  };
+  const revokeVersion = (event: VersionRevokeEvent<any>) => {
+    const step = versionRevokeStep(revokeTarget, event);
+    setRevokeTarget(step.confirming);
+    if (!step.send) return;
+    setRevokePending(true);
+    void versionAction(step.send, "/revoke", versionRevokeBody).finally(() => {
+      setRevokePending(false);
+      setRevokeTarget(undefined);
+    });
   };
   const toggleEnabled = () => {
     setTogglePending(true);
@@ -1143,12 +1161,19 @@ function CertificateDetailPage(props: PageProps) {
       actionsColumn((version) => [
         rowAction("Events", () => props.navigate(`/certificates/${id}/versions/${version.id}/events`), { icon: Activity, label: `View events for version ${version.version}` }),
         canDownloadArchive && versionDownloadable(version) ? rowAction("Download", () => downloadArchive(props.session, cert.id, props.setNotice, version.id), { icon: Download, label: `Download version ${version.version}` }) : null,
-        canLifecycle && version.status === "valid" ? rowAction("Revoke", () => versionAction(version, "/revoke", { reason: "cessation_of_operation" }), { icon: X, danger: true, label: `Revoke version ${version.version}` }) : null
+        canLifecycle && version.status === "valid" ? rowAction("Revoke", () => revokeVersion({ type: "request", version }), { icon: X, danger: true, label: `Revoke version ${version.version}` }) : null
       ])
     ]),
     createElement("h2", null, "Audit events"),
     table(events, auditColumns()),
     failureMessage ? createElement(FailureMessageDialog, { message: failureMessage, onClose: () => setFailureMessage("") }) : null,
+    revokeTarget ? createElement(VersionRevokeDialog, {
+      certificate: cert,
+      version: revokeTarget,
+      pending: revokePending,
+      onClose: () => revokeVersion({ type: "close" }),
+      onRevoke: () => revokeVersion({ type: "confirm" })
+    }) : null,
     deleteOpen ? createElement(CertificateDeleteDialog, {
       certificate: cert,
       validVersionCount,
@@ -2547,6 +2572,39 @@ function CertificateDeleteDialog(props: { certificate: any; validVersionCount: n
         createElement("div", { className: "toolbar" },
           createElement("button", { type: "button", disabled: props.pending, onClick: props.onClose }, "Cancel"),
           createElement("button", { type: "button", className: "danger", disabled: props.pending || (requiresForce && !force), onClick: () => props.onDelete(force) }, props.pending ? "Deleting…" : "Delete permanently")
+        )
+      )
+    )
+  );
+}
+
+function VersionRevokeDialog(props: { certificate: any; version: any; pending: boolean; onClose: () => void; onRevoke: () => void }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !props.pending) props.onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [props.onClose, props.pending]);
+  return createElement("div", { className: "modal-backdrop", role: "presentation", onClick: () => { if (!props.pending) props.onClose(); } },
+    createElement("section", {
+      className: "modal-dialog version-revoke-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "version-revoke-title",
+      onClick: (event: any) => event.stopPropagation()
+    },
+      createElement("div", { className: "modal-header" },
+        createElement("h2", { id: "version-revoke-title" }, "Revoke certificate version?"),
+        createElement("button", { type: "button", className: "modal-close", disabled: props.pending, onClick: props.onClose, "aria-label": "Close version revocation" }, createElement(X, { size: 18 }))
+      ),
+      createElement("div", { className: "version-revoke-content" },
+        createElement("p", null, `Version ${props.version.version} of ${certificateLabel(props.certificate)}`),
+        createElement("p", null, `Revocation reason: ${versionRevokeBody.reason}`),
+        createElement("p", null, "The revocation is recorded now and sent to the issuer when applicable. This cannot be undone."),
+        createElement("div", { className: "toolbar" },
+          createElement("button", { type: "button", disabled: props.pending, onClick: props.onClose }, "Cancel"),
+          createElement("button", { type: "button", className: "danger", disabled: props.pending, onClick: props.onRevoke }, props.pending ? "Revoking…" : "Revoke permanently")
         )
       )
     )

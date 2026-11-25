@@ -62,6 +62,59 @@ func TestBuildTLSArchiveUsesFixedSafeEntries(t *testing.T) {
 	}
 }
 
+func TestBuildTLSArchiveEntryModes(t *testing.T) {
+	archive, err := BuildTLSArchive(TLSMaterial{
+		CertificateID: "cert-id",
+		CertPEM:       "CERT",
+		ChainPEM:      "CHAIN",
+		FullchainPEM:  "FULLCHAIN",
+		PrivateKeyPEM: "PRIVATE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	modes := map[string]int64{}
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		modes[header.Name] = header.Mode
+	}
+	want := []struct {
+		name string
+		mode int64
+	}{
+		{"cert.pem", 0o644},
+		{"chain.pem", 0o644},
+		{"fullchain.pem", 0o644},
+		{"privkey.pem", 0o600},
+		{"metadata.json", 0o644},
+	}
+	if len(modes) != len(want) {
+		t.Fatalf("entries = %#v want %#v", modes, want)
+	}
+	for _, entry := range want {
+		got, ok := modes[entry.name]
+		if !ok {
+			t.Errorf("%s missing from archive", entry.name)
+			continue
+		}
+		if got != entry.mode {
+			t.Errorf("%s mode = %#o want %#o", entry.name, got, entry.mode)
+		}
+	}
+}
+
 func TestSafeArchiveBasename(t *testing.T) {
 	if got := SafeArchiveBasename([]string{"*.Torob.Dev."}, "fallback"); got != "wildcard_torob_dev" {
 		t.Fatalf("basename = %q", got)

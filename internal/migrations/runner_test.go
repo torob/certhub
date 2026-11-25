@@ -20,12 +20,12 @@ import (
 	migrationfs "github.com/torob/certhub/migrations/postgres"
 )
 
-func TestLatestVersionFindsApplicationHardDeleteMigration(t *testing.T) {
+func TestLatestVersionFindsCertificateSANsByteOrderMigration(t *testing.T) {
 	latest, err := NewRunner(DefaultDir).LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != 5 {
+	if latest != 6 {
 		t.Fatalf("latest version = %d", latest)
 	}
 }
@@ -35,7 +35,7 @@ func TestEmbeddedPostgresMigrationsAreOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql", "00004_audit_independence_and_hard_delete.sql", "00005_application_hard_delete.sql"}
+	want := []string{"00001_initial_schema.sql", "00002_certificate_enabled.sql", "00003_certificate_hard_delete.sql", "00004_audit_independence_and_hard_delete.sql", "00005_application_hard_delete.sql", "00006_certificate_sans_byte_order.sql"}
 	if len(matches) != len(want) {
 		t.Fatalf("embedded migrations = %#v", matches)
 	}
@@ -217,33 +217,7 @@ func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	adminDB, err := OpenDB(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer adminDB.Close()
-	databaseName := fmt.Sprintf("certhub_migration_upgrade_%d_%d", os.Getpid(), upgradeDatabaseSeq.Add(1))
-	if _, err := adminDB.ExecContext(ctx, "create database "+databaseName); err != nil {
-		t.Fatalf("create migration certification database: %v", err)
-	}
-	parsedURL, err := url.Parse(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsedURL.Path = "/" + databaseName
-	db, err := OpenDB(parsedURL.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = db.Close()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		_, _ = adminDB.ExecContext(cleanupCtx, `select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`, databaseName)
-		if _, err := adminDB.ExecContext(cleanupCtx, "drop database if exists "+databaseName); err != nil {
-			t.Errorf("drop migration certification database: %v", err)
-		}
-	}()
+	db := openMigrationTestDatabase(t, databaseURL)
 
 	if err := withGoose(migrationfs.FS, func() error {
 		return goose.UpToContext(ctx, db, ".", 1)
@@ -256,7 +230,7 @@ func TestPostgresMigrationsApplyIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.CurrentVersion != 1 || before.LatestVersion != 5 || before.Pending != 4 || before.Compatible {
+	if before.CurrentVersion != 1 || before.LatestVersion != 6 || before.Pending != 5 || before.Compatible {
 		t.Fatalf("version 1 status = %#v", before)
 	}
 	var enabledColumns int
@@ -320,7 +294,7 @@ insert into audit_events (
 	if first.LatestVersion != second.CurrentVersion || second.Pending != 0 || !second.Compatible {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
-	if first.CurrentVersion != 5 || first.Pending != 0 || !first.Compatible {
+	if first.CurrentVersion != 6 || first.Pending != 0 || !first.Compatible {
 		t.Fatalf("upgraded status = %#v", first)
 	}
 	var nullable, columnDefault string
@@ -424,6 +398,280 @@ where id = '70000000-0000-4000-8000-000000000002'`).Scan(&appScope, &certScope, 
 	if certScope != "40000000-0000-4000-8000-000000000001" {
 		t.Fatalf("live hard-delete audit scope = %s", certScope)
 	}
+}
+
+// sanByteOrderPair is sorted in Go byte order. en_US.utf8 ignores punctuation
+// at the first level and sorts the pair the other way.
+var sanByteOrderPair = []string{"k2.cf30.e2e.test", "k2b.cf30.e2e.test"}
+
+const (
+	sanOrderMigrationVersion = int64(6)
+	sanOrderApplicationID    = "10000000-0000-4000-8000-000000000006"
+	sanOrderIssuerID         = "20000000-0000-4000-8000-000000000006"
+	sanOrderByteCertID       = "40000000-0000-4000-8000-000000000061"
+	sanOrderLegacyCertID     = "40000000-0000-4000-8000-000000000062"
+	sanOrderInsertCertSQL    = `
+insert into certificates (id, normalized_sans, key_type, issuer_id, application_id)
+values ($1, $2::text[], 'ecdsa-p256', '20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006')`
+)
+
+func TestPostgresCertificateSANsByteOrderMigration(t *testing.T) {
+	databaseURL := os.Getenv("CERTHUB_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("CERTHUB_TEST_DATABASE_URL is not set; skipping PostgreSQL SAN byte order migration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Prefer en_US.utf8, the postgres image default, because it orders the
+	// test SANs against byte order. Fall back to the server default.
+	db := openMigrationTestDatabase(t, databaseURL, "template template0 encoding 'UTF8' lc_collate 'en_US.utf8' lc_ctype 'en_US.utf8'")
+	migrateTo := func(version int64) error {
+		return withGoose(migrationfs.FS, func() error {
+			current, err := goose.GetDBVersionContext(ctx, db)
+			if err != nil {
+				return err
+			}
+			if version < current {
+				return goose.DownToContext(ctx, db, ".", version)
+			}
+			return goose.UpToContext(ctx, db, ".", version)
+		})
+	}
+	requireVersion := func(want int64) {
+		t.Helper()
+		var got int64
+		if err := withGoose(migrationfs.FS, func() error {
+			var err error
+			got, err = goose.GetDBVersionContext(ctx, db)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("migration version = %d, want %d", got, want)
+		}
+	}
+
+	if err := migrateTo(sanOrderMigrationVersion - 1); err != nil {
+		t.Fatalf("apply migrations before SAN byte order: %v", err)
+	}
+	var databaseCollation string
+	var localeReversesPair bool
+	if err := db.QueryRowContext(ctx, `
+select datcollate, $1::text > $2::text
+from pg_database
+where datname = current_database()`, sanByteOrderPair[0], sanByteOrderPair[1]).Scan(&databaseCollation, &localeReversesPair); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("database collation=%s reverses %v=%t", databaseCollation, sanByteOrderPair, localeReversesPair)
+
+	if _, err := db.ExecContext(ctx, `
+insert into applications (id, name, display_name)
+values ('10000000-0000-4000-8000-000000000006', 'san_order_app', 'SAN Order App');
+
+insert into issuers (id, name, directory_url, status, contact_email)
+values ('20000000-0000-4000-8000-000000000006', 'san_order_issuer', 'https://acme.invalid/directory', 'disabled', 'san.order@example.com');
+
+insert into certificates (id, normalized_sans, key_type, issuer_id, application_id, status, failure_code)
+values
+  ('40000000-0000-4000-8000-000000000063', array['api.example.com', 'www.example.com'], 'ecdsa-p256', '20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006', 'pending', null),
+  ('40000000-0000-4000-8000-000000000064', array['*.example.com', 'example.com'], 'rsa-2048', '20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006', 'failed', 'fixture_failure'),
+  ('40000000-0000-4000-8000-000000000065', array['single.example.com'], 'ecdsa-p256', '20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006', 'pending', null);
+`); err != nil {
+		t.Fatalf("seed certificates before SAN byte order: %v", err)
+	}
+	existing := loadCertificateSnapshot(ctx, t, db)
+
+	// Before the migration the check follows the database collation.
+	_, err := db.ExecContext(ctx, sanOrderInsertCertSQL, sanOrderByteCertID, sanByteOrderPair)
+	if localeReversesPair {
+		if err == nil || !strings.Contains(err.Error(), "certificates_sans_valid") {
+			t.Fatalf("byte-ordered SANs before migration err=%v, want certificates_sans_valid violation", err)
+		}
+		// A row in locale order was accepted by the previous check. The
+		// migration must stop instead of rewriting it.
+		if _, err := db.ExecContext(ctx, sanOrderInsertCertSQL, sanOrderLegacyCertID, []string{sanByteOrderPair[1], sanByteOrderPair[0]}); err != nil {
+			t.Fatalf("insert locale-ordered SANs before migration: %v", err)
+		}
+		err := migrateTo(sanOrderMigrationVersion)
+		if err == nil || !strings.Contains(err.Error(), "not sorted in byte order") || !strings.Contains(err.Error(), sanOrderLegacyCertID) {
+			t.Fatalf("migration with locale-ordered row err=%v", err)
+		}
+		t.Logf("migration stopped on locale-ordered row: %v", err)
+		requireVersion(sanOrderMigrationVersion - 1)
+		requireSANCheckSource(ctx, t, db, false)
+		var legacySANs string
+		if err := db.QueryRowContext(ctx, `select normalized_sans::text from certificates where id = $1`, sanOrderLegacyCertID).Scan(&legacySANs); err != nil {
+			t.Fatal(err)
+		}
+		if legacySANs != "{k2b.cf30.e2e.test,k2.cf30.e2e.test}" {
+			t.Fatalf("locale-ordered row was changed: %s", legacySANs)
+		}
+		if _, err := db.ExecContext(ctx, `delete from certificates where id = $1`, sanOrderLegacyCertID); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err != nil {
+			t.Fatalf("byte-ordered SANs before migration with byte-order collation: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `delete from certificates where id = $1`, sanOrderByteCertID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := migrateTo(sanOrderMigrationVersion); err != nil {
+		t.Fatalf("apply SAN byte order migration with existing certificates: %v", err)
+	}
+	requireVersion(sanOrderMigrationVersion)
+	requireSANCheckSource(ctx, t, db, true)
+	status, err := NewRunner(DefaultDir).Status(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Compatible || status.Pending != 0 {
+		t.Fatalf("status after SAN byte order migration = %#v", status)
+	}
+	if got := loadCertificateSnapshot(ctx, t, db); !sameStringList(got, existing) {
+		t.Fatalf("existing certificates changed:\n got %v\nwant %v", got, existing)
+	}
+	var constraintDefinition string
+	if err := db.QueryRowContext(ctx, `
+select pg_catalog.pg_get_constraintdef(oid)
+from pg_catalog.pg_constraint
+where conrelid = 'public.certificates'::regclass
+  and conname = 'certificates_sans_valid'`).Scan(&constraintDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if constraintDefinition != "CHECK (certhub_certificate_sans_valid(normalized_sans))" {
+		t.Fatalf("certificates_sans_valid definition = %q", constraintDefinition)
+	}
+	// Updates recheck the constraint, so every existing row must satisfy it.
+	if _, err := db.ExecContext(ctx, `update certificates set updated_at = updated_at`); err != nil {
+		t.Fatalf("recheck existing certificates: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, sanOrderInsertCertSQL, sanOrderByteCertID, sanByteOrderPair); err != nil {
+		t.Fatalf("insert byte-ordered SANs after migration: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, sanOrderInsertCertSQL, sanOrderLegacyCertID, []string{sanByteOrderPair[1], sanByteOrderPair[0]}); err == nil || !strings.Contains(err.Error(), "certificates_sans_valid") {
+		t.Fatalf("reverse byte order after migration err=%v, want certificates_sans_valid violation", err)
+	}
+	for _, invalid := range [][]string{
+		{"a.example.com", "a.example.com"},
+		{"www.example.com", "api.example.com"},
+		{"Upper.example.com"},
+	} {
+		if _, err := db.ExecContext(ctx, sanOrderInsertCertSQL, sanOrderLegacyCertID, invalid); err == nil || !strings.Contains(err.Error(), "certificates_sans_valid") {
+			t.Fatalf("SANs %v after migration err=%v, want certificates_sans_valid violation", invalid, err)
+		}
+	}
+
+	// Rollback restores the collation-dependent check. It must stop while a
+	// row exists that only byte order accepts.
+	if localeReversesPair {
+		err := migrateTo(sanOrderMigrationVersion - 1)
+		if err == nil || !strings.Contains(err.Error(), "cannot be rolled back") || !strings.Contains(err.Error(), sanOrderByteCertID) {
+			t.Fatalf("rollback with byte-ordered row err=%v", err)
+		}
+		t.Logf("rollback stopped on byte-ordered row: %v", err)
+		requireVersion(sanOrderMigrationVersion)
+		requireSANCheckSource(ctx, t, db, true)
+	}
+	if _, err := db.ExecContext(ctx, `delete from certificates where id = $1`, sanOrderByteCertID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTo(sanOrderMigrationVersion - 1); err != nil {
+		t.Fatalf("roll back SAN byte order migration: %v", err)
+	}
+	requireVersion(sanOrderMigrationVersion - 1)
+	requireSANCheckSource(ctx, t, db, false)
+	if got := loadCertificateSnapshot(ctx, t, db); !sameStringList(got, existing) {
+		t.Fatalf("rollback changed certificates:\n got %v\nwant %v", got, existing)
+	}
+	if err := migrateTo(sanOrderMigrationVersion); err != nil {
+		t.Fatalf("reapply SAN byte order migration: %v", err)
+	}
+	requireVersion(sanOrderMigrationVersion)
+}
+
+// loadCertificateSnapshot returns every certificate row as text, ordered by id.
+func loadCertificateSnapshot(ctx context.Context, t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+select id::text || ' ' || normalized_sans::text || ' ' || key_type || ' ' || status || ' ' || updated_at::text
+from certificates
+order by id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var snapshot []string
+	for rows.Next() {
+		var row string
+		if err := rows.Scan(&row); err != nil {
+			t.Fatal(err)
+		}
+		snapshot = append(snapshot, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+// requireSANCheckSource checks whether the SAN check function compares in byte order.
+func requireSANCheckSource(ctx context.Context, t *testing.T, db *sql.DB, wantByteOrder bool) {
+	t.Helper()
+	var source string
+	if err := db.QueryRowContext(ctx, `select prosrc from pg_catalog.pg_proc where oid = 'public.certhub_certificate_sans_valid(text[])'::regprocedure`).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Contains(source, `collate "C"`); got != wantByteOrder {
+		t.Fatalf("certhub_certificate_sans_valid byte order=%t, want %t:\n%s", got, wantByteOrder, source)
+	}
+}
+
+// openMigrationTestDatabase creates an empty database for one test and drops it
+// when the test ends. Each createOptions entry is tried in order after
+// "create database <name>"; the server defaults are used when none succeeds.
+func openMigrationTestDatabase(t *testing.T, databaseURL string, createOptions ...string) *sql.DB {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	adminDB, err := OpenDB(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	databaseName := fmt.Sprintf("certhub_migration_upgrade_%d_%d", os.Getpid(), upgradeDatabaseSeq.Add(1))
+	var createErr error
+	for _, options := range append(createOptions, "") {
+		if _, createErr = adminDB.ExecContext(ctx, strings.TrimSpace("create database "+databaseName+" "+options)); createErr == nil {
+			break
+		}
+		t.Logf("create migration certification database with %q: %v", options, createErr)
+	}
+	if createErr != nil {
+		t.Fatalf("create migration certification database: %v", createErr)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = adminDB.ExecContext(cleanupCtx, `select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`, databaseName)
+		if _, err := adminDB.ExecContext(cleanupCtx, "drop database if exists "+databaseName); err != nil {
+			t.Errorf("drop migration certification database: %v", err)
+		}
+	})
+	parsedURL, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedURL.Path = "/" + databaseName
+	db, err := OpenDB(parsedURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 var migrationLockDriverSeq atomic.Uint64

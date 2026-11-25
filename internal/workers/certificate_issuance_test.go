@@ -8,9 +8,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -353,6 +356,87 @@ func TestFinalizeOrderFetchesCertificateForAlreadyValidOrder(t *testing.T) {
 	}
 	if fixture.order.fetchCertificateCalls != 1 || fixture.order.finalizeCalls != 0 {
 		t.Fatalf("fetch calls=%d finalize calls=%d", fixture.order.fetchCertificateCalls, fixture.order.finalizeCalls)
+	}
+}
+
+func TestFinalizeOrderPollsKnownOrderURLWhenFinalizeResponseHasNoLocation(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	accountKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountKeyDER, err := x509.MarshalECPrivateKey(accountKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certDER := []byte("issued-leaf")
+	var calls []string
+	orderPolls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		if r.URL.Path == "/directory" {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"newNonce":   base + "/new-nonce",
+				"newAccount": base + "/new-account",
+				"newOrder":   base + "/new-order",
+			})
+			return
+		}
+		w.Header().Set("Replay-Nonce", "nonce")
+		if r.Method == http.MethodHead && r.URL.Path == "/new-nonce" {
+			return
+		}
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/finalize/1":
+			// Pebble 2.10.1 answers finalize with a processing order and no Location header (RFC 8555 allows this).
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":   "processing",
+				"finalize": base + "/finalize/1",
+			})
+		case "/order/1":
+			orderPolls++
+			status, certificateURL := "processing", ""
+			if orderPolls > 1 {
+				status, certificateURL = "valid", base+"/cert/1"
+			}
+			w.Header().Set("Retry-After", time.Now().Add(-time.Second).UTC().Format(http.TimeFormat))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":      status,
+				"finalize":    base + "/finalize/1",
+				"certificate": certificateURL,
+			})
+		case "/cert/1":
+			w.Header().Set("Content-Type", "application/pem-certificate-chain")
+			_ = pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+		default:
+			t.Errorf("unexpected ACME request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fixture.service.OrderManager = acmedomain.NewOrderClient(server.Client())
+	params := acmedomain.OrderClientParams{
+		DirectoryURL:         server.URL + "/directory",
+		AccountURL:           server.URL + "/acct/1",
+		AccountPrivateKeyPEM: pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: accountKeyDER}),
+	}
+	order := acmedomain.Order{
+		URL:         server.URL + "/order/1",
+		Status:      "ready",
+		FinalizeURL: server.URL + "/finalize/1",
+	}
+
+	bundle, err := fixture.service.finalizeOrder(context.Background(), params, order, []byte("csr-der"))
+	if err != nil {
+		t.Fatalf("finalize error = %v; ACME calls = %v", err, calls)
+	}
+	if bundle.CertificateURL != server.URL+"/cert/1" || len(bundle.DERChain) != 1 || string(bundle.DERChain[0]) != string(certDER) {
+		t.Fatalf("bundle = %#v", bundle)
+	}
+	want := []string{"POST /finalize/1", "POST /order/1", "POST /order/1", "POST /cert/1"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("ACME calls = %v; want %v", calls, want)
 	}
 }
 

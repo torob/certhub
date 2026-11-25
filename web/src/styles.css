@@ -1073,7 +1073,8 @@ tr.selectable:focus-within td {
   place-items: center;
 }
 
-.certificate-delete-dialog {
+.certificate-delete-dialog,
+.version-revoke-dialog {
   width: min(560px, 100%);
 }
 
@@ -1082,7 +1083,8 @@ tr.selectable:focus-within td {
 }
 
 .certificate-delete-content,
-.application-delete-content {
+.application-delete-content,
+.version-revoke-content {
   display: grid;
   gap: 14px;
   padding: 16px;
@@ -1090,7 +1092,8 @@ tr.selectable:focus-within td {
 }
 
 .certificate-delete-content p,
-.application-delete-content p {
+.application-delete-content p,
+.version-revoke-content p {
   margin: 0;
 }
 

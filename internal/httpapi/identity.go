@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -171,9 +172,7 @@ func (s *Server) serveIdentity(w http.ResponseWriter, r *http.Request, reqctx Re
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/users/"):
 		return s.handlePatchUser(w, r, reqctx)
 	default:
-		return writeError(w, http.StatusNotFound, Error{
-			Code: "certificate_not_found", Message: "Resource does not exist or is not visible.", Retryable: false, Details: map[string]any{},
-		})
+		return writeUnknownRoute(w)
 	}
 }
 
@@ -596,7 +595,7 @@ func (s *Server) handleCreatePasswordResetLink(w http.ResponseWriter, r *http.Re
 	}
 	id, ok := userIDFromSuffixedPath(r.URL.Path, "/password-reset-link")
 	if !ok {
-		return writeIdentityError(w, userdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	result, err := s.auth.AdminCreatePasswordResetLink(r.Context(), current, id, func(token string) string {
 		return s.passwordResetURL(reqctx, token)
@@ -622,7 +621,7 @@ func (s *Server) handleAdminResetPassword2FA(w http.ResponseWriter, r *http.Requ
 	}
 	id, ok := userIDFromSuffixedPath(r.URL.Path, "/password-2fa")
 	if !ok {
-		return writeIdentityError(w, userdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	user, err := s.auth.AdminResetPassword2FA(r.Context(), current, id, s.authAuditContext(r, reqctx))
 	if err != nil {
@@ -640,7 +639,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, _ Request
 	}
 	id, ok := userIDFromPath(r.URL.Path)
 	if !ok {
-		return writeIdentityError(w, userdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	user, err := s.users.GetUser(r.Context(), userActor(current), id)
 	if err != nil {
@@ -658,7 +657,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request, reqctx 
 	}
 	id, ok := userIDFromPath(r.URL.Path)
 	if !ok {
-		return writeIdentityError(w, userdomain.ErrNotFound)
+		return writeUnknownRoute(w)
 	}
 	params, err := decodeUserPatch(r)
 	if err != nil {
@@ -692,6 +691,9 @@ func (s *Server) authenticateUser(w http.ResponseWriter, r *http.Request) (auth.
 }
 
 func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
+	if status, code, ok := writeClientClosedRequest(w, err); ok {
+		return status, code
+	}
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "Internal server error."
@@ -941,33 +943,47 @@ func userInviteTokenFromPath(p, suffix string) (string, bool) {
 }
 
 func (s *Server) userInviteURL(reqctx RequestContext, token string) string {
-	scheme := reqctx.EffectiveScheme
-	if scheme == "" {
-		scheme = "https"
-	}
-	host := reqctx.EffectiveHost
-	if host == "" {
-		host = s.cfg.Server.PublicHostname
-	}
-	if host == "" {
-		return "/signup?invite=" + url.QueryEscape(token)
-	}
-	return scheme + "://" + host + "/signup?invite=" + url.QueryEscape(token)
+	return s.webLinkURL(reqctx, "/signup?invite="+url.QueryEscape(token))
 }
 
 func (s *Server) passwordResetURL(reqctx RequestContext, token string) string {
+	return s.webLinkURL(reqctx, "/reset-password?token="+url.QueryEscape(token))
+}
+
+// webLinkURL builds an absolute link to a web UI path from the effective
+// scheme, host, and port of the request. It keeps a port that is not the
+// default port of the scheme and omits default ports. Without an effective
+// host it uses the portless server.public_hostname, and without that it
+// returns the relative path.
+func (s *Server) webLinkURL(reqctx RequestContext, pathAndQuery string) string {
 	scheme := reqctx.EffectiveScheme
 	if scheme == "" {
 		scheme = "https"
 	}
 	host := reqctx.EffectiveHost
+	port := reqctx.EffectivePort
 	if host == "" {
 		host = s.cfg.Server.PublicHostname
+		port = ""
 	}
 	if host == "" {
-		return "/reset-password?token=" + url.QueryEscape(token)
+		return pathAndQuery
 	}
-	return scheme + "://" + host + "/reset-password?token=" + url.QueryEscape(token)
+	if port != "" && port != defaultPortForScheme(scheme) {
+		host = net.JoinHostPort(host, port)
+	}
+	return scheme + "://" + host + pathAndQuery
+}
+
+func defaultPortForScheme(scheme string) string {
+	switch scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func serializeUser(user userdomain.User) apiUser {

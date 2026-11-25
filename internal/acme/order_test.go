@@ -158,6 +158,7 @@ func TestOrderClientRunsOrderFlowThroughInjectedHTTPClient(t *testing.T) {
 	}
 	bundle, err := client.FinalizeOrder(context.Background(), FinalizeOrderParams{
 		OrderClientParams: common,
+		OrderURL:          order.URL,
 		FinalizeURL:       order.FinalizeURL,
 		CSRDER:            []byte("csr-der"),
 	})
@@ -212,6 +213,117 @@ func TestOrderClientWaitsUntilOrderReady(t *testing.T) {
 	}
 	if order.Status != xacme.StatusReady || *polls != 2 {
 		t.Fatalf("order=%#v polls=%d", order, *polls)
+	}
+}
+
+func TestOrderClientFinalizePollsOrderURLUntilValid(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		finalizeLocation bool
+	}{
+		{name: "finalize response without Location", finalizeLocation: false},
+		{name: "finalize response with Location", finalizeLocation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, keyPEM, err := newECDSAPrivateKeyPEM()
+			if err != nil {
+				t.Fatal(err)
+			}
+			certDER := []byte("leaf-cert-der")
+			var calls []string
+			orderPolls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				base := "http://" + r.Host
+				if r.URL.Path == "/directory" {
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"newNonce":   base + "/new-nonce",
+						"newAccount": base + "/new-account",
+						"newOrder":   base + "/new-order",
+					})
+					return
+				}
+				w.Header().Set("Replay-Nonce", "nonce")
+				if r.Method == http.MethodHead && r.URL.Path == "/new-nonce" {
+					return
+				}
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				switch r.URL.Path {
+				case "/finalize/1":
+					if tc.finalizeLocation {
+						w.Header().Set("Location", base+"/order/1")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"status":   xacme.StatusProcessing,
+						"finalize": base + "/finalize/1",
+					})
+				case "/order/1":
+					orderPolls++
+					status, certificateURL := xacme.StatusProcessing, ""
+					if orderPolls > 1 {
+						status, certificateURL = xacme.StatusValid, base+"/cert/1"
+					}
+					w.Header().Set("Retry-After", time.Now().Add(-time.Second).UTC().Format(http.TimeFormat))
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"status":      status,
+						"finalize":    base + "/finalize/1",
+						"certificate": certificateURL,
+					})
+				case "/cert/1":
+					w.Header().Set("Content-Type", "application/pem-certificate-chain")
+					_, _ = w.Write([]byte("-----BEGIN CERTIFICATE-----\n" + base64.StdEncoding.EncodeToString(certDER) + "\n-----END CERTIFICATE-----\n"))
+				default:
+					t.Errorf("unexpected ACME request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			bundle, err := NewOrderClient(server.Client()).FinalizeOrder(context.Background(), FinalizeOrderParams{
+				OrderClientParams: OrderClientParams{
+					DirectoryURL:         server.URL + "/directory",
+					AccountURL:           server.URL + "/acct/1",
+					AccountPrivateKeyPEM: keyPEM,
+				},
+				OrderURL:    server.URL + "/order/1",
+				FinalizeURL: server.URL + "/finalize/1",
+				CSRDER:      []byte("csr-der"),
+			})
+			if err != nil {
+				t.Fatalf("finalize error = %v; calls = %v", err, calls)
+			}
+			if bundle.CertificateURL != server.URL+"/cert/1" || len(bundle.DERChain) != 1 || string(bundle.DERChain[0]) != string(certDER) {
+				t.Fatalf("bundle = %#v", bundle)
+			}
+			want := []string{"POST /finalize/1", "POST /order/1", "POST /order/1", "POST /cert/1"}
+			if strings.Join(calls, ",") != strings.Join(want, ",") {
+				t.Fatalf("calls = %v; want %v", calls, want)
+			}
+		})
+	}
+}
+
+func TestOrderClientFinalizeRequiresOrderURL(t *testing.T) {
+	_, keyPEM, err := newECDSAPrivateKeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected ACME request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err = NewOrderClient(server.Client()).FinalizeOrder(context.Background(), FinalizeOrderParams{
+		OrderClientParams: OrderClientParams{
+			DirectoryURL:         server.URL + "/directory",
+			AccountURL:           server.URL + "/acct/1",
+			AccountPrivateKeyPEM: keyPEM,
+		},
+		FinalizeURL: server.URL + "/finalize/1",
+		CSRDER:      []byte("csr-der"),
+	})
+	if !errors.Is(err, ErrOrderOperation) {
+		t.Fatalf("error = %v; want ErrOrderOperation", err)
 	}
 }
 

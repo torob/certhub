@@ -99,6 +99,28 @@ Conditions:
 - `IssuanceFailed`
 - `CertificateRevoked`
 
+`AuthorizationFailed` is set to `True` for `domain_not_authorized`,
+`application_source_ip_denied`, `application_token_required`, and
+`invalid_token`. `IssuanceFailed` is set to `True` for
+`certificate_issuance_failed`. `CertificateRevoked` is set to `True` for
+`certificate_revoked` and `certificate_no_active_version`.
+
+When the Certificate becomes `Ready` (backend `200 OK` with synced material or
+`204 No Content`), the operator sets each of these three failure conditions
+that is already present to `False`:
+
+| Condition | Reason | Message |
+| --- | --- | --- |
+| `AuthorizationFailed` | `Authorized` | `Certhub Application is authorized for this certificate` |
+| `IssuanceFailed` | `Issued` | `Certificate material is issued` |
+| `CertificateRevoked` | `ActiveVersionAvailable` | `Certificate has an active version` |
+
+`lastTransitionTime` changes only when the condition status changes. The
+operator never removes a condition, and it never adds a failure condition that
+was not set before, so a Certificate that never failed keeps only `Accepted`,
+`Ready`, and `SecretSynced`. The `certhub_operator_condition` metric of a
+failure condition that is `False` is `0`.
+
 ## Kubernetes Secret
 
 The operator writes a standard Kubernetes TLS Secret. The `ownerReferences`
@@ -345,6 +367,8 @@ If backend returns `domain_not_authorized`:
 - Set condition `AuthorizationFailed=True`.
 - Set phase `Failed`.
 - Do not retry aggressively.
+- Set condition `AuthorizationFailed=False` with reason `Authorized` when a
+  later reconcile makes the Certificate `Ready`.
 - Replay-safe Certhub and Kubernetes reads use configurable per-request retries (`CERTHUB_HTTP_RETRY_MAX_ATTEMPTS`, `CERTHUB_HTTP_RETRY_INITIAL_BACKOFF`, and `CERTHUB_HTTP_RETRY_MAX_BACKOFF`) defaulting to five attempts with 1s-to-8s jittered exponential backoff. Ambiguous mutations remain reconciliation-driven.
 
 If backend returns transient errors:
@@ -484,6 +508,15 @@ Required operator scenarios:
 - Failed authorization sets `AuthorizationFailed` and does not create a Secret.
 - Changing `certhub.torob.dev/retry-id` clears local/transient latched failed conditions and retries the normal `/v1/sync/...` flow without using backend ID-based lifecycle endpoints.
 - Changing `certhub.torob.dev/retry-id` does not clear terminal backend `certificate_issuance_failed` until Certhub is repaired through a User lifecycle action or CR criteria changes.
+- When a Certificate with `AuthorizationFailed=True`, `IssuanceFailed=True`, or
+  `CertificateRevoked=True` becomes `Ready` through `200 OK` or
+  `204 No Content`, that condition becomes `False` with its documented reason
+  and message, a new `lastTransitionTime`, and a `certhub_operator_condition`
+  metric value of `0`; later stable reconciles do not write status or move the
+  transition time.
+- A Certificate that never failed keeps exactly the `Accepted`, `Ready`, and
+  `SecretSynced` conditions when it becomes `Ready`, and exports no failure
+  condition metric.
 - `403 application_source_ip_denied` sets `AuthorizationFailed` and reports that the operator source IP is outside the Certhub Application trusted source CIDRs.
 - Operator rejects plain HTTP Certhub URLs by default, verifies TLS certificates, and does not forward Authorization headers across redirects to different hosts, ports, or schemes.
 - The operator never logs or emits Kubernetes Events containing raw Application tokens, Authorization headers, private keys, certificate PEM, backend material JSON, or Secret data.

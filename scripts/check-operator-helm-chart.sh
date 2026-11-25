@@ -47,6 +47,19 @@ expect_not_contains() {
   fi
 }
 
+# Match a multi-line block literally, including indentation.
+expect_block() {
+  local file="$1"
+  local expected="$2"
+  local content
+  content="$(cat "$file")"
+  if [[ "$content" != *"$expected"* ]]; then
+    echo "$(basename "$file") missing expected block:" >&2
+    printf '%s\n' "$expected" >&2
+    exit 1
+  fi
+}
+
 if "$helm_bin" template test-operator "$chart" \
   --namespace certhub >"$tmp_dir/missing-required-values.stdout" 2>"$tmp_dir/missing-required-values.stderr"; then
   echo "operator chart unexpectedly accepted missing required values" >&2
@@ -101,6 +114,10 @@ expect_not_contains "$default_rendered" 'CERTHUB_ALLOWED_SECRET_NAMES'
 expect_not_contains "$default_rendered" 'CERTHUB_TOKEN_SECRET_'
 expect_not_contains "$default_rendered" 'resourceNames:'
 expect_not_contains "$default_rendered" 'certhubcertificates/finalizers'
+expect_not_contains "$default_rendered" 'SSL_CERT_DIR'
+expect_not_contains "$default_rendered" 'certhub-ca-bundle'
+expect_not_contains "$default_rendered" 'volumeMounts:'
+expect_not_contains "$default_rendered" 'volumes:'
 if grep -E 'name: WATCH_NAMESPACE$' "$default_rendered" >/dev/null; then
   echo "default operator render contains removed WATCH_NAMESPACE environment variable" >&2
   exit 1
@@ -121,6 +138,128 @@ for expected in \
   expect_contains "$custom_token_ref" "$expected"
 done
 expect_not_contains "$custom_token_ref" 'CERTHUB_TOKEN_SECRET_'
+
+ca_bundle_env='            - name: CERTHUB_HTTP_RETRY_MAX_BACKOFF
+              value: "8s"
+            - name: SSL_CERT_DIR
+              value: "/etc/ssl/certs:/etc/pki/tls/certs:/etc/certhub/ca-bundle"'
+ca_bundle_mount='          volumeMounts:
+            - name: certhub-ca-bundle
+              mountPath: /etc/certhub/ca-bundle
+              readOnly: true'
+
+ca_configmap_values="$tmp_dir/ca-configmap-extras-values.yaml"
+cat >"$ca_configmap_values" <<'YAML'
+certhub:
+  caBundle:
+    configMapName: private-ca
+extraEnv:
+  - name: HTTPS_PROXY
+    value: http://proxy.example.test:3128
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+extraVolumes:
+  - name: scratch
+    emptyDir: {}
+extraVolumeMounts:
+  - name: scratch
+    mountPath: /var/run/certhub-scratch
+YAML
+ca_configmap_extras="$tmp_dir/ca-configmap-extras.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --values "$ca_configmap_values" \
+  --show-only templates/deployment.yaml >"$ca_configmap_extras"
+expect_block "$ca_configmap_extras" "$ca_bundle_env
+            - name: HTTPS_PROXY
+              value: http://proxy.example.test:3128
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:"
+expect_block "$ca_configmap_extras" "$ca_bundle_mount
+            - mountPath: /var/run/certhub-scratch
+              name: scratch
+      volumes:
+        - name: certhub-ca-bundle
+          configMap:
+            name: \"private-ca\"
+            items:
+              - key: \"ca.crt\"
+                path: ca.crt
+        - emptyDir: {}
+          name: scratch"
+expect_not_contains "$ca_configmap_extras" 'secret:'
+
+ca_secret="$tmp_dir/ca-secret.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set certhub.caBundle.secretName=private-ca-secret \
+  --set certhub.caBundle.key=bundle.pem \
+  --show-only templates/deployment.yaml >"$ca_secret"
+expect_block "$ca_secret" "$ca_bundle_env
+          ports:"
+expect_block "$ca_secret" "$ca_bundle_mount
+      volumes:
+        - name: certhub-ca-bundle
+          secret:
+            secretName: \"private-ca-secret\"
+            items:
+              - key: \"bundle.pem\"
+                path: ca.crt"
+expect_not_contains "$ca_secret" 'configMap:'
+
+extras_only="$tmp_dir/extras-only.yaml"
+"$helm_bin" template test-operator "$chart" \
+  --namespace certhub \
+  --values "$valid_values" \
+  --set-json 'extraEnv=[{"name":"SSL_CERT_DIR","value":"/etc/custom-certs"}]' \
+  --set-json 'extraVolumes=[{"name":"custom-certs","configMap":{"name":"custom-certs"}}]' \
+  --set-json 'extraVolumeMounts=[{"name":"custom-certs","mountPath":"/etc/custom-certs","readOnly":true}]' \
+  --show-only templates/deployment.yaml >"$extras_only"
+expect_block "$extras_only" '            - name: CERTHUB_HTTP_RETRY_MAX_BACKOFF
+              value: "8s"
+            - name: SSL_CERT_DIR
+              value: /etc/custom-certs
+          ports:'
+expect_block "$extras_only" '          volumeMounts:
+            - mountPath: /etc/custom-certs
+              name: custom-certs
+              readOnly: true
+      volumes:
+        - configMap:
+            name: custom-certs
+          name: custom-certs'
+expect_not_contains "$extras_only" 'certhub-ca-bundle'
+
+expect_template_failure ca-bundle-configmap-and-secret \
+  --set certhub.caBundle.configMapName=private-ca \
+  --set certhub.caBundle.secretName=private-ca
+expect_template_failure ca-bundle-invalid-key \
+  --set certhub.caBundle.configMapName=private-ca \
+  --set certhub.caBundle.key=../ca.crt
+expect_template_failure ca-bundle-empty-key \
+  --set certhub.caBundle.configMapName=private-ca \
+  --set certhub.caBundle.key=
+expect_template_failure ca-bundle-unknown-field \
+  --set certhub.caBundle.path=/etc/ssl/ca.crt
+expect_template_failure extra-env-redefines-token \
+  --set-json 'extraEnv=[{"name":"CERTHUB_TOKEN","value":"x"}]'
+expect_template_failure extra-env-redefines-ca-dir \
+  --set certhub.caBundle.configMapName=private-ca \
+  --set-json 'extraEnv=[{"name":"SSL_CERT_DIR","value":"/etc/custom-certs"}]'
+expect_template_failure extra-env-without-name \
+  --set-json 'extraEnv=[{"value":"x"}]'
+expect_template_failure scalar-extra-env --set extraEnv=x
+expect_template_failure extra-volume-without-name \
+  --set-json 'extraVolumes=[{"emptyDir":{}}]'
+expect_template_failure extra-volume-mount-without-path \
+  --set-json 'extraVolumeMounts=[{"name":"scratch"}]'
 
 expect_template_failure multiple-replicas --set replicaCount=2
 expect_template_failure zero-replicas --set replicaCount=0
@@ -521,6 +660,9 @@ if command -v "$kubeconform_bin" >/dev/null 2>&1; then
   "$kubeconform_bin" -strict -summary "$kubernetes_ingress_only" >/dev/null
   "$kubeconform_bin" -strict -summary "$kubernetes_egress_only" >/dev/null
   "$kubeconform_bin" -strict -summary "$kubernetes_bidirectional" >/dev/null
+  "$kubeconform_bin" -strict -summary "$ca_configmap_extras" >/dev/null
+  "$kubeconform_bin" -strict -summary "$ca_secret" >/dev/null
+  "$kubeconform_bin" -strict -summary "$extras_only" >/dev/null
 fi
 
 if command -v "$kubectl_bin" >/dev/null 2>&1 &&

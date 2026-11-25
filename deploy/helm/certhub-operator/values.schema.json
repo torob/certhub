@@ -190,6 +190,47 @@
         },
         "httpRetryMaxBackoff": {
           "$ref": "#/definitions/duration"
+        },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "configMapName",
+            "secretName",
+            "key"
+          ],
+          "properties": {
+            "configMapName": {
+              "$ref": "#/definitions/optionalDnsSubdomain"
+            },
+            "secretName": {
+              "$ref": "#/definitions/optionalDnsSubdomain"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^[-._a-zA-Z0-9]+$"
+            }
+          },
+          "not": {
+            "allOf": [
+              {
+                "properties": {
+                  "configMapName": {
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "secretName": {
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },
@@ -283,6 +324,54 @@
     },
     "resources": {
       "type": "object"
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "extraVolumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/definitions/dnsLabel"
+          }
+        }
+      }
+    },
+    "extraVolumeMounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "mountPath"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/definitions/dnsLabel"
+          },
+          "mountPath": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
     },
     "podAnnotations": {
       "$ref": "#/definitions/stringMap"

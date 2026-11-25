@@ -152,7 +152,7 @@ func TestStructuredRequestLogSanitizesCanaries(t *testing.T) {
 	if event["event"] != "http_request" || event["method"] != http.MethodGet || event["path_template"] != "/v1/*" {
 		t.Fatalf("event = %#v", event)
 	}
-	if event["status"] != float64(http.StatusNotFound) || event["error_code"] != "certificate_not_found" {
+	if event["status"] != float64(http.StatusNotFound) || event["error_code"] != "invalid_request" {
 		t.Fatalf("event = %#v", event)
 	}
 	for _, field := range []string{"timestamp", "level", "latency_ms", "request_id", "correlation_id", "source_ip", "identity_type", "identity_id"} {

@@ -113,6 +113,7 @@ func TestExternalACMEStagingDNS01IssuanceAndRevocation(t *testing.T) {
 	csrDER := newCSRDER(t, domains)
 	bundle, err := orderClient.FinalizeOrder(ctx, acmedomain.FinalizeOrderParams{
 		OrderClientParams: orderParams,
+		OrderURL:          order.URL,
 		FinalizeURL:       order.FinalizeURL,
 		CSRDER:            csrDER,
 		Bundle:            true,

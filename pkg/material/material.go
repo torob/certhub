@@ -37,13 +37,14 @@ func BuildTLSArchive(value TLSMaterial) ([]byte, error) {
 	for _, entry := range []struct {
 		name string
 		data []byte
+		mode int64
 	}{
-		{name: "cert.pem", data: []byte(value.CertPEM)},
-		{name: "chain.pem", data: []byte(value.ChainPEM)},
-		{name: "fullchain.pem", data: []byte(value.FullchainPEM)},
-		{name: "privkey.pem", data: []byte(value.PrivateKeyPEM)},
+		{name: "cert.pem", data: []byte(value.CertPEM), mode: 0o644},
+		{name: "chain.pem", data: []byte(value.ChainPEM), mode: 0o644},
+		{name: "fullchain.pem", data: []byte(value.FullchainPEM), mode: 0o644},
+		{name: "privkey.pem", data: []byte(value.PrivateKeyPEM), mode: 0o600},
 	} {
-		if err := writeTarEntry(tw, entry.name, entry.data); err != nil {
+		if err := writeTarEntry(tw, entry.name, entry.data, entry.mode); err != nil {
 			return nil, err
 		}
 	}
@@ -56,7 +57,7 @@ func BuildTLSArchive(value TLSMaterial) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writeTarEntry(tw, "metadata.json", append(data, '\n')); err != nil {
+	if err := writeTarEntry(tw, "metadata.json", append(data, '\n'), 0o644); err != nil {
 		return nil, err
 	}
 	if err := tw.Close(); err != nil {
@@ -104,13 +105,13 @@ func SafeArchiveBasename(domains []string, fallback string) string {
 	return out
 }
 
-func writeTarEntry(tw *tar.Writer, name string, data []byte) error {
+func writeTarEntry(tw *tar.Writer, name string, data []byte, mode int64) error {
 	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "..") {
 		return errors.New("unsafe archive entry")
 	}
 	header := &tar.Header{
 		Name: name,
-		Mode: 0o600,
+		Mode: mode,
 		Size: int64(len(data)),
 	}
 	if err := tw.WriteHeader(header); err != nil {

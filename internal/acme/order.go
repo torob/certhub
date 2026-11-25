@@ -56,6 +56,7 @@ type AcceptChallengeParams struct {
 
 type FinalizeOrderParams struct {
 	OrderClientParams
+	OrderURL    string
 	FinalizeURL string
 	CSRDER      []byte
 	Bundle      bool
@@ -221,10 +222,13 @@ func (c *OrderClient) FinalizeOrder(ctx context.Context, params FinalizeOrderPar
 	if err != nil {
 		return CertificateBundle{}, err
 	}
-	if params.FinalizeURL == "" || len(params.CSRDER) == 0 {
+	if params.OrderURL == "" || params.FinalizeURL == "" || len(params.CSRDER) == 0 {
 		return CertificateBundle{}, ErrOrderOperation
 	}
-	der, certURL, err := client.CreateOrderCert(ctx, params.FinalizeURL, params.CSRDER, params.Bundle)
+	// RFC 8555 does not require a Location header on the finalize response, so
+	// poll the known order URL instead of the response Location while the CA
+	// is still processing the order.
+	der, certURL, err := client.CreateCertFromOrder(ctx, &xacme.Order{URI: params.OrderURL, FinalizeURL: params.FinalizeURL}, params.CSRDER, params.Bundle)
 	if err != nil {
 		return CertificateBundle{}, ErrOrderOperation
 	}

@@ -73,6 +73,70 @@ Configure a non-default Secret or key with `certhub.tokenSecretName` and
 referenced Secret or key is missing. Restart the operator pod after rotating
 the token.
 
+## Private CA for the Certhub server
+
+The operator image trusts the public CAs in its
+`/etc/ssl/certs/ca-certificates.crt` bundle. If the Certhub server uses a
+certificate from a private CA, store the PEM CA certificates in a ConfigMap or
+Secret in the Helm release namespace and reference it:
+
+```bash
+kubectl create configmap certhub-private-ca \
+  --namespace certhub-system \
+  --from-file=ca.crt=private-ca.pem
+```
+
+```yaml
+certhub:
+  url: https://certhub.internal.example
+  caBundle:
+    configMapName: certhub-private-ca
+    key: ca.crt
+```
+
+Use `certhub.caBundle.secretName` instead of `configMapName` for a Secret; set
+only one of them. The chart mounts only the selected key read-only at
+`/etc/certhub/ca-bundle/ca.crt` and sets:
+
+```text
+SSL_CERT_DIR=/etc/ssl/certs:/etc/pki/tls/certs:/etc/certhub/ca-bundle
+```
+
+Go loads the image CA bundle file and every PEM file in these directories, so
+the public CAs stay trusted and the private CAs are added. The first two
+directories are the Go defaults. The chart does not set `SSL_CERT_FILE`:
+that variable replaces the default CA bundle file, so the public CAs would stay
+trusted only through the directory list. The added CAs are trusted for
+every TLS connection of the operator process, including the Kubernetes API
+connection. Kubernetes will not start the container while the referenced
+ConfigMap, Secret, or key is missing. The operator reads the trust store once,
+so restart the operator pod after you change the CA certificates.
+
+## Extra environment variables and volumes
+
+`extraEnv`, `extraVolumes`, and `extraVolumeMounts` take standard Kubernetes
+`EnvVar`, `Volume`, and `VolumeMount` lists. They are empty by default and add
+nothing to the Deployment. The chart appends `extraEnv` after its own
+variables and rejects an entry that redefines a variable the chart sets (see
+`values.yaml`), including `SSL_CERT_DIR` when `certhub.caBundle` is set.
+Without `certhub.caBundle`, you can manage trust yourself with these values:
+
+```yaml
+extraEnv:
+  - name: SSL_CERT_DIR
+    value: /etc/ssl/certs:/etc/custom-certs
+extraVolumes:
+  - name: custom-certs
+    configMap:
+      name: custom-certs
+extraVolumeMounts:
+  - name: custom-certs
+    mountPath: /etc/custom-certs
+    readOnly: true
+```
+
+The container root filesystem is read-only. Mount writable paths explicitly.
+
 ## Target Secret permissions
 
 Each `CerthubCertificate` chooses its target through `spec.secretName`. The
@@ -293,6 +357,9 @@ namespaceResourceWhitelist:
 | `certhub.tokenSecretKey` | `token` | Application-token key in the token Secret |
 | `certhub.resyncInterval` | `6h` | Requeue interval of a ready Certificate and period of the safety-net namespace list; minimum `30s` |
 | `certhub.reconcileBackoff` | `1m` | Base of the per-Certificate exponential failure backoff (capped at 32x and at `resyncInterval`) and poll interval while issuance is pending without `Retry-After` |
+| `certhub.caBundle.configMapName` | `""` | ConfigMap in the release namespace with additional PEM CA certificates to trust |
+| `certhub.caBundle.secretName` | `""` | Secret in the release namespace with additional PEM CA certificates; exclusive with `configMapName` |
+| `certhub.caBundle.key` | `ca.crt` | Key in the CA ConfigMap or Secret |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
 | `networkPolicy.enabled` | `false` | Create a policy selecting the operator pod |
@@ -300,6 +367,9 @@ namespaceResourceWhitelist:
 | `networkPolicy.<provider>.ingress` | `null` | Native ingress rule list |
 | `networkPolicy.<provider>.egress` | `null` | Native egress rule list |
 | `resources` | `{}` | Operator resource requests and limits |
+| `extraEnv` | `[]` | Additional operator container environment variables |
+| `extraVolumes` | `[]` | Additional pod volumes |
+| `extraVolumeMounts` | `[]` | Additional operator container volume mounts |
 
 See `values.yaml` and `values.schema.json` for the complete interface and
 validation rules.
