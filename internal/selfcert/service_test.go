@@ -406,3 +406,14 @@ var _ CertificateStore = (*fakeCertificates)(nil)
 var _ IssuerStore = fakeIssuers{}
 var _ AuditAppender = (*fakeAudit)(nil)
 var _ = storage.MaxListLimit
+
+func TestReloadPublishedTLSWithTypedNilLoaderDoesNotPanic(t *testing.T) {
+	var loader *config.TLSCertificateLoader
+	service := NewService(ServiceConfig{
+		Runtime:     RuntimeConfig{Enabled: true, Hostname: "certhub.example.com", OutputDir: t.TempDir()},
+		TLSReloader: loader,
+	})
+	if err := service.reloadPublishedTLS(PublishResult{Changed: true}); err != nil {
+		t.Fatalf("reloadPublishedTLS() = %v want nil", err)
+	}
+}

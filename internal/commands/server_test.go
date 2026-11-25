@@ -644,6 +644,28 @@ tls:
 	}
 }
 
+func TestSelfCertificateServiceConfigWithoutTLSFilesHasNoReloader(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{PublicHostname: "certhub.example.com"},
+		SelfCertificate: config.SelfCertificateConfig{
+			SyncEnabled: true,
+			OutputDir:   filepath.Join(t.TempDir(), "self-certificate"),
+			Issuer:      "lets_encrypt",
+		},
+	}
+	tlsLoader, err := config.NewTLSCertificateLoader(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tlsLoader != nil {
+		t.Fatalf("tls loader without tls files = %#v want nil", tlsLoader)
+	}
+	serviceCfg := selfCertificateServiceConfig(cfg, &runtimeResources{cfg: cfg}, tlsLoader, nil)
+	if serviceCfg.TLSReloader != nil {
+		t.Fatalf("TLSReloader = %#v want nil interface when no TLS files are configured", serviceCfg.TLSReloader)
+	}
+}
+
 func TestRunFailsClosedWhenStorageUnavailable(t *testing.T) {
 	configPath := writeCommandConfig(t)
 	var stdout, stderr bytes.Buffer

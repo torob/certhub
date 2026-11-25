@@ -749,6 +749,182 @@ func TestCompleteOIDCCallbackLinksProvisionedUserByVerifiedEmail(t *testing.T) {
 	}
 }
 
+func TestCompleteOIDCCallbackWithoutReturnURLRedirectsToRedirectURLOriginRoot(t *testing.T) {
+	keys, err := security.NewKeySet(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		kid          = "provider-key"
+		rawState     = "cth_oidc_state_ccccccccccccccccccccccccccccccccccccccccccc"
+		stateID      = "12345678-1234-4234-9234-123456789abc"
+		codeVerifier = "stored-pkce-verifier"
+		authCode     = "provider-auth-code"
+		nonce        = "nonce-from-state"
+		userID       = "12345678-1234-4234-9234-000000000001"
+	)
+	encryptedVerifier, err := keys.SealDatabaseValue([]byte(codeVerifier), oidcVerifierAAD(stateID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &oidcFakeRepo{
+		wantStateHash: keys.HashOIDCState(rawState),
+		state: OIDCLoginState{
+			ID:                    stateID,
+			StateHash:             keys.HashOIDCState(rawState),
+			Nonce:                 nonce,
+			CodeVerifierEncrypted: encryptedVerifier,
+			ProviderCallbackURL:   "https://certhub.example.com:8443/v1/auth/oidc/callback",
+			ExpiresAt:             time.Now().Add(time.Minute),
+		},
+		user: users.User{
+			ID:          userID,
+			Email:       "user@example.com",
+			DisplayName: "OIDC User",
+			OIDCSubject: ptrString("subject-1"),
+			GlobalRole:  users.GlobalRoleUser,
+			Status:      users.StatusActive,
+		},
+	}
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 server.URL,
+				"authorization_endpoint": server.URL + "/oauth/v2/authorize",
+				"token_endpoint":         server.URL + "/oauth/v2/token",
+				"jwks_uri":               server.URL + "/oauth/v2/keys",
+			})
+		case "/oauth/v2/token":
+			idToken := signedOIDCTestToken(t, signingKey, kid, map[string]any{
+				"iss":            server.URL,
+				"sub":            "subject-1",
+				"aud":            "certhub-web",
+				"exp":            time.Now().Add(time.Hour).Unix(),
+				"iat":            time.Now().Add(-time.Minute).Unix(),
+				"nonce":          nonce,
+				"email":          "user@example.com",
+				"email_verified": true,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"id_token": idToken})
+		case "/oauth/v2/keys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+				"kty": "RSA",
+				"kid": kid,
+				"use": "sig",
+				"alg": "RS256",
+				"n":   base64.RawURLEncoding.EncodeToString(signingKey.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(signingKey.E)).Bytes()),
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	repo.user.OIDCIssuer = &server.URL
+
+	service := NewService(ServiceConfig{
+		AuthRepository:  repo,
+		UserRepository:  repo,
+		AuditRepository: repo,
+		KeySet:          keys,
+		Config: config.AuthConfig{
+			UserAccessTokenTTLSeconds: 300,
+			UserSessionTTLSeconds:     3600,
+			OIDC: config.OIDCConfig{
+				Enabled:     true,
+				IssuerURL:   server.URL,
+				ClientID:    "certhub-web",
+				RedirectURL: "https://certhub.example.com:8443/v1/auth/oidc/callback",
+			},
+		},
+		HTTPClient: server.Client(),
+	})
+	result, err := service.CompleteOIDCCallback(context.Background(), authCode, rawState, AuditContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := url.Parse(result.RedirectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirect.Scheme + "://" + redirect.Host + redirect.Path; got != "https://certhub.example.com:8443/" {
+		t.Fatalf("redirect target = %q; want the web UI root of the redirect_url origin", got)
+	}
+	if strings.Contains(redirect.Path, "/v1/auth/oidc/callback") {
+		t.Fatalf("redirect target points back to the provider callback endpoint")
+	}
+	handoffID := redirect.Query().Get("handoff_id")
+	if !strings.HasPrefix(handoffID, OIDCHandoffPrefix) || len(redirect.Query()) != 1 || redirect.Fragment != "" {
+		t.Fatalf("redirect query/fragment shape mismatch")
+	}
+	if want := "https://certhub.example.com:8443/?handoff_id=" + url.QueryEscape(handoffID); result.RedirectURL != want {
+		t.Fatalf("redirect URL mismatch")
+	}
+	if repo.createdHandoffParams.FrontendReturnURL != nil {
+		t.Fatalf("handoff stored an unexpected frontend return URL")
+	}
+}
+
+func TestCallbackReturnURLFallbacks(t *testing.T) {
+	tests := []struct {
+		name        string
+		redirectURL string
+		allowed     []string
+		stored      *string
+		want        string
+	}{
+		{
+			name:        "stored return URL wins",
+			redirectURL: "https://certhub.example.com/v1/auth/oidc/callback",
+			allowed:     []string{"https://certhub.example.com/auth/callback"},
+			stored:      ptrString("https://certhub.example.com/certificates?next=%2F"),
+			want:        "https://certhub.example.com/certificates?next=%2F",
+		},
+		{
+			name:        "first allowlisted return URL",
+			redirectURL: "https://certhub.example.com/v1/auth/oidc/callback",
+			allowed:     []string{"https://app.example.com/auth/callback", "https://certhub.example.com/"},
+			want:        "https://app.example.com/auth/callback",
+		},
+		{
+			name:        "empty allowlist uses redirect URL origin root",
+			redirectURL: "https://certhub.example.com/v1/auth/oidc/callback",
+			want:        "https://certhub.example.com/",
+		},
+		{
+			name:        "empty stored value uses redirect URL origin root",
+			redirectURL: "https://certhub.example.com/v1/auth/oidc/callback",
+			stored:      ptrString(""),
+			want:        "https://certhub.example.com/",
+		},
+		{
+			name:        "origin root keeps port and drops path query and fragment",
+			redirectURL: "https://certhub.example.com:8443/prefix/v1/auth/oidc/callback?x=1#frag",
+			want:        "https://certhub.example.com:8443/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := NewService(ServiceConfig{Config: config.AuthConfig{OIDC: config.OIDCConfig{
+				RedirectURL:       tt.redirectURL,
+				AllowedReturnURLs: tt.allowed,
+			}}})
+			if got := service.callbackReturnURL(tt.stored); got != tt.want {
+				t.Fatalf("callbackReturnURL = %q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCompleteOIDCCallbackRejectsInvalidProviderIdentitySignals(t *testing.T) {
 	tests := []struct {
 		name               string

@@ -2450,6 +2450,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
         };
     };
     confirmPassword2FALoginSetup: {
@@ -2482,6 +2483,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
         };
     };
     disablePassword2FA: {
@@ -2513,6 +2515,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
         };
     };
     previewPasswordReset: {

@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Short: "Sync configured certificate material",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			exitCode = runCommand(ctx, opts, stdout, stderr)
 		},

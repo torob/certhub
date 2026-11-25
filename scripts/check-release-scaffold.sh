@@ -103,6 +103,7 @@ NODE
 "$helm_bin" lint "$tmp_dir/certhub/deploy/helm/certhub-server" >/dev/null
 "$helm_bin" template test-server "$tmp_dir/certhub/deploy/helm/certhub-server" --namespace certhub --include-crds >/dev/null
 HELM_BIN="$helm_bin" "$repo_root/scripts/check-operator-helm-chart.sh" "$tmp_dir/certhub/deploy/helm/certhub-operator" >/dev/null
+HELM_BIN="$helm_bin" "$repo_root/scripts/check-server-helm-chart.sh" "$tmp_dir/certhub/deploy/helm/certhub-server" >/dev/null
 
 server_rendered="$tmp_dir/server-rendered.yaml"
 operator_rendered="$tmp_dir/operator-rendered.yaml"

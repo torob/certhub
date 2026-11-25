@@ -723,6 +723,13 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusUnauthorized, "oidc_auth_failed", "OIDC callback validation failed."
 	case errors.Is(err, auth.ErrOIDCUserNotProvisioned):
 		status, code, message = http.StatusForbidden, "user_not_provisioned", "User is not provisioned."
+	case errors.Is(err, auth.ErrRateLimited):
+		status, code, message = http.StatusTooManyRequests, "rate_limited", "Too many failed authentication attempts. Retry after the indicated delay."
+		retryAfter = 1
+		var limited *auth.RateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = limited.RetryAfterSeconds()
+		}
 	case errors.Is(err, auth.ErrConflict), errors.Is(err, userdomain.ErrConflict):
 		status, code, message = http.StatusConflict, "conflict", "Resource state conflicts with this request."
 		retryAfter = 1
@@ -737,7 +744,7 @@ func writeIdentityError(w http.ResponseWriter, err error) (int, string) {
 	case errors.Is(err, auth.ErrInvalidRequest), errors.Is(err, userdomain.ErrInvalidRequest):
 		status, code, message = http.StatusBadRequest, "invalid_request", "Request body or query parameters are invalid."
 	}
-	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable, RetryAfterSeconds: retryAfter, Details: map[string]any{}})
+	return writeError(w, status, Error{Code: code, Message: message, Retryable: status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests, RetryAfterSeconds: retryAfter, Details: map[string]any{}})
 }
 
 func decodeJSONBody(r *http.Request, dst any) error {

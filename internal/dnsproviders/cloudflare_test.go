@@ -3,8 +3,12 @@ package dnsproviders
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -180,4 +184,131 @@ func TestCloudflareChallengeErrorsAreSanitized(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	assertNoDNSCanaryLeak(t, err, token, txtValue)
+}
+
+func cloudflareZonePage(page, totalPages int, names ...string) map[string]any {
+	result := make([]map[string]string, 0, len(names))
+	for _, name := range names {
+		result = append(result, map[string]string{"id": name + "-id", "name": name})
+	}
+	return map[string]any{
+		"success":     true,
+		"result":      result,
+		"result_info": map[string]int{"page": page, "per_page": 50, "count": len(names), "total_pages": totalPages},
+	}
+}
+
+func TestCloudflareListZonesReadsAllPages(t *testing.T) {
+	firstPage := make([]string, 0, 50)
+	for i := range 50 {
+		firstPage = append(firstPage, fmt.Sprintf("zone%02d.example.com", i))
+	}
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/zones" {
+			t.Fatalf("unexpected Cloudflare request: %s %s", r.Method, r.URL.String())
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		switch page {
+		case "1":
+			_ = json.NewEncoder(w).Encode(cloudflareZonePage(1, 2, firstPage...))
+		case "2":
+			_ = json.NewEncoder(w).Encode(cloudflareZonePage(2, 2, "last-page.example.org"))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	}))
+	defer server.Close()
+
+	client := NewCloudflareClient(server.Client())
+	client.BaseURL = server.URL
+	zones, err := client.ListZones(context.Background(), json.RawMessage(`{"api_token":"token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zones) != 51 || !slices.Contains(zones, "last-page.example.org") {
+		t.Fatalf("zones = %d %v; want 51 including last-page.example.org (pages requested %v)", len(zones), zones, pages)
+	}
+}
+
+func TestCloudflareListZonesFailsWhenAnyPageFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_ = json.NewEncoder(w).Encode(cloudflareZonePage(1, 2, "example.com"))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewCloudflareClient(server.Client(), netretry.Policy{})
+	client.BaseURL = server.URL
+	zones, err := client.ListZones(context.Background(), json.RawMessage(`{"api_token":"token"}`))
+	if !errors.Is(err, ErrZoneDiscoveryFailed) {
+		t.Fatalf("ListZones() = %v, %v; want ErrZoneDiscoveryFailed and no partial list", zones, err)
+	}
+}
+
+func TestCloudflareListZonesFailsWhenPageCapExceeded(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		_ = json.NewEncoder(w).Encode(cloudflareZonePage(page, maxProviderListPages+1, fmt.Sprintf("zone%d.example.com", page)))
+	}))
+	defer server.Close()
+
+	client := NewCloudflareClient(server.Client(), netretry.Policy{})
+	client.BaseURL = server.URL
+	zones, err := client.ListZones(context.Background(), json.RawMessage(`{"api_token":"token"}`))
+	if !errors.Is(err, ErrZoneDiscoveryFailed) {
+		t.Fatalf("ListZones() = %d zones, %v; want ErrZoneDiscoveryFailed", len(zones), err)
+	}
+	if requests > maxProviderListPages {
+		t.Fatalf("requests = %d; want at most %d", requests, maxProviderListPages)
+	}
+}
+
+func TestCloudflareCleanUpFindsTXTRecordOnLaterPage(t *testing.T) {
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []map[string]string{{"id": "zone-id", "name": "example.com"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/zone-id/dns_records":
+			page := r.URL.Query().Get("page")
+			if page == "" {
+				page = "1"
+			}
+			content := "other-value"
+			if page == "2" {
+				content = "value"
+			} else if page != "1" {
+				t.Fatalf("unexpected page %q", page)
+			}
+			pageNumber, _ := strconv.Atoi(page)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":     true,
+				"result":      []map[string]string{{"id": "record-" + page, "type": "TXT", "name": "_acme-challenge.example.com", "content": content}},
+				"result_info": map[string]int{"page": pageNumber, "per_page": 1, "count": 1, "total_pages": 2},
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/zones/zone-id/dns_records/"):
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/zones/zone-id/dns_records/"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewCloudflareClient(server.Client(), netretry.Policy{})
+	client.BaseURL = server.URL
+	err := client.CleanUp(context.Background(), CloudflareCredentials{APIToken: "token"}, DNS01ChallengeOperation{ZoneName: "example.com", RecordName: "_acme-challenge.example.com", TXTValue: "value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0] != "record-2" {
+		t.Fatalf("deleted = %v; want [record-2]", deleted)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,30 +55,16 @@ func (c *CloudflareClient) ListZones(ctx context.Context, raw json.RawMessage) (
 	if c == nil || c.HTTPClient == nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/zones?per_page=50&page=1", nil)
+	query := url.Values{}
+	query.Set("per_page", "50")
+	zones, err := cloudflareListAll[struct {
+		Name string `json:"name"`
+	}](ctx, c, creds, "/zones", query)
 	if err != nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
-	req.Header.Set("Authorization", "Bearer "+creds.APIToken)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	var body struct {
-		Success bool `json:"success"`
-		Result  []struct {
-			Name string `json:"name"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || !body.Success {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	out := make([]string, 0, len(body.Result))
-	for _, zone := range body.Result {
+	out := make([]string, 0, len(zones))
+	for _, zone := range zones {
 		normalized, err := storage.NormalizeDNSName(zone.Name)
 		if err != nil {
 			return nil, ErrZoneDiscoveryFailed
@@ -196,17 +183,47 @@ func (c *CloudflareClient) cloudflareTXTRecords(ctx context.Context, creds Cloud
 	query.Set("type", "TXT")
 	query.Set("name", recordName)
 	query.Set("per_page", "100")
-	var body struct {
-		Success bool                  `json:"success"`
-		Result  []cloudflareDNSRecord `json:"result"`
+	return cloudflareListAll[cloudflareDNSRecord](ctx, c, creds, "/zones/"+url.PathEscape(zoneID)+"/dns_records", query)
+}
+
+// cloudflareListAll reads every page of a Cloudflare list endpoint. It uses
+// result_info.page and result_info.total_pages. Any failed page fails the whole
+// call, so callers never get a partial list.
+func cloudflareListAll[T any](ctx context.Context, c *CloudflareClient, creds CloudflareCredentials, path string, query url.Values) ([]T, error) {
+	var out []T
+	for page := 1; page <= maxProviderListPages; page++ {
+		pageQuery := url.Values{}
+		for key, values := range query {
+			pageQuery[key] = values
+		}
+		pageQuery.Set("page", strconv.Itoa(page))
+		var body struct {
+			Success    bool `json:"success"`
+			Result     []T  `json:"result"`
+			ResultInfo *struct {
+				Page       int `json:"page"`
+				TotalPages int `json:"total_pages"`
+			} `json:"result_info"`
+		}
+		if err := c.cloudflareRequest(ctx, creds, http.MethodGet, path, pageQuery, nil, &body); err != nil {
+			return nil, err
+		}
+		if !body.Success {
+			return nil, errors.New("cloudflare list request failed")
+		}
+		out = append(out, body.Result...)
+		info := body.ResultInfo
+		if info == nil || info.TotalPages <= page {
+			return out, nil
+		}
+		if info.Page != page {
+			return nil, errProviderListPageOrder
+		}
+		if info.TotalPages > maxProviderListPages {
+			return nil, errProviderListPageLimit
+		}
 	}
-	if err := c.cloudflareRequest(ctx, creds, http.MethodGet, "/zones/"+url.PathEscape(zoneID)+"/dns_records", query, nil, &body); err != nil {
-		return nil, err
-	}
-	if !body.Success {
-		return nil, errors.New("cloudflare record lookup failed")
-	}
-	return body.Result, nil
+	return nil, errProviderListPageLimit
 }
 
 func (c *CloudflareClient) cloudflareRequest(ctx context.Context, creds CloudflareCredentials, method, path string, query url.Values, requestBody any, responseBody ...any) error {

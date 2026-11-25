@@ -358,6 +358,27 @@ func TestWriteCertificateErrorRenewalNotDue(t *testing.T) {
 	}
 }
 
+func TestWriteCertificateErrorRenewalOverlapExists(t *testing.T) {
+	fixture := newCertificateHTTPFixture(t)
+	rec := httptest.NewRecorder()
+	status, code := writeCertificateError(rec, certdomain.RenewalOverlapError{
+		Certificate:   fixture.cert,
+		ValidVersions: []certdomain.CertificateVersion{fixture.version},
+	})
+	if status != http.StatusConflict || code != "renewal_overlap_exists" {
+		t.Fatalf("status/code = %d %q body=%s", status, code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, required := range []string{`"code":"renewal_overlap_exists"`, `"certificate_id":"` + fixture.cert.ID + `"`, `"valid_versions":[{`, `"id":"` + fixture.version.ID + `"`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("body missing %q: %s", required, body)
+		}
+	}
+	if strings.Contains(body, "BEGIN") {
+		t.Fatalf("overlap details leaked certificate material: %s", body)
+	}
+}
+
 func TestWriteCertificateErrorDisabled(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	fixture.cert.Enabled = false
@@ -753,8 +774,8 @@ func (s *certificateHTTPCertStore) EnsureIssuanceJob(context.Context, certdomain
 	return certdomain.IssuanceJob{ID: "a2345678-1234-4234-9234-123456789abc"}, nil
 }
 
-func (s *certificateHTTPCertStore) RevokeCertificateVersion(context.Context, certdomain.RevokeCertificateVersionParams) (certdomain.CertificateVersion, error) {
-	return certdomain.CertificateVersion{}, errors.New("not implemented")
+func (s *certificateHTTPCertStore) RevokeCertificateVersion(context.Context, certdomain.RevokeCertificateVersionParams) (certdomain.CertificateVersion, bool, error) {
+	return certdomain.CertificateVersion{}, false, errors.New("not implemented")
 }
 
 func (s *certificateHTTPCertStore) DeleteCertificate(_ context.Context, params certdomain.DeleteCertificateParams) (certdomain.Certificate, error) {

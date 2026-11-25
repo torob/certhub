@@ -213,6 +213,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /v1/auth/password-2fa/login-setup/confirm:
     parameters:
@@ -254,6 +256,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /v1/auth/password-2fa:
     parameters:
@@ -289,6 +293,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /v1/auth/password-resets/{reset_token}:
     parameters:
@@ -1099,6 +1105,11 @@ paths:
       tags: [Certificates]
       operationId: renewCertificate
       summary: Start renewal for a certificate selected by ID.
+      description: >-
+        Returns `409 renewal_overlap_exists` with `RenewalOverlapDetails` when the
+        Certificate already has two valid, not-expired CertificateVersions and no
+        renewal is in progress. Retry after the older valid CertificateVersion expires
+        or is revoked.
       security:
         - UserBearerAuth: []
       requestBody:
@@ -1148,6 +1159,10 @@ paths:
       tags: [Certificates]
       operationId: rotateCertificateKey
       summary: Start key rotation for a certificate selected by ID.
+      description: >-
+        Returns `409 renewal_overlap_exists` with `RenewalOverlapDetails` when the
+        Certificate already has two valid, not-expired CertificateVersions. Retry after
+        the older valid CertificateVersion expires or is revoked.
       security:
         - UserBearerAuth: []
       requestBody:

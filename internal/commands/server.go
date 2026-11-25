@@ -282,11 +282,17 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	workerInstanceID, err := workers.NewInstanceID()
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "worker startup failed: %s\n", security.RedactString(err.Error()))
+		return 1
+	}
 	dnsRefreshWorkers, err := workers.StartDNSRefreshWorkers(ctx, workers.DNSRefreshConfig{
 		Service:      dnsService,
 		Concurrency:  cfg.Workers.Concurrency,
 		PollInterval: 2 * time.Second,
 		LogWriter:    r.Stderr,
+		InstanceID:   workerInstanceID,
 	})
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "worker startup failed: %s\n", security.RedactString(err.Error()))
@@ -304,6 +310,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 		Applications: appRepo,
 		PollInterval: 5 * time.Minute,
 		LogWriter:    r.Stderr,
+		InstanceID:   workerInstanceID,
 	})
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "worker startup failed: %s\n", security.RedactString(err.Error()))
@@ -337,6 +344,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 		Concurrency:  cfg.Workers.Concurrency,
 		PollInterval: 2 * time.Second,
 		LogWriter:    r.Stderr,
+		InstanceID:   workerInstanceID,
 	})
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "worker startup failed: %s\n", security.RedactString(err.Error()))
@@ -350,14 +358,7 @@ func (r ServerRunner) run(ctx context.Context, configPath string, applyMigration
 		}
 	}()
 	if cfg.SelfCertificate.SyncEnabled {
-		selfCertService := selfcert.NewService(selfcert.ServiceConfig{
-			Runtime:     selfcert.RuntimeConfigFromConfig(cfg),
-			DB:          resources.Storage,
-			Storage:     resources.Storage,
-			KeySet:      resources.KeySet,
-			TLSReloader: tlsLoader,
-			LogWriter:   r.Stderr,
-		})
+		selfCertService := selfcert.NewService(selfCertificateServiceConfig(cfg, resources, tlsLoader, r.Stderr))
 		resources.SelfCertificate = selfCertService
 		selfCertRunner, err := selfcert.Start(ctx, selfcert.RunnerConfig{
 			Syncer:       selfCertService,
@@ -1459,6 +1460,23 @@ type migrationPendingError struct {
 
 func (e migrationPendingError) Error() string {
 	return fmt.Sprintf("database migrations are pending: current_version=%d latest_version=%d pending=%d; run certhub-server migrate or start with certhub-server run --migrate", e.Status.CurrentVersion, e.Status.LatestVersion, e.Status.Pending)
+}
+
+func selfCertificateServiceConfig(cfg *config.Config, resources *runtimeResources, tlsLoader *config.TLSCertificateLoader, logWriter io.Writer) selfcert.ServiceConfig {
+	// Assign only a non-nil loader: a typed-nil pointer in the interface
+	// would pass the service's nil check and be called.
+	var reloader selfcert.TLSReloader
+	if tlsLoader != nil {
+		reloader = tlsLoader
+	}
+	return selfcert.ServiceConfig{
+		Runtime:     selfcert.RuntimeConfigFromConfig(cfg),
+		DB:          resources.Storage,
+		Storage:     resources.Storage,
+		KeySet:      resources.KeySet,
+		TLSReloader: reloader,
+		LogWriter:   logWriter,
+	}
 }
 
 func openRuntimeResources(ctx context.Context, cfg *config.Config, tlsLoader *config.TLSCertificateLoader, migrationMode runtimeMigrationMode) (*runtimeResources, error) {

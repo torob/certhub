@@ -50,6 +50,10 @@ type Result struct {
 	RequeueAfter time.Duration
 	Result       string
 	BackendCode  string
+	// RetryWithBackoff marks a transient failure. The runtime requeues the
+	// Certificate with per-object exponential backoff that starts at
+	// RequeueAfter and resets after the next successful reconcile.
+	RetryWithBackoff bool
 }
 
 func reconcileResult(result string, requeueAfter time.Duration) Result {
@@ -58,6 +62,14 @@ func reconcileResult(result string, requeueAfter time.Duration) Result {
 
 func backendResult(result, code string, requeueAfter time.Duration) Result {
 	return Result{Result: result, BackendCode: code, RequeueAfter: requeueAfter}
+}
+
+func failureResult(result string, backoff time.Duration) Result {
+	return Result{Result: result, RequeueAfter: backoff, RetryWithBackoff: true}
+}
+
+func backendFailureResult(result, code string, backoff time.Duration) Result {
+	return Result{Result: result, BackendCode: code, RequeueAfter: backoff, RetryWithBackoff: true}
 }
 
 func NewReconciler(kube KubernetesClient, backend BackendClient) *Reconciler {
@@ -117,14 +129,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 		return reconcileResult("invalid", 0), nil
 	}
 	// The finalizer must be durable before a Secret can acquire an owner
-	// reference. Otherwise deletion of the Certificate could race garbage
-	// collection before Retain has a chance to detach the Secret.
+	// reference, so a Delete policy Secret is always cleaned up through the
+	// operator. Retain Secrets never carry an owner reference: foreground
+	// deletion garbage-collects dependents while the owner still exists, so
+	// the finalizer alone cannot protect them.
 	if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
 		next := append([]string(nil), cert.Metadata.Finalizers...)
 		next = append(next, Finalizer)
 		if err := r.Kube.UpdateFinalizers(ctx, cert, next); err != nil {
 			r.Metrics.IncReconcile("finalizer_failed")
-			return reconcileResult("finalizer_failed", r.Backoff), err
+			return failureResult("finalizer_failed", r.Backoff), err
 		}
 		cert.Metadata.Finalizers = next
 	}
@@ -133,7 +147,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 	if err != nil && !stderrors.Is(err, ErrNotFound) {
 		r.failTransient(ctx, cert, "SecretReadFailed", err.Error())
 		r.Metrics.IncReconcile("secret_read_failed")
-		return reconcileResult("secret_read_failed", r.Backoff), nil
+		return failureResult("secret_read_failed", r.Backoff), nil
 	}
 	var ifNoneMatch string
 	if err == nil && secret != nil {
@@ -153,16 +167,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 			r.Metrics.IncSecretSync("ownership_conflict")
 			return reconcileResult("ownership_conflict", 0), nil
 		}
-		if len(secret.Metadata.OwnerReferences) == 0 {
-			ownerReferences := []OwnerReference{certhubOwnerReference(cert)}
+		if ownerReferences := managedSecretOwnerReferences(cert); !equalOwnerReferenceMultiset(secret.Metadata.OwnerReferences, ownerReferences) {
 			if patchErr := r.Kube.SetSecretOwnerReferences(ctx, secret, ownerReferences); patchErr != nil {
 				r.failTransient(ctx, cert, "SecretOwnerReferenceMigrationFailed", patchErr.Error())
 				r.Metrics.IncReconcile("owner_reference_migration_failed")
 				r.Metrics.IncSecretSync("metadata_migration_failed")
-				return reconcileResult("owner_reference_migration_failed", r.Backoff), nil
+				return failureResult("owner_reference_migration_failed", r.Backoff), nil
 			}
 			secret.Metadata.OwnerReferences = ownerReferences
-			r.emit(ctx, cert, "Normal", "SecretOwnerReferenceAdded", "managed Secret owner reference added")
+			if len(ownerReferences) > 0 {
+				r.emit(ctx, cert, "Normal", "SecretOwnerReferenceAdded", "managed Secret owner reference added for Delete policy")
+			} else {
+				r.emit(ctx, cert, "Normal", "SecretOwnerReferenceRemoved", "managed Secret owner reference removed for Retain policy")
+			}
 			r.Metrics.IncSecretSync("metadata_migrated")
 		}
 		ifNoneMatch = secret.Metadata.Annotations[AnnotationMaterialETag]
@@ -194,13 +211,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, cert *CerthubCertificate) (R
 		if materialValue == nil {
 			r.failTransient(ctx, cert, "BackendUnavailable", "Certhub returned empty TLS material")
 			r.Metrics.IncReconcile("empty_material")
-			return backendResult("empty_material", "ok", r.Backoff), nil
+			return backendFailureResult("empty_material", "ok", r.Backoff), nil
 		}
 		if err := r.writeTLSSecret(ctx, cert, materialValue); err != nil {
 			r.failTransient(ctx, cert, "SecretWriteFailed", err.Error())
 			r.Metrics.IncReconcile("secret_write_failed")
 			r.Metrics.IncSecretSync("write_failed")
-			return reconcileResult("secret_write_failed", r.Backoff), nil
+			return failureResult("secret_write_failed", r.Backoff), nil
 		}
 		previousStatus := cloneCertificateStatus(cert.Status)
 		r.markReady(cert, normalized.Domains, materialValue.CertificateID, "Secret synced")
@@ -231,13 +248,13 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 	if err != nil && !stderrors.Is(err, ErrNotFound) {
 		r.failTransient(ctx, cert, "SecretReadFailed", err.Error())
 		r.Metrics.IncReconcile("secret_read_failed")
-		return reconcileResult("secret_read_failed", r.Backoff), nil
+		return failureResult("secret_read_failed", r.Backoff), nil
 	}
 	if err == nil && secret != nil {
 		if ownershipErr := checkOwnedSecret(cert, secret); ownershipErr != nil {
 			r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
 			r.Metrics.IncReconcile("ownership_conflict")
-			return reconcileResult("ownership_conflict", r.Backoff), nil
+			return failureResult("ownership_conflict", r.Backoff), nil
 		}
 	}
 
@@ -245,11 +262,11 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 		if err == nil && secret != nil {
 			if deleteErr := r.Kube.DeleteSecret(ctx, cert.Metadata.Namespace, cert.Spec.SecretName, secret); stderrors.Is(deleteErr, ErrDeletionPending) {
 				r.Metrics.IncReconcile("delete_pending")
-				return reconcileResult("delete_pending", r.Backoff), nil
+				return failureResult("delete_pending", r.Backoff), nil
 			} else if deleteErr != nil && !stderrors.Is(deleteErr, ErrNotFound) {
 				r.failTransient(ctx, cert, "SecretDeleteFailed", deleteErr.Error())
 				r.Metrics.IncReconcile("delete_failed")
-				return reconcileResult("delete_failed", r.Backoff), nil
+				return failureResult("delete_failed", r.Backoff), nil
 			}
 			r.emit(ctx, cert, "Normal", "SecretDeleted", "owned TLS Secret deleted")
 		}
@@ -258,7 +275,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 			if cleanupErr := r.Kube.SetSecretOwnerReferences(ctx, secret, []OwnerReference{}); cleanupErr != nil {
 				r.failTransient(ctx, cert, "SecretOwnerReferenceCleanupFailed", cleanupErr.Error())
 				r.Metrics.IncReconcile("owner_reference_cleanup_failed")
-				return reconcileResult("owner_reference_cleanup_failed", r.Backoff), nil
+				return failureResult("owner_reference_cleanup_failed", r.Backoff), nil
 			}
 			secret.Metadata.OwnerReferences = nil
 			r.emit(ctx, cert, "Normal", "SecretRetained", "Secret owner reference removed before Certificate deletion")
@@ -267,7 +284,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 	next := removeFinalizer(cert.Metadata.Finalizers, Finalizer)
 	if err := r.Kube.UpdateFinalizers(ctx, cert, next); err != nil {
 		r.Metrics.IncReconcile("finalizer_failed")
-		return reconcileResult("finalizer_failed", r.Backoff), err
+		return failureResult("finalizer_failed", r.Backoff), err
 	}
 	cert.Metadata.Finalizers = next
 	r.Metrics.IncReconcile("deleted")
@@ -293,7 +310,7 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 		}
 		r.Metrics.IncReconcile("backend_unavailable")
 		r.Metrics.IncBackend("transport")
-		return backendResult("backend_unavailable", "transport", r.Backoff), nil
+		return backendFailureResult("backend_unavailable", "transport", r.Backoff), nil
 	}
 	code := apiErr.Envelope.Code
 	r.Metrics.IncBackend(code)
@@ -304,7 +321,7 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 			var ensureAPIErr *certerrors.APIError
 			if stderrors.As(ensureErr, &ensureAPIErr) && ensureAPIErr.Envelope.Code == certerrors.CodeCertificateNotFound {
 				r.failTransient(ctx, cert, "BackendUnavailable", "Certhub did not accept certificate creation")
-				return backendResult("backend_unavailable", code, r.Backoff), nil
+				return backendFailureResult("backend_unavailable", code, r.Backoff), nil
 			}
 			return r.handleBackendError(ctx, cert, criteria, domains, ensureErr)
 		}
@@ -386,14 +403,13 @@ func (r *Reconciler) handleBackendError(ctx context.Context, cert *CerthubCertif
 		}
 		return backendResult("authorization_failed", code, 0), nil
 	default:
-		requeue := r.Backoff
-		if apiErr.Envelope.Retryable {
-			requeue = retryDelay(apiErr, r.Backoff)
-		}
 		if r.failTransient(ctx, cert, backendReason(code), apiErr.Envelope.Message) {
 			r.emit(ctx, cert, "Warning", "BackendUnavailable", apiErr.Envelope.Message)
 		}
-		return backendResult("backend_error", code, requeue), nil
+		if seconds, ok := apiErr.RetryAfterSeconds(); ok && apiErr.Envelope.Retryable {
+			return backendResult("backend_error", code, time.Duration(seconds)*time.Second), nil
+		}
+		return backendFailureResult("backend_error", code, r.Backoff), nil
 	}
 }
 
@@ -428,7 +444,7 @@ func (r *Reconciler) writeTLSSecret(ctx context.Context, cert *CerthubCertificat
 				AnnotationNotAfter:          value.NotAfter.Format(time.RFC3339),
 				AnnotationOwnerUID:          cert.Metadata.UID,
 			},
-			OwnerReferences: []OwnerReference{certhubOwnerReference(cert)},
+			OwnerReferences: managedSecretOwnerReferences(cert),
 		},
 		Type: SecretTypeTLS,
 		Data: map[string][]byte{
@@ -480,6 +496,19 @@ func checkSecretOwnership(secret *Secret, namespace, secretName, certName, certU
 		}
 	}
 	return nil
+}
+
+// managedSecretOwnerReferences returns the owner references that the managed
+// Secret must carry for the current secretDeletionPolicy. Only Delete makes the
+// Secret a garbage-collection dependent of the Certificate. Retain Secrets are
+// tracked by the management labels and owner-UID annotation only, because
+// foreground deletion would otherwise delete them before the operator can
+// detach them.
+func managedSecretOwnerReferences(cert *CerthubCertificate) []OwnerReference {
+	if SecretDeletionPolicy(cert.Spec) == PolicyDelete {
+		return []OwnerReference{certhubOwnerReference(cert)}
+	}
+	return []OwnerReference{}
 }
 
 func certhubOwnerReference(cert *CerthubCertificate) OwnerReference {
@@ -536,7 +565,7 @@ func (r *Reconciler) updateStatus(ctx context.Context, cert *CerthubCertificate,
 	}
 	if err := r.Kube.UpdateStatus(ctx, cert); err != nil {
 		r.Metrics.IncReconcile("status_update_failed")
-		return reconcileResult("status_update_failed", r.Backoff), false, false
+		return failureResult("status_update_failed", r.Backoff), false, false
 	}
 	r.Metrics.SetCertificateConditions(cert)
 	return Result{}, true, true

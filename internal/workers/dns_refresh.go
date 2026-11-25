@@ -21,6 +21,9 @@ type DNSRefreshConfig struct {
 	PollInterval time.Duration
 	LogWriter    io.Writer
 	WorkerPrefix string
+	// InstanceID identifies the server process in every worker ID. When it is
+	// empty, a new random instance ID is generated.
+	InstanceID string
 }
 
 type DNSRefreshRunner struct {
@@ -44,12 +47,15 @@ func StartDNSRefreshWorkers(ctx context.Context, cfg DNSRefreshConfig) (*DNSRefr
 	if cfg.WorkerPrefix == "" {
 		cfg.WorkerPrefix = "dns-refresh"
 	}
+	ids, err := workerIDs(cfg.WorkerPrefix, cfg.InstanceID, cfg.Concurrency)
+	if err != nil {
+		return nil, fmt.Errorf("dns refresh worker IDs: %w", err)
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	runner := &DNSRefreshRunner{cancel: cancel, done: make(chan struct{})}
 	var wg sync.WaitGroup
 	wg.Add(cfg.Concurrency)
-	for i := 0; i < cfg.Concurrency; i++ {
-		workerID := fmt.Sprintf("%s-%d", cfg.WorkerPrefix, i+1)
+	for _, workerID := range ids {
 		go func() {
 			defer wg.Done()
 			runDNSRefreshWorker(workerCtx, cfg.Service, cfg.PollInterval, cfg.LogWriter, workerID)

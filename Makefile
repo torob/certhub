@@ -31,7 +31,7 @@ GO_READONLY_ENV := $(GO_BUILD_ENV) GOFLAGS=-mod=readonly
 GO_BUILD_FLAGS := -trimpath -buildvcs=false -ldflags "-s -w"
 GO_PACKAGE_ROOTS := ./cmd/... ./internal/... ./pkg/... ./migrations/... ./test/...
 
-.PHONY: check fmt go-fmt go-test go-lockfile-check build build-go build-server build-cli build-operator web-ci web-install web-typecheck web-test web-build web-build-release web-embed-release release-artifacts dependency-check go-dependency-check go-vulnerability-check go-license-check web-dependency-check web-vulnerability-check web-license-check web-lockfile-check web-asset-check operator-chart-check release-scaffold-check contract openapi-validate contract-baseline tools-redocly tools-govulncheck tools-helm clean
+.PHONY: check fmt go-fmt go-test go-lockfile-check build build-go build-server build-cli build-operator web-ci web-install web-typecheck web-test web-build web-build-release web-embed-release release-artifacts dependency-check go-dependency-check go-vulnerability-check go-license-check web-dependency-check web-vulnerability-check web-license-check web-lockfile-check web-asset-check operator-chart-check server-chart-check release-scaffold-check contract openapi-validate contract-baseline tools-redocly tools-govulncheck tools-helm clean
 
 check: fmt dependency-check contract web-ci build web-asset-check release-scaffold-check
 
@@ -139,6 +139,9 @@ release-artifacts: build
 
 operator-chart-check: tools-helm
 	HELM_BIN="$(HELM)" ./scripts/check-operator-helm-chart.sh
+
+server-chart-check: tools-helm
+	HELM_BIN="$(HELM)" ./scripts/check-server-helm-chart.sh
 
 release-scaffold-check: tools-helm release-artifacts
 	HELM_BIN="$(HELM)" NODE_BIN="$(NODE)" ./scripts/check-release-scaffold.sh

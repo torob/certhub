@@ -111,6 +111,9 @@ func (l *TLSCertificateLoader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certif
 }
 
 func (l *TLSCertificateLoader) ReloadIfChanged() error {
+	if l == nil {
+		return nil
+	}
 	certInfo, keyInfo, err := statTLSFiles(l.certFile, l.keyFile)
 	if err != nil {
 		if l.allowPending && errors.Is(err, errTLSFileMissing) {

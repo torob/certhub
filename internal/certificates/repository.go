@@ -12,6 +12,15 @@ import (
 	"github.com/torob/certhub/internal/storage"
 )
 
+// MaxActiveValidVersions is the maximum number of valid, not-expired
+// CertificateVersions one Certificate may have during a replacement overlap.
+// The certificate_versions_valid_overlap database trigger enforces the same limit.
+const MaxActiveValidVersions = 2
+
+// RenewalFailureBackoff is how long the automatic renewal scan skips a
+// Certificate after its latest renewal CertificateVersion failed.
+const RenewalFailureBackoff = time.Hour
+
 type Repository struct {
 	db storage.DBTX
 }
@@ -173,6 +182,8 @@ type ListDNSChallengesParams struct {
 	CertificateID        *string
 	CertificateVersionID *string
 	Status               *DNSChallengeStatus
+	// ExcludeActiveIssuanceJobs skips records whose issuance job is pending or running.
+	ExcludeActiveIssuanceJobs bool
 }
 
 type MarkDNSChallengeCleanupParams struct {
@@ -346,8 +357,23 @@ where c.deleted_at is null
         and issuing.status = 'issuing'
         and issuing.reason = 'renewal'
   )
+  and (
+      select count(*)
+      from certificate_versions active
+      where active.certificate_id = c.id
+        and active.status = 'valid'
+        and active.not_after > now()
+  ) < $2
+  and not exists (
+      select 1
+      from certificate_versions failed
+      where failed.certificate_id = c.id
+        and failed.status = 'failed'
+        and failed.reason = 'renewal'
+        and failed.completed_at > now() - ($3 * interval '1 second')
+  )
 order by latest.not_after asc, latest.certificate_id asc
-limit $1`, limit)
+limit $1`, limit, MaxActiveValidVersions, int64(RenewalFailureBackoff/time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("list renewal candidates: %w", err)
 	}
@@ -687,11 +713,15 @@ returning `+prefixedIssuanceJobColumnsSQL("j"), params.JobID, params.WorkerID, p
 	return job, nil
 }
 
-func (r Repository) RevokeCertificateVersion(ctx context.Context, params RevokeCertificateVersionParams) (CertificateVersion, error) {
+// RevokeCertificateVersion locally revokes one valid CertificateVersion. The
+// returned bool is true only when this call changed the version from valid to
+// revoked; it is false for a repeated request on an already revoked version.
+func (r Repository) RevokeCertificateVersion(ctx context.Context, params RevokeCertificateVersionParams) (CertificateVersion, bool, error) {
 	if err := validateRevokeCertificateVersion(params); err != nil {
-		return CertificateVersion{}, err
+		return CertificateVersion{}, false, err
 	}
-	version, err := scanCertificateVersion(r.db.QueryRow(ctx, `
+	var changed bool
+	version, err := scanCertificateVersionWith(r.db.QueryRow(ctx, `
 with target as (
     select `+certificateVersionSelectSQL("v")+`
     from certificate_versions v
@@ -722,37 +752,47 @@ with target as (
       and exists (select 1 from target)
       and v.status = 'valid'
     returning `+certificateVersionSelectSQL("v")+`
+), parent_state as (
+    -- All sub-statements share one snapshot, so the version revoked by
+    -- "updated" still looks valid here; exclude it explicitly.
+    select exists (
+        select 1
+        from certificate_versions active
+        where active.certificate_id = $1
+          and active.id <> $2
+          and active.status = 'valid'
+          and active.cert_pem is not null
+          and active.chain_pem is not null
+          and active.fullchain_pem is not null
+          and active.private_key_pem is not null
+          and active.material_etag is not null
+          and active.not_before <= now()
+          and active.not_after > now()
+    ) as other_usable
 ), parent_update as (
+    -- Keep the parent status while another usable version remains or while
+    -- issuance work is in progress; otherwise the parent becomes revoked.
     update certificates c
-    set status = case
-            when exists (
-                select 1
-                from certificate_versions active
-                where active.certificate_id = c.id
-                  and active.status = 'valid'
-                  and active.cert_pem is not null
-                  and active.chain_pem is not null
-                  and active.fullchain_pem is not null
-                  and active.private_key_pem is not null
-                  and active.material_etag is not null
-                  and active.not_before <= now()
-                  and active.not_after > now()
-            ) then 'ready'
-            else c.status
-        end,
+    set status = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') then c.status else 'revoked' end,
+        revocation_reason = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') then c.revocation_reason else coalesce(c.revocation_reason, $3) end,
+        revoked_at = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') then c.revoked_at else coalesce(c.revoked_at, now()) end,
+        revoked_by_user_id = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') or c.status = 'revoked' then c.revoked_by_user_id else $4::uuid end,
+        failure_code = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') then c.failure_code else null end,
+        failure_message = case when s.other_usable or c.status in ('issuing', 'validating_dns', 'renewing', 'rotating_key') then c.failure_message else null end,
         updated_at = now()
+    from parent_state s
     where c.id = $1
       and exists (select 1 from updated)
     returning 1
 )
-select * from updated
+select *, true as changed from updated
 union all
-select * from target where not exists (select 1 from updated)
-limit 1`, params.CertificateID, params.CertificateVersionID, string(params.Reason), params.RevokedByUserID))
+select *, false as changed from target where not exists (select 1 from updated)
+limit 1`, params.CertificateID, params.CertificateVersionID, string(params.Reason), params.RevokedByUserID), &changed)
 	if err != nil {
-		return CertificateVersion{}, fmt.Errorf("revoke certificate version: %w", err)
+		return CertificateVersion{}, false, fmt.Errorf("revoke certificate version: %w", err)
 	}
-	return version, nil
+	return version, changed, nil
 }
 
 func (r Repository) DeleteCertificate(ctx context.Context, params DeleteCertificateParams) (Certificate, error) {
@@ -1258,6 +1298,9 @@ func (r Repository) listDNSChallengesQuery(params ListDNSChallengesParams) (stri
 	}
 	if params.Status != nil {
 		add("status = $%d", string(*params.Status))
+	}
+	if params.ExcludeActiveIssuanceJobs {
+		where = append(where, "not exists (select 1 from certificate_issuance_jobs j where j.id = dns_challenge_records.issuance_job_id and j.status in ('pending', 'running'))")
 	}
 	args = append(args, opts.Limit, opts.Offset)
 	query := "select " + dnsChallengeReturningSQL() + " from dns_challenge_records"

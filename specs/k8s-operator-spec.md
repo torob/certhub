@@ -71,7 +71,7 @@ CRD validation:
 - `secretName` updates are rejected by a CEL transition rule requiring
   `self == oldSelf`. Installing this rule during a CRD-first upgrade permits
   unchanged updates of existing objects while preventing an old
-  owner-referenced Secret from becoming unreachable through the mutable spec.
+  managed Secret from becoming unreachable through the mutable spec.
 - `keyType`: enum `rsa-2048`, `rsa-3072`, `rsa-4096`, `ecdsa-p256`, `ecdsa-p384`.
 - `issuer`: backend `machine_name` validation.
 - `secretDeletionPolicy`: enum `Retain` or `Delete`.
@@ -101,7 +101,8 @@ Conditions:
 
 ## Kubernetes Secret
 
-The operator writes a standard Kubernetes TLS Secret:
+The operator writes a standard Kubernetes TLS Secret. The `ownerReferences`
+entry is present only when `secretDeletionPolicy=Delete`:
 
 ```yaml
 apiVersion: v1
@@ -110,7 +111,7 @@ type: kubernetes.io/tls
 metadata:
   name: gateway-tls
   namespace: gateway
-  ownerReferences:
+  ownerReferences: # secretDeletionPolicy=Delete only
     - apiVersion: certs.torob.dev/v1alpha1
       kind: CerthubCertificate
       name: gateway-tls
@@ -150,17 +151,30 @@ Mutation and deletion require all ownership checks to pass:
 - Secret name equals `spec.secretName`.
 - `certhub.torob.dev/owner-uid` equals the current CR UID.
 - Required management labels are present and match the current CR.
-- The managed owner reference uses API version
-  `certs.torob.dev/v1alpha1`, kind `CerthubCertificate`, and the current CR name
-  and UID. An owner reference for a different CerthubCertificate is an
-  ownership conflict.
+- The Secret has no owner reference, or only the managed owner reference with
+  API version `certs.torob.dev/v1alpha1`, kind `CerthubCertificate`, and the
+  current CR name and UID. Any other owner reference, including one for a
+  different CerthubCertificate, is an ownership conflict.
 - Secret type is `kubernetes.io/tls`, or absent only before initial creation.
 
-Every newly created managed Secret includes the matching owner reference.
-Existing managed Secrets without that reference are patched in place only
-after the cleanup finalizer has been persisted on the Certificate. Migration
-must preserve the Secret UID, TLS data, type, labels, annotations, and all
-metadata other than the expected owner-reference change.
+The owner-UID annotation and management labels identify every managed Secret.
+The owner reference depends on `secretDeletionPolicy`:
+
+- `Delete`: the managed Secret carries the matching owner reference, so it is a
+  garbage-collection dependent of the Certificate.
+- `Retain`: the managed Secret never carries an owner reference. Kubernetes
+  foreground deletion (for example an Argo CD prune with
+  `PrunePropagationPolicy=foreground`) deletes all dependents while the owner
+  still exists, before the operator can observe the deletion. The cleanup
+  finalizer cannot prevent that, so a Retain Secret must not be a dependent.
+
+The operator converges the owner reference on every live reconcile. An
+existing managed Secret gains the reference when the policy is `Delete`, and
+loses it when the policy is `Retain`, through an in-place,
+resource-version-guarded metadata patch. The reference is added only after the
+cleanup finalizer has been persisted on the Certificate. The patch must
+preserve the Secret UID, TLS data, type, labels, annotations, and all metadata
+other than the expected owner-reference change.
 
 ## Authentication
 
@@ -236,13 +250,14 @@ never overwrites or deletes a Secret that fails its ownership checks.
    finalizer patch fails.
 3. Normalize desired certificate criteria locally for stable comparison.
 4. Read the existing target Secret, if present. After ownership validation,
-   migrate a managed Secret that lacks the owner reference with an in-place,
-   resource-version-guarded metadata patch. Never attach the owner reference
-   until step 2 is observable through the Kubernetes API.
+   make its owner references match the current `secretDeletionPolicy` with an
+   in-place, resource-version-guarded metadata patch: add the matching owner
+   reference for `Delete`, remove it for `Retain`. Never attach the owner
+   reference until step 2 is observable through the Kubernetes API.
 5. Use `certhub.torob.dev/material-etag` as `If-None-Match`.
 6. Call `POST /v1/sync/certificates/tls-material` with the Certhub Application token, CR criteria, and optional `If-None-Match`.
-7. If backend returns `204 No Content`, leave certificate material unchanged and update CR status/conditions as synced; owner-reference migration may still update metadata.
-8. If backend returns `200 OK`, create or update the target TLS Secret with the matching owner reference and `certhub.torob.dev/material-etag`, then update CR status.
+7. If backend returns `204 No Content`, leave certificate material unchanged and update CR status/conditions as synced; the owner-reference patch from step 4 may still update metadata.
+8. If backend returns `200 OK`, create or update the target TLS Secret with `certhub.torob.dev/material-etag` and, for `secretDeletionPolicy=Delete` only, the matching owner reference, then update CR status.
 9. If backend returns `404 certificate_not_found`, call `POST /v1/sync/certificates` with the same criteria, store `certificateId` when present for observability, and requeue.
 10. If backend returns `409 certificate_not_ready`, do not call `POST /v1/sync/certificates`; record the returned status metadata and requeue.
 11. If backend returns `409 certificate_issuance_failed`, set a failed condition with backend failure metadata and stop retrying until the backend Certificate is repaired through a User lifecycle action in Certhub or the CR criteria changes to a different certificate identity.
@@ -286,6 +301,43 @@ The minimum configurable resync interval is 30 seconds. Status-only watch
 updates do not trigger reconciliation, and an unchanged effective status is
 not written back to Kubernetes or re-emitted as an Event.
 
+Scheduling:
+
+- The operator keeps one queue entry per `CerthubCertificate`, keyed by
+  namespace and name, with its own due time and failure count. It sleeps until
+  the earliest due entry. Reconciling one Certificate never reconciles another
+  one, and a watch event in one namespace never moves the due time of a
+  Certificate in another namespace.
+- Before it reconciles a due entry, the operator reads that Certificate from
+  the Kubernetes API. A Certificate that no longer exists leaves the queue and
+  its condition metrics are cleared; it is never reconciled from a stale copy.
+- A watch `ADDED` or `MODIFIED` event with a changed reconcile input (spec,
+  generation, retry ID, finalizers, deletion timestamp) or a new UID makes only
+  that Certificate due now and resets its failure count. A `DELETED` event
+  removes it from the queue and clears its condition metrics.
+- After a successful reconcile, the next due time is the requeue delay of that
+  result: `Retry-After` or `error.retry_after_seconds` when the backend sent
+  one, `CERTHUB_RECONCILE_BACKOFF` while issuance is pending without one, and
+  the resync interval otherwise (including terminal failures).
+- Transient failures (backend transport or retryable errors without a
+  `Retry-After`, Secret read/write/delete failures, owner-reference and
+  finalizer patch failures, status write failures, and Kubernetes read
+  failures) requeue with per-Certificate exponential backoff:
+  `CERTHUB_RECONCILE_BACKOFF` doubled for each consecutive failure, capped at
+  32 times that value and at the resync interval (never below
+  `CERTHUB_RECONCILE_BACKOFF`). The next successful reconcile resets it.
+- Every resync interval the operator lists each watched namespace again as a
+  safety net for missed watch events. New or changed Certificates become due
+  now, Certificates that are gone leave the queue, and unchanged Certificates
+  keep their own due time, so the list itself does not call Certhub. A failed
+  list is retried with the same exponential backoff.
+- Watch streams do not use the whole-request HTTP timeout of normal Kubernetes
+  API calls; only connect, TLS handshake, and response-header timeouts apply.
+  Each watch sets a jittered `timeoutSeconds` between 300 and 599 so the API
+  server ends the stream cleanly, requests bookmarks, and resumes from the last
+  seen `resourceVersion`. After `410 Gone` the operator restarts the watch
+  without a `resourceVersion` and lists that namespace again.
+
 ## Failure Behavior
 
 If backend returns `domain_not_authorized`:
@@ -303,23 +355,31 @@ If backend returns transient errors:
 If TLS material cannot be fetched:
 
 - Set condition `SecretSynced=False`.
-- Requeue with backoff.
+- Requeue with exponential backoff.
 
 If Secret update fails:
 
 - Set condition `SecretSynced=False`.
-- Requeue with backoff.
+- Requeue with exponential backoff, so the private key is not fetched again
+  at a fixed short interval.
 
 Delete behavior:
 
 - The cleanup finalizer is required on every valid, non-deleting Certificate so
-  Kubernetes garbage collection cannot race either deletion policy.
-- Default `secretDeletionPolicy=Retain` verifies Secret ownership and removes
-  the matching Certificate owner reference with a resource-version-guarded
-  metadata patch. Only after that patch succeeds, the owned Secret is confirmed
-  to have no matching reference, or the target Secret is confirmed absent may
-  the operator release the finalizer. The retained Secret keeps the same UID
-  and data.
+  the operator runs the selected deletion policy before the Certificate is
+  removed.
+- A Retain Secret has no owner reference, so neither background nor foreground
+  deletion of the Certificate makes Kubernetes garbage collection delete it.
+  The finalizer alone does not protect an owner-referenced Secret from
+  foreground deletion, because the garbage collector deletes dependents while
+  the owner still exists.
+- Default `secretDeletionPolicy=Retain` verifies Secret ownership. If a
+  matching Certificate owner reference is still present (for example a Secret
+  written by an older operator, or a policy change not yet reconciled), the
+  operator removes it with a resource-version-guarded metadata patch. Only
+  after that patch succeeds, the owned Secret is confirmed to have no matching
+  reference, or the target Secret is confirmed absent may the operator release
+  the finalizer. The retained Secret keeps the same UID and data.
 - `secretDeletionPolicy=Delete` deletes only a Secret that the operator can
   prove it owns through the required labels,
   `certhub.torob.dev/owner-uid`, Secret type, and same-namespace/name checks. If
@@ -327,7 +387,12 @@ Delete behavior:
   CR. Deletion uses both UID and resource-version preconditions; only confirmed
   deletion or absence permits finalizer release.
 - A policy transition changes the cleanup action selected when deletion begins
-  but never permits finalizer release before that action completes.
+  but never permits finalizer release before that action completes. A live
+  reconcile after the transition adds (`Retain` to `Delete`) or removes
+  (`Delete` to `Retain`) the owner reference. If the Certificate is deleted
+  with foreground propagation after a change to `Retain` but before that
+  reconcile, Kubernetes can still delete the previously owner-referenced
+  Secret.
 - Owner-reference mutation, Secret deletion, ownership verification, or
   finalizer patch failures leave the finalizer in place and are retried.
 - The operator must never delete, clear, or rewrite an unowned Secret, a Secret with an owner-reference UID mismatch, or a Secret missing the expected management labels/annotations.
@@ -350,9 +415,11 @@ Logs and metrics must not include private keys, raw Application tokens, or full 
 The CRD must be applied explicitly before upgrading the operator because Helm
 does not update files in a chart's `crds/` directory. The updated CRD adds the
 optional integer `status.observedGeneration`; only after that schema is
-accepted may an operator that writes the field start. Upgrading from `v0.10.0`
-then adds owner references to existing managed Secrets in place, after each
-Certificate finalizer is persisted.
+accepted may an operator that writes the field start. After the upgrade, the
+operator adds owner references in place to existing managed Secrets whose
+Certificate uses `secretDeletionPolicy=Delete`, after each Certificate
+finalizer is persisted, and removes owner references from managed Secrets
+whose Certificate uses `Retain`.
 
 The chart packages, but does not install or own, an `argocd-cm` health
 customization. Platform administrators merge it into their existing Argo CD
@@ -364,10 +431,13 @@ configuration. Health is mapped as follows:
 - `Progressing`: status is absent or stale, the Certificate is pending,
   validating, or issuing, or either readiness condition is incomplete.
 
-The Secret's matching Kubernetes owner reference makes it a child of the
-Certificate in the Argo CD resource tree. Restrictive AppProjects must allow
-both `certs.torob.dev/CerthubCertificate` and core-group `Secret` resources in
-their `namespaceResourceWhitelist`.
+For `secretDeletionPolicy=Delete`, the Secret's matching Kubernetes owner
+reference makes it a child of the Certificate in the Argo CD resource tree. A
+`Retain` Secret has no owner reference, so it does not appear under the
+Certificate and an Argo CD prune with foreground propagation does not delete
+it. Restrictive AppProjects must allow both
+`certs.torob.dev/CerthubCertificate` and core-group `Secret` resources in their
+`namespaceResourceWhitelist`.
 
 ## RBAC
 
@@ -418,7 +488,7 @@ Required operator scenarios:
 - Operator rejects plain HTTP Certhub URLs by default, verifies TLS certificates, and does not forward Authorization headers across redirects to different hosts, ports, or schemes.
 - The operator never logs or emits Kubernetes Events containing raw Application tokens, Authorization headers, private keys, certificate PEM, backend material JSON, or Secret data.
 - Existing Secret is updated when backend certificate material changes.
-- Existing Secret data and certificate metadata are left unchanged when the backend returns `204 No Content` for a matching stored `material_etag`; owner-reference migration may still patch Kubernetes metadata.
+- Existing Secret data and certificate metadata are left unchanged when the backend returns `204 No Content` for a matching stored `material_etag`; the policy-driven owner-reference patch may still change Kubernetes metadata.
 - Existing Secret is preserved unchanged when authorization fails, backend is unavailable, material is not ready, issuance fails, or a Secret update write fails before commit.
 - Existing Secret is preserved unchanged when backend reports `certificate_no_active_version`; status records the terminal backend state and no stale Secret rewrite occurs.
 - Existing target Secrets that are not owned or explicitly managed by the matching `CerthubCertificate` are not overwritten.
@@ -426,13 +496,14 @@ Required operator scenarios:
 - Every valid live CR persists its finalizer before a managed Secret is created
   or gains the matching owner reference; finalizer patch failure prevents both
   operations.
-- Newly created managed Secrets have the matching owner reference. An owned
-  `v0.10.0` Secret without one gains it through an in-place metadata patch
-  without changing UID, data, type, labels, or annotations, including when the
-  backend returns `204 No Content`.
-- Deleting a CR with default `secretDeletionPolicy=Retain` removes the matching
-  owner reference before releasing the finalizer and preserves the same Secret
-  UID and data.
+- Newly created managed Secrets have the matching owner reference only for
+  `secretDeletionPolicy=Delete`; Retain Secrets have no owner reference. An
+  owned Secret gains or loses the reference to match the policy through an
+  in-place metadata patch without changing UID, data, type, labels, or
+  annotations, including when the backend returns `204 No Content`.
+- Deleting a CR with default `secretDeletionPolicy=Retain`, including with
+  foreground propagation, preserves the same Secret UID and data. A remaining
+  matching owner reference is removed before the finalizer is released.
 - Deleting a CR with `secretDeletionPolicy=Delete` deletes only an owned target
   Secret with UID and resource-version preconditions before releasing the
   finalizer.
@@ -442,7 +513,7 @@ Required operator scenarios:
   ordering and are idempotent.
 - CRD admission accepts unchanged `spec.secretName` values on resources that
   predate the transition rule and rejects attempts to change the target name,
-  so no previously owner-referenced Secret can be orphaned from cleanup.
+  so no previously managed Secret can be orphaned from cleanup.
 - Deleting a CR never calls Certhub certificate revoke/delete APIs.
 - Operator writes only the referenced same-namespace target Secret and never writes Secrets in namespaces not selected by its deployment mode and RBAC.
 - Operator refuses CRs whose `secretName` targets another namespace by path-like, URL-like, or annotation-driven indirection.

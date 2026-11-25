@@ -107,6 +107,8 @@ type Service struct {
 	http      *http.Client
 	retry     netretry.Policy
 	client    netretry.Doer
+	// loginLimiter is shared by transaction-scoped copies of the Service.
+	loginLimiter *LoginRateLimiter
 }
 
 type ServiceConfig struct {
@@ -194,6 +196,8 @@ func NewService(cfg ServiceConfig, opts ...ServiceOption) *Service {
 		tx:        cfg.Storage,
 		http:      cfg.HTTPClient,
 		retry:     cfg.RetryPolicy,
+
+		loginLimiter: NewLoginRateLimiter(LoginRateLimitConfig{}),
 	}
 	if s.http == nil {
 		s.http = http.DefaultClient
@@ -205,17 +209,48 @@ func NewService(cfg ServiceConfig, opts ...ServiceOption) *Service {
 	return s
 }
 
+// PasswordLogin applies the login rate limit before any lookup or Argon2id
+// work, and before the write transaction opens. Unknown and known emails use
+// the same keys and counters.
 func (s *Service) PasswordLogin(ctx context.Context, params PasswordLoginParams) (LoginResult, error) {
+	if err := s.ready(); err != nil {
+		return LoginResult{}, err
+	}
+	attempt, err := s.loginLimiter.begin(params.Email, params.Audit.SourceIP)
+	if err != nil {
+		// No User lookup was made, so the event does not name a User.
+		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "rate_limited"})
+		return LoginResult{}, err
+	}
 	var result LoginResult
-	err := s.withWriteTx(ctx, func(txsvc *Service) error {
-		var err error
-		result, err = txsvc.passwordLogin(ctx, params)
-		return err
+	var loginErr error
+	err = s.withWriteTx(ctx, func(txsvc *Service) error {
+		result, loginErr = txsvc.verifyPasswordLogin(ctx, params)
+		if isRejectedPasswordLogin(loginErr) {
+			// Commit, so that the user_login_failed audit event is stored.
+			// A rejected login makes no other writes.
+			return nil
+		}
+		return loginErr
 	})
+	if isRejectedPasswordLogin(loginErr) {
+		err = loginErr
+	}
+	attempt.finishWith(err, err == nil && result.Status == "completed")
 	return result, err
 }
 
-func (s *Service) passwordLogin(ctx context.Context, params PasswordLoginParams) (LoginResult, error) {
+// isRejectedPasswordLogin reports whether err is an expected password login
+// rejection. verifyPasswordLogin writes a user_login_failed audit event and
+// no other change before it returns one of these errors.
+func isRejectedPasswordLogin(err error) bool {
+	return errors.Is(err, ErrInvalidCredentials) ||
+		errors.Is(err, ErrInvalid2FACode) ||
+		errors.Is(err, ErrPassword2FARequired) ||
+		errors.Is(err, ErrPasswordAuthDisabled)
+}
+
+func (s *Service) verifyPasswordLogin(ctx context.Context, params PasswordLoginParams) (LoginResult, error) {
 	if err := s.ready(); err != nil {
 		return LoginResult{}, err
 	}
@@ -230,18 +265,25 @@ func (s *Service) passwordLogin(ctx context.Context, params PasswordLoginParams)
 		user, lookupErr = s.userRepo.GetForUpdate(ctx, user.ID)
 	}
 	if lookupErr != nil {
-		_ = verifyDummyPassword(params.Password)
+		if err := s.verifyDummyPasswordWithSlot(ctx, params.Password); err != nil {
+			return LoginResult{}, err
+		}
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", nil, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "invalid_credentials"})
 		return LoginResult{}, ErrInvalidCredentials
 	}
 	targetID := &user.ID
 	if user.Status != users.StatusActive || user.PasswordHash == nil {
-		_ = verifyDummyPassword(params.Password)
+		if err := s.verifyDummyPasswordWithSlot(ctx, params.Password); err != nil {
+			return LoginResult{}, err
+		}
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", targetID, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "invalid_credentials"})
 		return LoginResult{}, ErrInvalidCredentials
 	}
-	match, needsRehash, err := security.VerifyPassword(params.Password, *user.PasswordHash)
-	if err != nil || !match {
+	match, needsRehash, err := s.verifyPasswordWithSlot(ctx, params.Password, *user.PasswordHash)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if !match {
 		_ = s.auditSystemFailure(ctx, "user_login_failed", "user", targetID, params.Audit, map[string]any{"method": string(AuthMethodPassword), "reason": "invalid_credentials"})
 		return LoginResult{}, ErrInvalidCredentials
 	}
@@ -432,10 +474,15 @@ func (s *Service) ConfirmPassword2FA(ctx context.Context, current AuthenticatedU
 	})
 }
 
-func (s *Service) confirmPassword2FA(ctx context.Context, current AuthenticatedUser, code string, auditCtx AuditContext) error {
+func (s *Service) confirmPassword2FA(ctx context.Context, current AuthenticatedUser, code string, auditCtx AuditContext) (err error) {
 	if err := s.ready(); err != nil {
 		return err
 	}
+	attempt, err := s.loginLimiter.begin(current.User.Email, auditCtx.SourceIP)
+	if err != nil {
+		return err
+	}
+	defer func() { attempt.finishWith(err, false) }()
 	if current.User.PendingTOTPSecretEncrypted == nil {
 		return ErrNotFound
 	}
@@ -463,10 +510,15 @@ func (s *Service) DisablePassword2FA(ctx context.Context, current AuthenticatedU
 	})
 }
 
-func (s *Service) disablePassword2FA(ctx context.Context, current AuthenticatedUser, password, code string, auditCtx AuditContext) error {
+func (s *Service) disablePassword2FA(ctx context.Context, current AuthenticatedUser, password, code string, auditCtx AuditContext) (err error) {
 	if err := s.ready(); err != nil {
 		return err
 	}
+	attempt, err := s.loginLimiter.begin(current.User.Email, auditCtx.SourceIP)
+	if err != nil {
+		return err
+	}
+	defer func() { attempt.finishWith(err, false) }()
 	if s.cfg.Password.TwoFARequired && current.User.PasswordHash != nil {
 		return ErrPassword2FARequired
 	}
@@ -482,14 +534,17 @@ func (s *Service) disablePassword2FA(ctx context.Context, current AuthenticatedU
 			return ErrInvalid2FACode
 		}
 	} else if password != "" && current.User.PasswordHash != nil {
-		match, _, err := security.VerifyPassword(password, *current.User.PasswordHash)
-		if err != nil || !match {
+		match, _, err := s.verifyPasswordWithSlot(ctx, password, *current.User.PasswordHash)
+		if err != nil {
+			return err
+		}
+		if !match {
 			return ErrInvalidCredentials
 		}
 	} else {
 		return ErrInvalidCredentials
 	}
-	_, err := s.userRepo.Update(ctx, current.User.ID, users.UpdateUserParams{
+	_, err = s.userRepo.Update(ctx, current.User.ID, users.UpdateUserParams{
 		Password2FAEnabled:         storage.SetBool(false),
 		TOTPSecretEncrypted:        storage.ClearString(),
 		PendingTOTPSecretEncrypted: storage.ClearString(),
@@ -654,7 +709,7 @@ func (s *Service) ConfirmPassword2FALoginSetup(ctx context.Context, setupToken, 
 	return result, err
 }
 
-func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, code string, auditCtx AuditContext) (LoginResult, error) {
+func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, code string, auditCtx AuditContext) (result LoginResult, err error) {
 	if err := s.ready(); err != nil {
 		return LoginResult{}, err
 	}
@@ -673,6 +728,11 @@ func (s *Service) confirmPassword2FALoginSetup(ctx context.Context, setupToken, 
 	if err != nil || user.Status != users.StatusActive {
 		return LoginResult{}, ErrUserDisabled
 	}
+	attempt, err := s.loginLimiter.begin(user.Email, auditCtx.SourceIP)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer func() { attempt.finishWith(err, err == nil) }()
 	if user.PasswordHash == nil || user.Password2FAEnabled || user.TOTPSecretEncrypted != nil {
 		return LoginResult{}, ErrInvalidToken
 	}
@@ -1080,7 +1140,13 @@ func (s *Service) callbackReturnURL(stored *string) string {
 	if len(s.cfg.OIDC.AllowedReturnURLs) > 0 {
 		return s.cfg.OIDC.AllowedReturnURLs[0]
 	}
-	return s.cfg.OIDC.RedirectURL
+	// redirect_url is the provider-facing callback endpoint, not a frontend
+	// route. Fall back to the web UI root on the same origin.
+	redirect, err := url.Parse(s.cfg.OIDC.RedirectURL)
+	if err != nil || redirect.Scheme == "" || redirect.Host == "" {
+		return s.cfg.OIDC.RedirectURL
+	}
+	return (&url.URL{Scheme: redirect.Scheme, Host: redirect.Host, Path: "/"}).String()
 }
 
 func (s *Service) authorizationURL(authorizationEndpoint, state, nonce, codeVerifier string) string {
@@ -1134,6 +1200,13 @@ func (s *Service) refreshWithTx(ctx context.Context, params RotateAccessTokenPar
 			if errors.Is(err, ErrSessionExpired) {
 				return RefreshResult{}, ErrSessionExpired
 			}
+			return RefreshResult{}, ErrInvalidToken
+		}
+		if errors.Is(err, storage.ErrNoRows) {
+			// Unknown token: end the transaction first so the failure audit,
+			// written through the outer service, cannot be rolled back with it.
+			rollbackTx(ctx, tx)
+			_ = s.auditSystemFailure(ctx, "user_session_refreshed", "user_session", nil, auditCtx, map[string]any{"reason": "invalid_token"})
 			return RefreshResult{}, ErrInvalidToken
 		}
 		return RefreshResult{}, err

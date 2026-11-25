@@ -36,7 +36,6 @@ const (
 	defaultDNSChallengeTTL       = 120
 	defaultIssuanceMaxAttempts   = 5
 	defaultIssuanceRetryBackoff  = 30 * time.Second
-	maxActiveValidVersions       = 2
 	versionOverlapFailureMessage = "too many active valid certificate versions; revoke or wait for an older valid version before retrying renewal or key rotation"
 )
 
@@ -105,6 +104,9 @@ type CertificateIssuanceConfig struct {
 	PollInterval time.Duration
 	LogWriter    io.Writer
 	WorkerPrefix string
+	// InstanceID identifies the server process in every worker ID. When it is
+	// empty, a new random instance ID is generated.
+	InstanceID string
 }
 
 type CertificateIssuanceRunner struct {
@@ -147,12 +149,15 @@ func StartCertificateIssuanceWorkers(ctx context.Context, cfg CertificateIssuanc
 	if cfg.WorkerPrefix == "" {
 		cfg.WorkerPrefix = "cert-issuer"
 	}
+	ids, err := workerIDs(cfg.WorkerPrefix, cfg.InstanceID, cfg.Concurrency)
+	if err != nil {
+		return nil, fmt.Errorf("certificate issuance worker IDs: %w", err)
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	runner := &CertificateIssuanceRunner{cancel: cancel, done: make(chan struct{})}
 	var wg sync.WaitGroup
 	wg.Add(cfg.Concurrency)
-	for i := 0; i < cfg.Concurrency; i++ {
-		workerID := fmt.Sprintf("%s-%d", cfg.WorkerPrefix, i+1)
+	for _, workerID := range ids {
 		go func() {
 			defer wg.Done()
 			runCertificateIssuanceWorker(workerCtx, cfg.Service, cfg.PollInterval, cfg.LogWriter, workerID)
@@ -241,6 +246,7 @@ func (s *CertificateIssuanceService) CompleteNextIssuanceJob(ctx context.Context
 	}
 	_ = s.recordEvent(ctx, job, "certificate_issuance_succeeded", certificates.EventResultSuccess, nil)
 	if shouldEnqueueDNSCleanup(job.Reason) {
+		s.markJobChallengesCleanupPending(ctx, job)
 		if _, err := s.Certificates.EnsureIssuanceJob(ctx, certificates.EnsureIssuanceJobParams{
 			CertificateID: job.CertificateID,
 			Reason:        certificates.JobReasonDNSCleanup,
@@ -377,7 +383,7 @@ func (s *CertificateIssuanceService) ready() error {
 
 func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, workerID string, job certificates.IssuanceJob) error {
 	if job.Reason == certificates.JobReasonDNSCleanup {
-		return s.cleanupPendingChallenges(ctx)
+		return s.cleanupFinishedJobChallenges(ctx, job.CertificateID)
 	}
 	if job.Reason == certificates.JobReasonRevocationRetry {
 		return s.completeRevocationRetry(ctx, job)
@@ -400,6 +406,11 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	}
 	if version.Status != certificates.VersionStatusIssuing {
 		return issuanceFailure{code: "certificate_version_not_issuing", err: fmt.Errorf("certificate version status is %s", version.Status)}
+	}
+	// Check the overlap limit before any ACME order work. Otherwise the CA
+	// issues a certificate that the material store must then discard.
+	if err := s.checkActiveValidVersionLimit(ctx, version, "issuance_precheck"); err != nil {
+		return err
 	}
 	issuer, err := s.Issuers.Get(ctx, cert.IssuerID)
 	if err != nil {
@@ -483,12 +494,8 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return err
 	}
-	activeValidCount, err := s.activeValidVersionCount(ctx, version.CertificateID, version.ID)
-	if err != nil {
-		return issuanceFailure{code: "certificate_version_overlap_check_failed", err: err, metadata: map[string]any{"phase": "certificate_material_store"}}
-	}
-	if activeValidCount >= maxActiveValidVersions {
-		return certificateVersionOverlapFailure(activeValidCount)
+	if err := s.checkActiveValidVersionLimit(ctx, version, "certificate_material_store"); err != nil {
+		return err
 	}
 	_, err = s.Certificates.StoreMaterial(ctx, certificates.StoreMaterialParams{
 		JobID:                  job.ID,
@@ -509,7 +516,7 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	})
 	if err != nil {
 		if isPostgresP0001(err) {
-			return certificateVersionOverlapFailure(activeValidCount)
+			return certificateVersionOverlapFailure(certificates.MaxActiveValidVersions, "certificate_material_store")
 		}
 		return issuanceFailure{code: "certificate_material_store_failed", err: err}
 	}
@@ -520,6 +527,17 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 		"material_etag":   material.etag,
 		"certificate_url": bundle.CertificateURL,
 	})
+	return nil
+}
+
+func (s *CertificateIssuanceService) checkActiveValidVersionLimit(ctx context.Context, version certificates.CertificateVersion, phase string) error {
+	activeValidCount, err := s.activeValidVersionCount(ctx, version.CertificateID, version.ID)
+	if err != nil {
+		return issuanceFailure{code: "certificate_version_overlap_check_failed", err: err, metadata: map[string]any{"phase": phase}}
+	}
+	if activeValidCount >= certificates.MaxActiveValidVersions {
+		return certificateVersionOverlapFailure(activeValidCount, phase)
+	}
 	return nil
 }
 
@@ -542,14 +560,14 @@ func (s *CertificateIssuanceService) activeValidVersionCount(ctx context.Context
 	return count, nil
 }
 
-func certificateVersionOverlapFailure(activeValidCount int) issuanceFailure {
+func certificateVersionOverlapFailure(activeValidCount int, phase string) issuanceFailure {
 	return issuanceFailure{
 		code: "certificate_version_overlap",
 		err:  errors.New(versionOverlapFailureMessage),
 		metadata: map[string]any{
-			"phase":                      "certificate_material_store",
+			"phase":                      phase,
 			"active_valid_version_count": activeValidCount,
-			"max_active_valid_versions":  maxActiveValidVersions,
+			"max_active_valid_versions":  certificates.MaxActiveValidVersions,
 		},
 	}
 }
@@ -774,13 +792,6 @@ func (s *CertificateIssuanceService) presentAndValidate(ctx context.Context, par
 			return issuanceFailure{code: "dns_validation_failed", err: err, redactions: []string{challenge.authz.DNSChallenge.Token, challenge.op.TXTValue}}
 		}
 		_ = s.recordVersionEvent(ctx, job, version.ID, "acme_challenge_accepted", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
-		if _, err := s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{
-			ID:     challenge.record.ID,
-			Status: certificates.DNSChallengeStatusCleanupPending,
-		}); err != nil {
-			return issuanceFailure{code: "dns_challenge_record_update_failed", err: err}
-		}
-		_ = s.recordVersionEvent(ctx, job, version.ID, "dns_challenge_cleanup_pending", certificates.EventResultSuccess, dnsChallengeEventMetadata(challenge))
 	}
 	return nil
 }
@@ -911,11 +922,52 @@ func (s *CertificateIssuanceService) cleanupRecordedChallenges(ctx context.Conte
 	return s.cleanupChallenges(ctx, records)
 }
 
-func (s *CertificateIssuanceService) cleanupPendingChallenges(ctx context.Context) error {
+// markJobChallengesCleanupPending marks the TXT records of a succeeded job as
+// cleanup_pending. Records stay presented while the job (or a retry of it) is
+// active, because the CA can still look them up until the order is finalized.
+func (s *CertificateIssuanceService) markJobChallengesCleanupPending(ctx context.Context, job certificates.IssuanceJob) {
+	records, err := s.Certificates.ListDNSChallenges(ctx, certificates.ListDNSChallengesParams{IssuanceJobID: &job.ID, ListOptions: storage.ListOptions{Limit: storage.MaxListLimit}})
+	if err != nil {
+		return
+	}
+	for _, record := range records {
+		if record.Status != certificates.DNSChallengeStatusPresented && record.Status != certificates.DNSChallengeStatusValidated {
+			continue
+		}
+		if _, err := s.Certificates.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{
+			ID:     record.ID,
+			Status: certificates.DNSChallengeStatusCleanupPending,
+		}); err != nil {
+			continue
+		}
+		_ = s.recordVersionEvent(ctx, job, record.CertificateVersionID, "dns_challenge_cleanup_pending", certificates.EventResultSuccess, map[string]any{
+			"authorization_identifier": record.AuthorizationIdentifier,
+			"record_name":              record.RecordName,
+			"dns_provider_id":          record.DNSProviderID,
+			"dns_provider_zone_id":     record.DNSProviderZoneID,
+			"dns_challenge_record_id":  record.ID,
+		})
+	}
+}
+
+// cleanupFinishedJobChallenges removes the TXT records of one certificate whose
+// issuance job is no longer pending or running. Records of active jobs, including
+// jobs that wait for a retry, are never touched.
+func (s *CertificateIssuanceService) cleanupFinishedJobChallenges(ctx context.Context, certificateID string) error {
 	var cleanupErr error
-	for _, status := range []certificates.DNSChallengeStatus{certificates.DNSChallengeStatusCleanupPending, certificates.DNSChallengeStatusCleanupFailed} {
+	for _, status := range []certificates.DNSChallengeStatus{
+		certificates.DNSChallengeStatusPresented,
+		certificates.DNSChallengeStatusValidated,
+		certificates.DNSChallengeStatusCleanupPending,
+		certificates.DNSChallengeStatusCleanupFailed,
+	} {
 		status := status
-		records, err := s.Certificates.ListDNSChallenges(ctx, certificates.ListDNSChallengesParams{Status: &status, ListOptions: storage.ListOptions{Limit: storage.MaxListLimit}})
+		records, err := s.Certificates.ListDNSChallenges(ctx, certificates.ListDNSChallengesParams{
+			CertificateID:             &certificateID,
+			Status:                    &status,
+			ExcludeActiveIssuanceJobs: true,
+			ListOptions:               storage.ListOptions{Limit: storage.MaxListLimit},
+		})
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, issuanceFailure{code: "dns_challenge_record_read_failed", err: err})
 			continue

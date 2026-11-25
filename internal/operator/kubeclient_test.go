@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -452,6 +454,168 @@ func TestRESTKubeClientStatusFinalizersListAndWatch(t *testing.T) {
 	}
 	if !sawStatus || !sawFinalizers {
 		t.Fatalf("status/finalizer calls missing: status=%v finalizers=%v", sawStatus, sawFinalizers)
+	}
+}
+
+// A watch stream must outlive the whole-request timeout of normal API calls.
+// The server sends the second event after that timeout on the same stream.
+func TestRESTKubeClientWatchOutlivesRequestTimeout(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("watch") != "true" {
+			t.Errorf("unexpected Kubernetes request: %s %s", r.Method, r.URL.String())
+			return
+		}
+		connections.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"first","resourceVersion":"10"}}}` + "\n"))
+		flusher.Flush()
+		select {
+		case <-time.After(600 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`{"type":"MODIFIED","object":{"metadata":{"name":"second","resourceVersion":"11"}}}` + "\n"))
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	// Cancel before server.Close, which waits for the open watch handler.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := testRESTKubeClient(server.URL)
+	client.httpClient = &http.Client{Timeout: 200 * time.Millisecond}
+	watch, err := client.WatchCertificateChanges(ctx, "ns")
+	if err != nil {
+		t.Fatalf("watch failed: %v", err)
+	}
+	for _, want := range []string{"first", "second"} {
+		select {
+		case event := <-watch:
+			if event.Certificate == nil || event.Certificate.Metadata.Name != want {
+				t.Fatalf("watch event = %#v; want %s", event, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("watch event %q not received; the stream was cut by the request timeout (connections=%d)", want, connections.Load())
+		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("watch connections = %d; want one stream that outlives the 200ms request timeout", got)
+	}
+}
+
+// Each watch asks the API server for a bounded stream, resumes from the last
+// seen resourceVersion, and restarts with a re-list signal after 410 Gone.
+func TestRESTKubeClientWatchResumesAndRelistsAfterGone(t *testing.T) {
+	type watchRequest struct {
+		timeoutSeconds  string
+		bookmarks       string
+		resourceVersion string
+		hasVersion      bool
+	}
+	requests := make(chan watchRequest, 8)
+	var connections atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("watch") != "true" {
+			t.Errorf("unexpected Kubernetes request: %s %s", r.Method, r.URL.String())
+			return
+		}
+		_, hasVersion := query["resourceVersion"]
+		requests <- watchRequest{
+			timeoutSeconds:  query.Get("timeoutSeconds"),
+			bookmarks:       query.Get("allowWatchBookmarks"),
+			resourceVersion: query.Get("resourceVersion"),
+			hasVersion:      hasVersion,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		switch connections.Add(1) {
+		case 1:
+			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"gateway","resourceVersion":"5"}}}` + "\n"))
+			_, _ = w.Write([]byte(`{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"7"}}}` + "\n"))
+			flusher.Flush()
+			// End the stream cleanly, as the API server does at timeoutSeconds.
+			time.Sleep(watchMinHealthyDuration + 100*time.Millisecond)
+		case 2:
+			_, _ = w.Write([]byte(`{"type":"ERROR","object":{"kind":"Status","code":410,"reason":"Expired"}}` + "\n"))
+			flusher.Flush()
+		default:
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watch, err := testRESTKubeClient(server.URL).WatchCertificateChanges(ctx, "ns")
+	if err != nil {
+		t.Fatalf("watch failed: %v", err)
+	}
+	for _, want := range []string{"ADDED", WatchEventRelist} {
+		select {
+		case event := <-watch:
+			if event.Type != want {
+				t.Fatalf("watch event = %#v; want %s", event, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("watch event %s not received", want)
+		}
+	}
+	var got []watchRequest
+	for len(got) < 3 {
+		select {
+		case request := <-requests:
+			got = append(got, request)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("watch requests = %#v; want 3", got)
+		}
+	}
+	for i, request := range got {
+		seconds, err := strconv.Atoi(request.timeoutSeconds)
+		if err != nil || seconds < int(watchMinTimeout/time.Second) || seconds >= int((watchMinTimeout+watchTimeoutJitter)/time.Second) {
+			t.Fatalf("watch %d timeoutSeconds = %q; want jittered 300..599", i+1, request.timeoutSeconds)
+		}
+		if request.bookmarks != "true" {
+			t.Fatalf("watch %d allowWatchBookmarks = %q", i+1, request.bookmarks)
+		}
+	}
+	if got[0].hasVersion {
+		t.Fatalf("first watch resourceVersion = %q; want none", got[0].resourceVersion)
+	}
+	if got[1].resourceVersion != "7" {
+		t.Fatalf("resumed watch resourceVersion = %q; want the bookmark version 7", got[1].resourceVersion)
+	}
+	if got[2].hasVersion {
+		t.Fatalf("watch after 410 Gone resourceVersion = %q; want none", got[2].resourceVersion)
+	}
+}
+
+func TestRESTKubeClientGetCertificate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requireKubeAuth(t, r)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/certs.torob.dev/v1alpha1/namespaces/ns/certhubcertificates/gateway":
+			writeKubeJSON(t, w, *testCertificate())
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/certs.torob.dev/v1alpha1/namespaces/ns/certhubcertificates/missing":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected Kubernetes request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client := testRESTKubeClient(server.URL)
+
+	cert, err := client.GetCertificate(context.Background(), "ns", "gateway")
+	if err != nil || cert.Metadata.UID != "uid-1" {
+		t.Fatalf("GetCertificate = %#v, %v", cert, err)
+	}
+	if _, err := client.GetCertificate(context.Background(), "ns", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetCertificate missing error = %v; want ErrNotFound", err)
 	}
 }
 

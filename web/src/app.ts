@@ -25,6 +25,8 @@ import QRCode from "qrcode";
 import { createElement, useEffect, useMemo, useState } from "react";
 import type { components } from "./api-types";
 import { apiRequestURL } from "./api-url";
+import { auditTargetTypeOptions } from "./audit-targets";
+import { unauthorizedDecision } from "./unauthorized";
 
 type ErrorBody = components["schemas"]["ErrorEnvelope"];
 type Identity = components["schemas"]["UserIdentity"] | components["schemas"]["ApplicationIdentity"];
@@ -374,18 +376,33 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   } catch (err) {
     return clientError(`network error: ${(err as Error).message}`, true);
   }
-  if (response.status === 401 && canRefresh && session && !isAccessExpired(session) && !isSessionExpired(session)) {
+  const noBody = response.status === 204 || response.status === 304;
+  const text = noBody ? "" : await response.text();
+  let parsed: any;
+  let parseError: unknown;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch (err) {
+    parseError = err;
+  }
+  const unauthorized = unauthorizedDecision({
+    status: response.status,
+    canRefresh,
+    sessionUsable: Boolean(session && !isAccessExpired(session) && !isSessionExpired(session)),
+    hasAccessToken: Boolean(session?.accessToken),
+    body: parsed
+  });
+  if (unauthorized.refresh && session) {
     const refreshed = await refreshSession(session);
     if (refreshed) return api<T>(path, session, init, false);
   }
   const requestHeader = response.headers.get("X-Request-ID") || rid;
   const retryAfter = Number(response.headers.get("Retry-After") || "0") || undefined;
-  if (response.status === 401 && session?.accessToken) clearSession(true);
-  if (response.status === 204 || response.status === 304) {
+  if (unauthorized.clearSession) clearSession(true);
+  if (noBody) {
     return { status: response.status, requestID: requestHeader, retryAfter };
   }
-  const text = await response.text();
-  const parsed = text ? JSON.parse(text) : undefined;
+  if (parseError) throw parseError;
   if (!response.ok) return { status: response.status, requestID: requestHeader, retryAfter, error: parsed?.error || parsed };
   return { status: response.status, requestID: requestHeader, retryAfter, data: parsed };
 }
@@ -2724,17 +2741,7 @@ function keyTypeOptions(): FilterOption[] {
 }
 
 function targetTypeOptions(): FilterOption[] {
-  return [
-    ["user", "User"],
-    ["application", "Application"],
-    ["certificate", "Certificate"],
-    ["issuer", "Issuer"],
-    ["dns_provider", "DNS provider"],
-    ["domain_scope", "Domain scope"],
-    ["application_token", "Application token"],
-    ["application_user_grant", "Application user grant"],
-    ["session", "Session"]
-  ];
+  return auditTargetTypeOptions.map(([value, label]) => [value, label]);
 }
 
 function auditActionOptions(): FilterOption[] {

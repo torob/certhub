@@ -8,6 +8,9 @@ image:
 
 service:
   type: ClusterIP
+  # Port that the Service exposes. The Service targets the named container
+  # port "http". To change the port the server listens on, change
+  # config.yaml http.bind_addr; the container port and probes follow it.
   port: 8080
 
 configPath: /etc/certhub/config.yaml

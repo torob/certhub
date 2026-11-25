@@ -59,8 +59,13 @@ func TestPresentAndValidatePresentsAllProvidersBeforeAccepting(t *testing.T) {
 	assertEventBefore(t, events, "present:arvancloud:_acme-challenge.api.arvan.example.net:txt-arvan", "accept:token-cf")
 	assertEventBefore(t, events, "present:cloudflare:_acme-challenge.api.cf.example.com:txt-cf", "accept:token-arvan")
 	assertEventBefore(t, events, "present:arvancloud:_acme-challenge.api.arvan.example.net:txt-arvan", "accept:token-arvan")
-	if len(fixture.store.cleanupMarks) != 2 {
+	if len(fixture.store.cleanupMarks) != 0 {
 		t.Fatalf("cleanup marks = %#v", fixture.store.cleanupMarks)
+	}
+	for _, record := range fixture.store.records {
+		if record.Status != certificates.DNSChallengeStatusPresented {
+			t.Fatalf("accepted challenge status = %s", record.Status)
+		}
 	}
 }
 
@@ -148,7 +153,7 @@ func TestPresentAndValidateRePresentsCleanedChallengeOnRetry(t *testing.T) {
 	}
 
 	assertEventBefore(t, fixture.recorder.events, "present:cloudflare:_acme-challenge.retry.cf.example.com:txt-retry", "accept:token-retry")
-	if fixture.store.records[0].Status != certificates.DNSChallengeStatusCleanupPending {
+	if fixture.store.records[0].Status != certificates.DNSChallengeStatusPresented {
 		t.Fatalf("record status = %s", fixture.store.records[0].Status)
 	}
 }
@@ -425,10 +430,14 @@ func TestIssuanceFailsBeforeStoreMaterialWhenActiveVersionLimitReached(t *testin
 	fixture := newIssuanceWorkerFixture(t)
 	configureSuccessfulIssuance(t, &fixture)
 	notAfter := time.Now().UTC().Add(time.Hour)
-	fixture.store.listVersions = []certificates.CertificateVersion{
-		{ID: "52345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
-		{ID: "62345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
-		fixture.version,
+	// The limit is reached only while the order is finalized, so the
+	// pre-order check passes and the guard before material storage must fail.
+	fixture.order.onFinalize = func() {
+		fixture.store.listVersions = []certificates.CertificateVersion{
+			{ID: "52345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+			{ID: "62345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+			fixture.version,
+		}
 	}
 
 	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
@@ -441,10 +450,48 @@ func TestIssuanceFailsBeforeStoreMaterialWhenActiveVersionLimitReached(t *testin
 	if job.Status != certificates.JobStatusFailed {
 		t.Fatalf("job status = %s", job.Status)
 	}
+	if fixture.order.finalizeCalls != 1 {
+		t.Fatalf("finalize calls = %d", fixture.order.finalizeCalls)
+	}
 	if len(fixture.store.storeMaterialCalls) != 0 {
 		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
 	}
-	assertVersionOverlapFailure(t, fixture)
+	assertVersionOverlapFailure(t, fixture, "certificate_material_store")
+}
+
+func TestRenewalWithActiveVersionLimitReachedFailsBeforeACMEOrder(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	fixture.store.claimJob.Reason = certificates.JobReasonRenewal
+	fixture.version.Reason = certificates.IssuanceReasonRenewal
+	fixture.store.version = fixture.version
+	notAfter := time.Now().UTC().Add(10 * 24 * time.Hour)
+	fixture.store.listVersions = []certificates.CertificateVersion{
+		fixture.version,
+		{ID: "52345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+		{ID: "62345678-1234-4234-9234-123456789abc", CertificateID: fixture.job.CertificateID, Status: certificates.VersionStatusValid, NotAfter: &notAfter},
+	}
+
+	job, processed, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1")
+	if err == nil {
+		t.Fatal("expected issuance failure")
+	}
+	if !processed {
+		t.Fatal("expected job to be processed")
+	}
+	if job.Status != certificates.JobStatusFailed {
+		t.Fatalf("job status = %s", job.Status)
+	}
+	if fixture.order.finalizeCalls != 0 {
+		t.Fatalf("finalize calls = %d; the CA issued a certificate that the overlap limit discards", fixture.order.finalizeCalls)
+	}
+	if len(fixture.recorder.events) != 0 {
+		t.Fatalf("ACME/DNS work started although the overlap limit is reached: %#v", fixture.recorder.events)
+	}
+	if len(fixture.store.storeMaterialCalls) != 0 {
+		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
+	}
+	assertVersionOverlapFailure(t, fixture, "issuance_precheck")
 }
 
 func TestIssuanceClassifiesMaterialStoreP0001AsVersionOverlap(t *testing.T) {
@@ -465,7 +512,7 @@ func TestIssuanceClassifiesMaterialStoreP0001AsVersionOverlap(t *testing.T) {
 	if len(fixture.store.storeMaterialCalls) != 1 {
 		t.Fatalf("store material calls = %#v", fixture.store.storeMaterialCalls)
 	}
-	assertVersionOverlapFailure(t, fixture)
+	assertVersionOverlapFailure(t, fixture, "certificate_material_store")
 }
 
 func TestRenewalGeneratesFreshPrivateKeyForNewVersion(t *testing.T) {
@@ -569,6 +616,156 @@ func TestDNSCleanupJobFailureDoesNotChangeReadyCertificate(t *testing.T) {
 	}
 	if len(fixture.store.failJobCalls) != 1 || fixture.store.failJobCalls[0].FailureCode != "dns_challenge_cleanup_failed" {
 		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
+	}
+}
+
+func TestDNSCleanupJobDoesNotCleanAcceptedChallengeOfOtherCertificate(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	// Job Y (fixture.job) is running and has accepted its challenge; the CA has not validated it yet.
+	fixture.store.jobStatuses = map[string]certificates.JobStatus{fixture.job.ID: certificates.JobStatusRunning}
+	acceptChallengeForRunningJob(t, &fixture, "y.cf.example.com", "txt-y")
+
+	// Certificate X finished issuance and its dns_cleanup job runs on another worker.
+	fixture.store.claimJob = certificates.IssuanceJob{
+		ID:            "82345678-1234-4234-9234-123456789abc",
+		CertificateID: "92345678-1234-4234-9234-123456789abc",
+		Reason:        certificates.JobReasonDNSCleanup,
+		Attempt:       1,
+	}
+	if _, _, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNoChallengeCleanup(t, fixture.recorder.events)
+	if fixture.store.records[0].Status == certificates.DNSChallengeStatusCleaned {
+		t.Fatalf("running job challenge status = %s", fixture.store.records[0].Status)
+	}
+}
+
+func TestDNSCleanupJobDoesNotCleanAcceptedChallengeOfActiveJobForSameCertificate(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	// A renewal job for the certificate is running and has accepted its challenge.
+	fixture.store.jobStatuses = map[string]certificates.JobStatus{fixture.job.ID: certificates.JobStatusRunning}
+	acceptChallengeForRunningJob(t, &fixture, "api.cf.example.com", "txt-renewal")
+
+	// A dns_cleanup job queued by an earlier issuance of the same certificate runs now.
+	fixture.store.claimJob = certificates.IssuanceJob{
+		ID:            "82345678-1234-4234-9234-123456789abc",
+		CertificateID: fixture.job.CertificateID,
+		Reason:        certificates.JobReasonDNSCleanup,
+		Attempt:       1,
+	}
+	if _, _, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNoChallengeCleanup(t, fixture.recorder.events)
+	if fixture.store.records[0].Status == certificates.DNSChallengeStatusCleaned {
+		t.Fatalf("running job challenge status = %s", fixture.store.records[0].Status)
+	}
+}
+
+func TestDNSCleanupJobDoesNotCleanChallengeOfJobWaitingForRetry(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	encrypted, err := fixture.service.KeySet.SealDatabaseValue([]byte("txt-retry"), dnsChallengeTXTValueAAD("record-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The job failed with a retryable error, its cleanup failed, and it waits to present the record again.
+	fixture.store.jobStatuses = map[string]certificates.JobStatus{fixture.job.ID: certificates.JobStatusPending}
+	failureCode := "dns_challenge_cleanup_failed"
+	fixture.store.records = []certificates.DNSChallengeRecord{{
+		ID:                      "record-retry",
+		IssuanceJobID:           fixture.job.ID,
+		CertificateID:           fixture.job.CertificateID,
+		CertificateVersionID:    fixture.version.ID,
+		DNSProviderID:           "provider-cloudflare",
+		DNSProviderZoneID:       "zone-cloudflare",
+		AuthorizationIdentifier: "api.cf.example.com",
+		RecordName:              "_acme-challenge.api.cf.example.com",
+		TXTValueEncrypted:       encrypted,
+		Status:                  certificates.DNSChallengeStatusCleanupFailed,
+		FailureCode:             &failureCode,
+	}}
+	fixture.store.claimJob = certificates.IssuanceJob{
+		ID:            "82345678-1234-4234-9234-123456789abc",
+		CertificateID: fixture.job.CertificateID,
+		Reason:        certificates.JobReasonDNSCleanup,
+		Attempt:       1,
+	}
+	if _, _, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNoChallengeCleanup(t, fixture.recorder.events)
+	if fixture.store.records[0].Status != certificates.DNSChallengeStatusCleanupFailed {
+		t.Fatalf("retrying job challenge status = %s", fixture.store.records[0].Status)
+	}
+}
+
+func TestDNSCleanupJobCleansChallengesOfSucceededJob(t *testing.T) {
+	fixture := newIssuanceWorkerFixture(t)
+	configureSuccessfulIssuance(t, &fixture)
+	if _, _, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.records) != 1 || fixture.store.records[0].Status != certificates.DNSChallengeStatusCleanupPending {
+		t.Fatalf("records after success = %#v", fixture.store.records)
+	}
+	if len(fixture.store.ensureJobCalls) != 1 || fixture.store.ensureJobCalls[0].Reason != certificates.JobReasonDNSCleanup {
+		t.Fatalf("ensure cleanup calls = %#v", fixture.store.ensureJobCalls)
+	}
+	fixture.store.jobStatuses = map[string]certificates.JobStatus{fixture.job.ID: certificates.JobStatusSucceeded}
+	fixture.store.claimJob = certificates.IssuanceJob{
+		ID:            "82345678-1234-4234-9234-123456789abc",
+		CertificateID: fixture.job.CertificateID,
+		Reason:        certificates.JobReasonDNSCleanup,
+		Attempt:       1,
+	}
+
+	job, _, err := fixture.service.CompleteNextIssuanceJob(context.Background(), "worker-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != certificates.JobStatusSucceeded {
+		t.Fatalf("cleanup job status = %s", job.Status)
+	}
+	assertEventBefore(t, fixture.recorder.events, "accept:token-cf", "cleanup:cloudflare:_acme-challenge.api.cf.example.com:txt-cf")
+	if fixture.store.records[0].Status != certificates.DNSChallengeStatusCleaned {
+		t.Fatalf("challenge status = %s", fixture.store.records[0].Status)
+	}
+}
+
+func acceptChallengeForRunningJob(t *testing.T, fixture *issuanceWorkerFixture, identifier, txtValue string) {
+	t.Helper()
+	fixture.order.authz = map[string]acmedomain.Authorization{
+		"authz-running": {
+			URL:        "authz-running",
+			Status:     "pending",
+			Identifier: identifier,
+			DNSChallenge: &acmedomain.DNSChallenge{
+				URL:      "challenge-running",
+				Token:    "token-running",
+				TXTValue: txtValue,
+			},
+		},
+	}
+	order := acmedomain.Order{AuthorizationURLs: []string{"authz-running"}}
+	if err := fixture.service.presentAndValidate(context.Background(), acmedomain.OrderClientParams{}, fixture.job, fixture.version, order); err != nil {
+		t.Fatal(err)
+	}
+	assertEventBefore(t, fixture.recorder.events, "present:cloudflare:_acme-challenge."+identifier+":"+txtValue, "accept:token-running")
+	if len(fixture.store.records) != 1 {
+		t.Fatalf("records = %#v", fixture.store.records)
+	}
+}
+
+func assertNoChallengeCleanup(t *testing.T, events []string) {
+	t.Helper()
+	for _, event := range events {
+		if strings.HasPrefix(event, "cleanup:") {
+			t.Fatalf("dns cleanup removed a challenge of an active job: %q in %#v", event, events)
+		}
 	}
 }
 
@@ -756,6 +953,7 @@ type fakeOrderManager struct {
 	fetchCertificateChain [][]byte
 	fetchCertificateCalls int
 	selfSignBundle        bool
+	onFinalize            func()
 	recorder              *challengeRecorder
 }
 
@@ -802,6 +1000,9 @@ func (m *fakeOrderManager) AcceptChallenge(_ context.Context, params acmedomain.
 
 func (m *fakeOrderManager) FinalizeOrder(_ context.Context, params acmedomain.FinalizeOrderParams) (acmedomain.CertificateBundle, error) {
 	m.finalizeCalls++
+	if m.onFinalize != nil {
+		m.onFinalize()
+	}
 	if m.recorder != nil {
 		m.recorder.events = append(m.recorder.events, "finalize:"+params.FinalizeURL)
 	}
@@ -941,6 +1142,7 @@ type fakeIssuanceStore struct {
 	version            certificates.CertificateVersion
 	listVersions       []certificates.CertificateVersion
 	records            []certificates.DNSChallengeRecord
+	jobStatuses        map[string]certificates.JobStatus
 	cleanupMarks       []string
 	storeMaterialCalls []certificates.StoreMaterialParams
 	storeMaterialErr   error
@@ -1151,12 +1353,26 @@ func (s *fakeIssuanceStore) ListDNSChallenges(_ context.Context, params certific
 		if params.IssuanceJobID != nil && record.IssuanceJobID != *params.IssuanceJobID {
 			continue
 		}
+		if params.CertificateID != nil && record.CertificateID != *params.CertificateID {
+			continue
+		}
+		if params.ExcludeActiveIssuanceJobs && s.issuanceJobActive(record.IssuanceJobID) {
+			continue
+		}
 		if params.Status != nil && record.Status != *params.Status {
 			continue
 		}
 		out = append(out, record)
 	}
 	return out, nil
+}
+
+func (s *fakeIssuanceStore) issuanceJobActive(jobID string) bool {
+	status, ok := s.jobStatuses[jobID]
+	if s.claimJob.ID == jobID {
+		status, ok = s.claimJob.Status, true
+	}
+	return ok && (status == certificates.JobStatusPending || status == certificates.JobStatusRunning)
 }
 
 func (s *fakeIssuanceStore) MarkACMERevocationSucceeded(context.Context, certificates.MarkACMERevocationParams) (certificates.CertificateVersion, error) {
@@ -1244,7 +1460,7 @@ func recordedEventMetadata(t *testing.T, events []certificates.RecordEventParams
 	return nil
 }
 
-func assertVersionOverlapFailure(t *testing.T, fixture issuanceWorkerFixture) {
+func assertVersionOverlapFailure(t *testing.T, fixture issuanceWorkerFixture, phase string) {
 	t.Helper()
 	if len(fixture.store.failJobCalls) != 1 {
 		t.Fatalf("fail job calls = %#v", fixture.store.failJobCalls)
@@ -1270,10 +1486,10 @@ func assertVersionOverlapFailure(t *testing.T, fixture issuanceWorkerFixture) {
 		if metadata["failure_code"] != "certificate_version_overlap" {
 			t.Fatalf("metadata failure_code = %#v", metadata["failure_code"])
 		}
-		if metadata["phase"] != "certificate_material_store" {
+		if metadata["phase"] != phase {
 			t.Fatalf("metadata phase = %#v", metadata["phase"])
 		}
-		if metadata["max_active_valid_versions"] != float64(maxActiveValidVersions) {
+		if metadata["max_active_valid_versions"] != float64(certificates.MaxActiveValidVersions) {
 			t.Fatalf("metadata max_active_valid_versions = %#v", metadata["max_active_valid_versions"])
 		}
 		if strings.Contains(string(event.Metadata), "SQLSTATE P0001") {

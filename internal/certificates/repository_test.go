@@ -240,6 +240,36 @@ func TestRecordDNSChallengeNormalizesAndUsesExactValueConflict(t *testing.T) {
 	}
 }
 
+func TestListDNSChallengesQueryExcludesActiveIssuanceJobs(t *testing.T) {
+	certificateID := "32345678-1234-4234-9234-123456789abc"
+	query, args, err := NewRepository(&fakeDB{}).listDNSChallengesQuery(ListDNSChallengesParams{
+		CertificateID:             &certificateID,
+		ExcludeActiveIssuanceJobs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"certificate_id = $1",
+		"not exists (select 1 from certificate_issuance_jobs j where j.id = dns_challenge_records.issuance_job_id and j.status in ('pending', 'running'))",
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("dns challenge list query missing %q: %s", required, query)
+		}
+	}
+	if len(args) != 3 || args[0] != certificateID {
+		t.Fatalf("dns challenge list args = %#v", args)
+	}
+
+	query, _, err = NewRepository(&fakeDB{}).listDNSChallengesQuery(ListDNSChallengesParams{CertificateID: &certificateID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(query, "certificate_issuance_jobs") {
+		t.Fatalf("dns challenge list query filters jobs without the flag: %s", query)
+	}
+}
+
 func testTime() time.Time {
 	return time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 }

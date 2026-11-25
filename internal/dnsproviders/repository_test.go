@@ -128,7 +128,7 @@ func TestCompleteRefreshJobSuccessBuildsAtomicReplaceAndRejectsDuplicates(t *tes
 	if job.Status != RefreshJobStatusSucceeded {
 		t.Fatalf("job = %#v", job)
 	}
-	for _, required := range []string{"with job_claim", "locked_by = $5", "locked_until > now()", "conflict as", "delete from dns_provider_zones", "insert into dns_provider_zones", "dns_provider_zone_conflict"} {
+	for _, required := range []string{"with job_claim", "locked_by = $5", "locked_until > now()", "conflict as", "delete from dns_provider_zones", "insert into dns_provider_zones", "dns_provider_zone_conflict", "r.dns_provider_zone_id = dns_provider_zones.id"} {
 		if !strings.Contains(db.query, required) {
 			t.Fatalf("refresh completion query missing %q: %s", required, db.query)
 		}

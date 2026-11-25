@@ -198,6 +198,13 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	cleanupCandidates, err := certRepo.ListDNSChallenges(ctx, certificates.ListDNSChallengesParams{CertificateID: &cert.ID, ExcludeActiveIssuanceJobs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleanupCandidates) != 0 {
+		t.Fatalf("dns cleanup candidates of a running job = %#v", cleanupCandidates)
+	}
 	cleaned, err := certRepo.MarkDNSChallengeCleanup(ctx, certificates.MarkDNSChallengeCleanupParams{
 		ID:     challenge.ID,
 		Status: certificates.DNSChallengeStatusCleaned,
@@ -246,6 +253,13 @@ func TestMilestone5CertificateLifecycleRepositoryWithPostgres(t *testing.T) {
 	}
 	if succeeded.Status != certificates.JobStatusSucceeded {
 		t.Fatalf("succeeded job = %#v", succeeded)
+	}
+	cleanupCandidates, err = certRepo.ListDNSChallenges(ctx, certificates.ListDNSChallengesParams{CertificateID: &cert.ID, ExcludeActiveIssuanceJobs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleanupCandidates) != 1 || cleanupCandidates[0].ID != challenge.ID {
+		t.Fatalf("dns cleanup candidates of a succeeded job = %#v", cleanupCandidates)
 	}
 
 	renewalVersion, err := certRepo.CreateIssuingVersion(ctx, certificates.CreateIssuingVersionParams{

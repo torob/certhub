@@ -162,3 +162,22 @@ func writeTLSMaterialAt(t *testing.T, certFile, keyFile string, dnsNames []strin
 		t.Fatal(err)
 	}
 }
+
+func TestTLSCertificateLoaderNilReceiverIsSafe(t *testing.T) {
+	loader, err := NewTLSCertificateLoader(&Config{SelfCertificate: SelfCertificateConfig{SyncEnabled: true, OutputDir: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loader != nil {
+		t.Fatalf("loader without tls.cert_file = %#v want nil", loader)
+	}
+	if err := loader.ReloadIfChanged(); err != nil {
+		t.Fatalf("nil loader ReloadIfChanged() = %v want nil", err)
+	}
+	if err := loader.ReadinessError(); err != nil {
+		t.Fatalf("nil loader ReadinessError() = %v want nil", err)
+	}
+	if loader.TLSConfig() != nil || loader.Pending() {
+		t.Fatalf("nil loader must have no TLS config and not be pending")
+	}
+}

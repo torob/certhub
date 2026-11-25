@@ -40,7 +40,13 @@ var (
 	ErrDNSProviderUnavailable  = errors.New("dns provider client unavailable")
 	defaultDNSChallengeTTL     = 120
 	maxDNSProviderResponseSize = int64(1 << 20)
+	errProviderListPageLimit   = errors.New("DNS provider list exceeded page limit")
+	errProviderListPageOrder   = errors.New("DNS provider list returned an unexpected page")
 )
+
+// maxProviderListPages bounds how many pages one provider list call may read.
+// A list that needs more pages fails as a whole instead of returning a partial list.
+const maxProviderListPages = 1000
 
 type ZoneLister interface {
 	ListZones(context.Context, json.RawMessage) ([]string, error)

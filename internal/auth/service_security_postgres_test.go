@@ -214,3 +214,158 @@ func resetSecurityTestUser(t *testing.T, ctx context.Context, svc *Service, user
 		t.Fatal(err)
 	}
 }
+
+func TestRefreshUnknownTokenWithPostgresStorage(t *testing.T) {
+	pool := securityTestPool(t)
+	keys := passwordResetTestKeys(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	svc := securityTestService(pool, keys)
+	svc.tx = pool
+	unknownToken, err := randomPrefixedToken(UserAccessTokenPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlationID, err := storage.NewUUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.Refresh(ctx, unknownToken, AuditContext{CorrelationID: correlationID})
+	if !errors.Is(err, ErrInvalidToken) || result.Tokens.AccessToken != "" {
+		t.Fatalf("Refresh(unknown token) error = %v, want ErrInvalidToken", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `
+select count(*) from audit_events
+where correlation_id = $1
+  and action = 'user_session_refreshed'
+  and result = 'failure'
+  and metadata->>'reason' = 'invalid_token'`, correlationID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("refresh failure audit events = %d err=%v, want 1", count, err)
+	}
+}
+
+// TestPasswordLoginFailureAuditPersistsWithPostgres uses the production
+// construction (ServiceConfig.Storage set), so each login runs in its own
+// write transaction. A rejected login must still leave a committed
+// user_login_failed audit event.
+func TestPasswordLoginFailureAuditPersistsWithPostgres(t *testing.T) {
+	pool := securityTestPool(t)
+	keys := passwordResetTestKeys(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	newService := func(passwordEnabled bool, opts ...ServiceOption) *Service {
+		return NewService(ServiceConfig{
+			AuthRepository: NewRepository(pool), UserRepository: users.NewRepository(pool), AuditRepository: audit.NewRepository(pool), KeySet: keys, Storage: pool,
+			Config: config.AuthConfig{
+				Password:                  config.PasswordConfig{Enabled: passwordEnabled},
+				UserAccessTokenTTLSeconds: 300, UserSessionTTLSeconds: 3600,
+			},
+		}, opts...)
+	}
+	active := createSecurityTestUser(t, ctx, pool)
+	disabled := createSecurityTestUser(t, ctx, pool)
+	if _, err := users.NewRepository(pool).Update(ctx, disabled.ID, users.UpdateUserParams{Status: storage.SetString(string(users.StatusDisabled))}); err != nil {
+		t.Fatal(err)
+	}
+	withTOTP := createSecurityTestUser(t, ctx, pool)
+	totpSecret, err := newTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedTOTP, err := keys.EncryptTOTPSecret(totpSecret, totpAAD(withTOTP.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.NewRepository(pool).Update(ctx, withTOTP.ID, users.UpdateUserParams{TOTPSecretEncrypted: storage.SetString(encryptedTOTP), Password2FAEnabled: storage.SetBool(true)}); err != nil {
+		t.Fatal(err)
+	}
+	unknownID, err := storage.NewUUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTOTP := "000000"
+	if VerifyTOTP(totpSecret, wrongTOTP, time.Now().UTC()) {
+		wrongTOTP = "111111"
+	}
+	const password = "correct horse battery staple"
+	tests := []struct {
+		name            string
+		passwordEnabled bool
+		params          PasswordLoginParams
+		wantErr         error
+		wantTarget      *string
+		wantReason      string
+	}{
+		{name: "wrong password", passwordEnabled: true, params: PasswordLoginParams{Email: active.Email, Password: "wrong horse battery staple"}, wantErr: ErrInvalidCredentials, wantTarget: &active.ID, wantReason: "invalid_credentials"},
+		{name: "unknown email", passwordEnabled: true, params: PasswordLoginParams{Email: unknownID + "@example.com", Password: password}, wantErr: ErrInvalidCredentials, wantReason: "invalid_credentials"},
+		{name: "disabled user", passwordEnabled: true, params: PasswordLoginParams{Email: disabled.Email, Password: password}, wantErr: ErrInvalidCredentials, wantTarget: &disabled.ID, wantReason: "invalid_credentials"},
+		{name: "invalid 2fa code", passwordEnabled: true, params: PasswordLoginParams{Email: withTOTP.Email, Password: password, TOTPCode: wrongTOTP}, wantErr: ErrInvalid2FACode, wantTarget: &withTOTP.ID, wantReason: "invalid_2fa_code"},
+		{name: "missing 2fa code", passwordEnabled: true, params: PasswordLoginParams{Email: withTOTP.Email, Password: password}, wantErr: ErrPassword2FARequired, wantTarget: &withTOTP.ID, wantReason: "password_2fa_required"},
+		{name: "password auth disabled", passwordEnabled: false, params: PasswordLoginParams{Email: active.Email, Password: password}, wantErr: ErrPasswordAuthDisabled, wantReason: "password_auth_disabled"},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			correlationID, err := storage.NewUUID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.params.Audit = AuditContext{CorrelationID: correlationID, SourceIP: "192.0.2." + string(rune('1'+i))}
+			_, err = newService(tc.passwordEnabled).PasswordLogin(ctx, tc.params)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("login error = %v, want %v", err, tc.wantErr)
+			}
+			assertLoginFailedAudit(t, ctx, pool, correlationID, tc.wantTarget, tc.wantReason)
+		})
+	}
+	t.Run("rate limited", func(t *testing.T) {
+		svc := newService(true, WithLoginRateLimiter(NewLoginRateLimiter(LoginRateLimitConfig{EmailIPFailureLimit: 1, IPFailureLimit: 10, Window: time.Minute})))
+		first, err := storage.NewUUID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.PasswordLogin(ctx, PasswordLoginParams{Email: active.Email, Password: "wrong horse battery staple", Audit: AuditContext{CorrelationID: first, SourceIP: "198.51.100.1"}}); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("first login error = %v", err)
+		}
+		limited, err := storage.NewUUID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.PasswordLogin(ctx, PasswordLoginParams{Email: active.Email, Password: password, Audit: AuditContext{CorrelationID: limited, SourceIP: "198.51.100.1"}}); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("second login error = %v, want rate limited", err)
+		}
+		// The rate-limited event must not name the User: it must not reveal
+		// whether the email exists.
+		assertLoginFailedAudit(t, ctx, pool, limited, nil, "rate_limited")
+	})
+}
+
+func assertLoginFailedAudit(t *testing.T, ctx context.Context, pool *storage.Pool, correlationID string, wantTarget *string, wantReason string) {
+	t.Helper()
+	rows, err := pool.Query(ctx, "select action, identity_type, result, target_id::text, metadata->>'method', metadata->>'reason' from audit_events where correlation_id = $1", correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var action, identityType, result, method, reason string
+		var targetID *string
+		if err := rows.Scan(&action, &identityType, &result, &targetID, &method, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if action != "user_login_failed" || identityType != string(audit.IdentityTypeSystem) || result != string(audit.ResultFailure) || method != string(AuthMethodPassword) || reason != wantReason {
+			t.Fatalf("audit event = action %q identity %q result %q method %q reason %q, want user_login_failed/system/failure/password/%s", action, identityType, result, method, reason, wantReason)
+		}
+		if (targetID == nil) != (wantTarget == nil) || (targetID != nil && *targetID != *wantTarget) {
+			t.Fatalf("audit target = %v, want %v", targetID, wantTarget)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("user_login_failed audit events for correlation %s = %d, want 1", correlationID, count)
+	}
+}

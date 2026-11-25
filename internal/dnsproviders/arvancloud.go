@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,30 +54,15 @@ func (c *ArvanCloudClient) ListZones(ctx context.Context, raw json.RawMessage) (
 	if c == nil || c.HTTPClient == nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/domains", nil)
+	zones, err := arvanCloudListAll[struct {
+		Domain string `json:"domain"`
+		Name   string `json:"name"`
+	}](ctx, c, creds, "/domains")
 	if err != nil {
 		return nil, ErrZoneDiscoveryFailed
 	}
-	req.Header.Set("Authorization", creds.APIKey)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	var body struct {
-		Data []struct {
-			Domain string `json:"domain"`
-			Name   string `json:"name"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
-		return nil, ErrZoneDiscoveryFailed
-	}
-	out := make([]string, 0, len(body.Data))
-	for _, zone := range body.Data {
+	out := make([]string, 0, len(zones))
+	for _, zone := range zones {
 		name := zone.Domain
 		if name == "" {
 			name = zone.Name
@@ -117,7 +103,7 @@ func (c *ArvanCloudClient) Present(ctx context.Context, creds ArvanCloudCredenti
 				return false, 0, nil
 			}
 		}
-		err = c.arvanCloudRequest(ctx, creds, http.MethodPost, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records", body, nil)
+		err = c.arvanCloudRequest(ctx, creds, http.MethodPost, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records", nil, body, nil)
 		return providerRetry(ctx, err)
 	})
 	if err != nil {
@@ -144,7 +130,7 @@ func (c *ArvanCloudClient) CleanUp(ctx context.Context, creds ArvanCloudCredenti
 			if normalizeArvanRecordName(record.Name) != relativeName || record.Text != normalized.TXTValue {
 				continue
 			}
-			if err := c.arvanCloudRequest(ctx, creds, http.MethodDelete, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records/"+url.PathEscape(record.ID), nil, nil); err != nil {
+			if err := c.arvanCloudRequest(ctx, creds, http.MethodDelete, "/domains/"+url.PathEscape(normalized.ZoneName)+"/dns-records/"+url.PathEscape(record.ID), nil, nil, nil); err != nil {
 				return providerRetry(ctx, err)
 			}
 		}
@@ -164,22 +150,20 @@ type arvanCloudDNSRecord struct {
 }
 
 func (c *ArvanCloudClient) arvanCloudTXTRecords(ctx context.Context, creds ArvanCloudCredentials, zoneName string) ([]arvanCloudDNSRecord, error) {
-	var body struct {
-		Data []struct {
-			ID     string          `json:"id"`
-			Type   string          `json:"type"`
-			Name   string          `json:"name"`
-			Value  json.RawMessage `json:"value"`
-			Values []struct {
-				Text string `json:"text"`
-			} `json:"values"`
-		} `json:"data"`
-	}
-	if err := c.arvanCloudRequest(ctx, creds, http.MethodGet, "/domains/"+url.PathEscape(zoneName)+"/dns-records", nil, &body); err != nil {
+	records, err := arvanCloudListAll[struct {
+		ID     string          `json:"id"`
+		Type   string          `json:"type"`
+		Name   string          `json:"name"`
+		Value  json.RawMessage `json:"value"`
+		Values []struct {
+			Text string `json:"text"`
+		} `json:"values"`
+	}](ctx, c, creds, "/domains/"+url.PathEscape(zoneName)+"/dns-records")
+	if err != nil {
 		return nil, err
 	}
-	out := make([]arvanCloudDNSRecord, 0, len(body.Data))
-	for _, record := range body.Data {
+	out := make([]arvanCloudDNSRecord, 0, len(records))
+	for _, record := range records {
 		if !strings.EqualFold(record.Type, "txt") {
 			continue
 		}
@@ -227,8 +211,42 @@ func normalizeArvanRecordName(name string) string {
 	return name
 }
 
-func (c *ArvanCloudClient) arvanCloudRequest(ctx context.Context, creds ArvanCloudCredentials, method, path string, requestBody any, responseBody any) error {
-	req, err := newJSONRequest(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, nil, requestBody)
+// arvanCloudListAll reads every page of an ArvanCloud CDN v4 list endpoint.
+// It uses the Laravel-style meta.current_page and meta.last_page fields. A
+// response without meta is one page. Any failed page fails the whole call, so
+// callers never get a partial list.
+func arvanCloudListAll[T any](ctx context.Context, c *ArvanCloudClient, creds ArvanCloudCredentials, path string) ([]T, error) {
+	var out []T
+	for page := 1; page <= maxProviderListPages; page++ {
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		var body struct {
+			Data []T `json:"data"`
+			Meta *struct {
+				CurrentPage int `json:"current_page"`
+				LastPage    int `json:"last_page"`
+			} `json:"meta"`
+		}
+		if err := c.arvanCloudRequest(ctx, creds, http.MethodGet, path, query, nil, &body); err != nil {
+			return nil, err
+		}
+		out = append(out, body.Data...)
+		meta := body.Meta
+		if meta == nil || meta.LastPage <= page {
+			return out, nil
+		}
+		if meta.CurrentPage != page {
+			return nil, errProviderListPageOrder
+		}
+		if meta.LastPage > maxProviderListPages {
+			return nil, errProviderListPageLimit
+		}
+	}
+	return nil, errProviderListPageLimit
+}
+
+func (c *ArvanCloudClient) arvanCloudRequest(ctx context.Context, creds ArvanCloudCredentials, method, path string, query url.Values, requestBody any, responseBody any) error {
+	req, err := newJSONRequest(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, query, requestBody)
 	if err != nil {
 		return err
 	}

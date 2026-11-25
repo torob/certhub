@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,8 +86,8 @@ func TestReadySyncWritesTLSSecret(t *testing.T) {
 	if secret.Metadata.Labels[LabelManagedBy] != ManagedByValue {
 		t.Fatalf("missing managed label: %#v", secret.Metadata.Labels)
 	}
-	if !reflect.DeepEqual(secret.Metadata.OwnerReferences, []OwnerReference{certhubOwnerReference(cert)}) {
-		t.Fatalf("new Secret owner reference = %#v", secret.Metadata.OwnerReferences)
+	if len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("Retain Secret has owner reference that foreground deletion would garbage-collect: %#v", secret.Metadata.OwnerReferences)
 	}
 	if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
 		t.Fatalf("cleanup finalizer not persisted: %#v", cert.Metadata.Finalizers)
@@ -124,6 +125,7 @@ func TestDeletePolicySyncWritesSecretWithOwnerReference(t *testing.T) {
 func TestNoContentMigratesOwnerlessSecretWithoutChangingMaterialOrIdentity(t *testing.T) {
 	kube := newFakeKube()
 	cert := testCertificate()
+	cert.Spec.SecretDeletionPolicy = PolicyDelete
 	old := ownedSecret(cert, "old-etag")
 	old.Metadata.OwnerReferences = nil
 	old.Metadata.UID = "secret-uid"
@@ -341,6 +343,7 @@ func TestOwnerReferenceCleanupFailurePreservesRetainFinalizer(t *testing.T) {
 func TestOwnerReferenceMigrationFailurePreservesFinalizerAndSecret(t *testing.T) {
 	kube := newFakeKube()
 	cert := testCertificate()
+	cert.Spec.SecretDeletionPolicy = PolicyDelete
 	secret := ownedSecret(cert, "old")
 	secret.Metadata.OwnerReferences = nil
 	secret.Metadata.UID = "stable-uid"
@@ -380,6 +383,7 @@ func TestFinalizerFailurePreventsSecretOwnership(t *testing.T) {
 	backend := &fakeBackend{}
 	reconciler := testReconciler(kube, backend)
 	cert := testCertificate()
+	cert.Spec.SecretDeletionPolicy = PolicyDelete
 	secret := ownedSecret(cert, "old")
 	secret.Metadata.OwnerReferences = nil
 	secret.Metadata.UID = "stable-uid"
@@ -414,11 +418,13 @@ func TestSecretWriteFailurePreservesFinalizer(t *testing.T) {
 }
 
 func TestDeletionPolicyTransitionsReconcileFinalizer(t *testing.T) {
-	t.Run("Retain to Delete adds finalizer", func(t *testing.T) {
+	t.Run("Retain to Delete adds finalizer and owner reference", func(t *testing.T) {
 		kube := newFakeKube()
 		cert := testCertificate()
+		retained := ownedSecret(cert, "old")
+		retained.Metadata.UID = "stable-uid"
 		cert.Spec.SecretDeletionPolicy = PolicyDelete
-		kube.secrets["ns/gateway-tls"] = ownedSecret(cert, "old")
+		kube.secrets["ns/gateway-tls"] = retained
 		reconciler := testReconciler(kube, &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}})
 
 		if _, err := reconciler.Reconcile(context.Background(), cert); err != nil {
@@ -427,14 +433,21 @@ func TestDeletionPolicyTransitionsReconcileFinalizer(t *testing.T) {
 		if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
 			t.Fatalf("Delete policy finalizer not added: %#v", cert.Metadata.Finalizers)
 		}
+		if !reflect.DeepEqual(retained.Metadata.OwnerReferences, []OwnerReference{certhubOwnerReference(cert)}) || retained.Metadata.UID != "stable-uid" || string(retained.Data["tls.crt"]) != "CERT" {
+			t.Fatalf("Delete policy Secret did not gain owner reference in place: %#v", retained)
+		}
+		if !reflect.DeepEqual(kube.operations, []string{"finalizer:add", "owner:set"}) {
+			t.Fatalf("owner reference attached before finalizer: %#v", kube.operations)
+		}
 	})
 
-	t.Run("Delete to Retain preserves cleanup finalizer and ownership", func(t *testing.T) {
+	t.Run("Delete to Retain preserves cleanup finalizer and removes owner reference", func(t *testing.T) {
 		kube := newFakeKube()
 		cert := testCertificate()
 		cert.Metadata.Finalizers = []string{Finalizer}
 		secret := ownedSecret(cert, "old")
 		secret.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
+		secret.Metadata.UID = "stable-uid"
 		kube.secrets["ns/gateway-tls"] = secret
 		reconciler := testReconciler(kube, &fakeBackend{materials: []materialResponse{{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}}})
 
@@ -444,8 +457,14 @@ func TestDeletionPolicyTransitionsReconcileFinalizer(t *testing.T) {
 		if !slices.Contains(cert.Metadata.Finalizers, Finalizer) {
 			t.Fatalf("Retain policy cleanup finalizer missing: %#v", cert.Metadata.Finalizers)
 		}
-		if kube.clearOwnerReferencesCount != 0 || !reflect.DeepEqual(secret.Metadata.OwnerReferences, []OwnerReference{certhubOwnerReference(cert)}) {
-			t.Fatalf("live Retain Secret ownership changed: %#v", secret.Metadata.OwnerReferences)
+		if len(secret.Metadata.OwnerReferences) != 0 {
+			t.Fatalf("live Retain Secret kept owner reference that foreground deletion would garbage-collect: %#v", secret.Metadata.OwnerReferences)
+		}
+		if kube.deleteCount != 0 || kube.writeCount != 0 || secret.Metadata.UID != "stable-uid" || string(secret.Data["tls.crt"]) != "CERT" {
+			t.Fatalf("owner-reference removal changed Secret identity or data: %#v", secret)
+		}
+		if !reflect.DeepEqual(kube.operations, []string{"owner:clear"}) {
+			t.Fatalf("unexpected Kubernetes operations: %#v", kube.operations)
 		}
 	})
 }
@@ -625,6 +644,7 @@ func TestRetainFinalizerRemovalFailureLeavesDetachedSecretAndTerminatingCertific
 	cert.Metadata.DeletionTimestamp = &now
 	cert.Metadata.Finalizers = []string{Finalizer}
 	secret := ownedSecret(cert, "old")
+	secret.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
 	kube.secrets["ns/gateway-tls"] = secret
 	kube.finalizerErr = stderrors.New("finalizer patch denied")
 	reconciler := testReconciler(kube, &fakeBackend{})
@@ -870,7 +890,7 @@ func TestRetryAfterFromBackendError(t *testing.T) {
 	}
 }
 
-func TestRuntimeReconcileAllReturnsShortestRequeue(t *testing.T) {
+func TestRuntimeSchedulesRetryAfterPerCertificate(t *testing.T) {
 	kube := newFakeKube()
 	kube.certificates = []*CerthubCertificate{testCertificate()}
 	backend := &fakeBackend{
@@ -882,39 +902,80 @@ func TestRuntimeReconcileAllReturnsShortestRequeue(t *testing.T) {
 		Backend: backend,
 		Metrics: NewMetrics(),
 	}
-	reconciler := testReconciler(kube, backend)
-	delay, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t))
-	if err != nil {
-		t.Fatalf("reconcileAll failed: %v", err)
+	sched, clock := testScheduler(t, runtime, testReconciler(kube, backend))
+	start := *clock
+
+	if err := sched.resyncAll(context.Background()); err != nil {
+		t.Fatalf("resync failed: %v", err)
 	}
-	if delay != 17*time.Second {
-		t.Fatalf("delay = %s; want 17s", delay)
+	sched.reconcileDue(context.Background())
+
+	entry := sched.entries["ns/gateway"]
+	if entry == nil || !entry.due.Equal(start.Add(17*time.Second)) {
+		t.Fatalf("entry = %#v; want due after the 17s Retry-After", entry)
+	}
+	if wake := sched.nextWake(); !wake.Equal(start.Add(17 * time.Second)) {
+		t.Fatalf("next wake = %s; want the Certificate due time", wake.Sub(start))
+	}
+	if !reflect.DeepEqual(kube.gotCertificates, []string{"ns/gateway"}) {
+		t.Fatalf("Certificate reads = %#v; want one fresh read before reconcile", kube.gotCertificates)
 	}
 }
 
-func TestRuntimeReconcileAllHonorsErrorRequeue(t *testing.T) {
+func TestRuntimeFailureBackoffIsExponentialPerCertificateAndResets(t *testing.T) {
 	kube := newFakeKube()
-	cert := testCertificate()
-	cert.Spec.SecretDeletionPolicy = PolicyDelete
-	kube.certificates = []*CerthubCertificate{cert}
-	kube.finalizerErr = stderrors.New("finalizer denied")
+	kube.certificates = []*CerthubCertificate{testCertificate()}
+	transport := materialResponse{err: stderrors.New("dial tcp: connection refused")}
+	backend := &fakeBackend{materials: []materialResponse{
+		transport, transport, transport,
+		{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}},
+		transport,
+	}}
 	runtime := &Runtime{
 		Config:  Config{WatchNamespaces: []string{"ns"}, ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
 		Kube:    kube,
-		Backend: &fakeBackend{},
+		Backend: backend,
 		Metrics: NewMetrics(),
 	}
-	reconciler := testReconciler(kube, &fakeBackend{})
-	delay, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t))
-	if err != nil {
-		t.Fatalf("reconcileAll failed: %v", err)
+	sched, clock := testScheduler(t, runtime, testReconciler(kube, backend))
+	if err := sched.resyncAll(context.Background()); err != nil {
+		t.Fatalf("resync failed: %v", err)
 	}
-	if delay != 5*time.Second {
-		t.Fatalf("delay = %s; want backoff from error result", delay)
+
+	for i, want := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, time.Hour, 5 * time.Second} {
+		sched.reconcileDue(context.Background())
+		entry := sched.entries["ns/gateway"]
+		if got := entry.due.Sub(*clock); got != want {
+			t.Fatalf("reconcile %d requeue = %s; want %s", i+1, got, want)
+		}
+		*clock = entry.due
+	}
+	if len(backend.materials) != 0 {
+		t.Fatalf("unused backend responses: %d", len(backend.materials))
 	}
 }
 
-func TestRuntimeReconcileAllCoversNamespacesDespiteListFailure(t *testing.T) {
+func TestRuntimeFailureBackoffCap(t *testing.T) {
+	runtime := &Runtime{Config: Config{ResyncInterval: 6 * time.Hour, ReconcileBackoff: time.Minute}}
+	var got []time.Duration
+	for failures := 1; failures <= 8; failures++ {
+		got = append(got, runtime.failureBackoff(failures))
+	}
+	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, 32 * time.Minute, 32 * time.Minute}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backoff = %v; want %v", got, want)
+	}
+	runtime.Config.ResyncInterval = 10 * time.Minute
+	if got := runtime.failureBackoff(10); got != 10*time.Minute {
+		t.Fatalf("backoff capped by resync = %s; want 10m", got)
+	}
+	runtime.Config.ResyncInterval = 30 * time.Second
+	if got := runtime.failureBackoff(10); got != time.Minute {
+		t.Fatalf("backoff with resync below base = %s; want base 1m", got)
+	}
+}
+
+func TestRuntimeResyncCoversNamespacesDespiteListFailure(t *testing.T) {
 	kube := newFakeKube()
 	first := testCertificate()
 	first.Metadata.Namespace = "first"
@@ -941,18 +1002,19 @@ func TestRuntimeReconcileAllCoversNamespacesDespiteListFailure(t *testing.T) {
 		Backend: backend,
 		Metrics: NewMetrics(),
 	}
-	reconciler := testReconciler(kube, backend)
+	sched, clock := testScheduler(t, runtime, testReconciler(kube, backend))
 
-	delay, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t))
+	err := sched.resyncAll(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "second") {
-		t.Fatalf("reconcileAll error = %v", err)
+		t.Fatalf("resync error = %v", err)
 	}
-	if delay != 5*time.Second {
-		t.Fatalf("delay = %s; want list failure backoff", delay)
+	if got := sched.nextResync.Sub(*clock); got != 5*time.Second {
+		t.Fatalf("next list = %s; want list failure backoff", got)
 	}
 	if !reflect.DeepEqual(kube.listedNamespaces, []string{"first", "second", "third"}) {
 		t.Fatalf("listed namespaces = %#v", kube.listedNamespaces)
 	}
+	sched.reconcileDue(context.Background())
 	if kube.writeCount != 2 {
 		t.Fatalf("writes = %d; want successful namespaces to reconcile", kube.writeCount)
 	}
@@ -967,13 +1029,16 @@ func TestRuntimeEmptyNamespaceListUsesClusterScope(t *testing.T) {
 		Backend: backend,
 		Metrics: NewMetrics(),
 	}
-	reconciler := testReconciler(kube, backend)
+	sched, clock := testScheduler(t, runtime, testReconciler(kube, backend))
 
-	if _, err := runtime.reconcileAll(context.Background(), reconciler, testLogger(t)); err != nil {
+	if err := sched.resyncAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(kube.listedNamespaces, []string{""}) {
 		t.Fatalf("listed namespaces = %#v; want cluster-wide empty namespace", kube.listedNamespaces)
+	}
+	if got := sched.nextResync.Sub(*clock); got != time.Hour {
+		t.Fatalf("next list = %s; want resync interval", got)
 	}
 }
 
@@ -1009,54 +1074,152 @@ func TestRuntimeMultiplexesNamespaceWatches(t *testing.T) {
 }
 
 func TestRuntimeFiltersStatusOnlyWatchChanges(t *testing.T) {
-	runtime := &Runtime{}
+	runtime := &Runtime{Config: Config{ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second}}
+	sched, clock := testScheduler(t, runtime, testReconciler(newFakeKube(), &fakeBackend{}))
 	base := testCertificate()
 	base.Metadata.ResourceVersion = "1"
-	runtime.rememberCertificateInput(base)
+	sched.observe("ns", base)
+	// dueAfter reports whether the event made the Certificate due now, then
+	// moves it back to a later due time for the next check.
+	dueAfter := func(eventType string, cert *CerthubCertificate) bool {
+		t.Helper()
+		sched.handleWatchEvent(context.Background(), namespacedCertificateWatchEvent{namespace: "ns", event: CertificateWatchEvent{Type: eventType, Certificate: cert}})
+		entry := sched.entries["ns/gateway"]
+		if entry == nil {
+			return false
+		}
+		due := !entry.due.After(*clock)
+		sched.schedule(entry, clock.Add(time.Hour))
+		return due
+	}
+	sched.schedule(sched.entries["ns/gateway"], clock.Add(time.Hour))
 
 	statusOnly := cloneTestCertificate(base)
 	statusOnly.Metadata.ResourceVersion = "2"
 	statusOnly.Status.Phase = PhaseReady
-	if runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: statusOnly}) {
+	if dueAfter("MODIFIED", statusOnly) {
 		t.Fatal("status-only watch change triggered reconciliation")
 	}
 
 	generation := cloneTestCertificate(statusOnly)
 	generation.Metadata.Generation++
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: generation}) {
+	if !dueAfter("MODIFIED", generation) {
 		t.Fatal("generation change was ignored")
 	}
 
 	retry := cloneTestCertificate(generation)
 	retry.Metadata.Annotations[AnnotationRetryID] = "retry-2"
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: retry}) {
+	if !dueAfter("MODIFIED", retry) {
 		t.Fatal("retry annotation change was ignored")
 	}
 
 	spec := cloneTestCertificate(retry)
 	spec.Spec.Domains = []string{"new.example.com"}
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: spec}) {
+	if !dueAfter("MODIFIED", spec) {
 		t.Fatal("spec change was ignored")
 	}
 
 	finalizer := cloneTestCertificate(spec)
 	finalizer.Metadata.Finalizers = []string{Finalizer}
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: finalizer}) {
+	if !dueAfter("MODIFIED", finalizer) {
 		t.Fatal("finalizer change was ignored")
 	}
 
 	deleting := cloneTestCertificate(finalizer)
 	now := time.Now().UTC()
 	deleting.Metadata.DeletionTimestamp = &now
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "MODIFIED", Certificate: deleting}) {
+	if !dueAfter("MODIFIED", deleting) {
 		t.Fatal("deletion timestamp change was ignored")
 	}
-	if runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "DELETED", Certificate: deleting}) {
+	if dueAfter("DELETED", deleting) {
 		t.Fatal("deleted watch event triggered reconciliation")
 	}
-	if !runtime.shouldReconcileWatchEvent("ns", CertificateWatchEvent{Type: "ADDED", Certificate: base}) {
+	if _, ok := sched.entries["ns/gateway"]; ok {
+		t.Fatal("deleted Certificate stayed in the queue")
+	}
+	if !dueAfter("ADDED", base) {
 		t.Fatal("re-created certificate was ignored after deletion")
 	}
+	if len(sched.entries) != 1 || len(sched.queue) != 1 {
+		t.Fatalf("queue size = %d/%d; want one entry", len(sched.entries), len(sched.queue))
+	}
+}
+
+func TestRuntimeDeletedCertificatesLeaveQueueAndMetrics(t *testing.T) {
+	hasGatewayMetric := func(metrics *Metrics) bool {
+		for _, line := range metricLines(metrics) {
+			if strings.Contains(line, "certhub_operator_condition") && strings.Contains(line, `name="gateway"`) {
+				return true
+			}
+		}
+		return false
+	}
+	newScheduler := func(t *testing.T) (*scheduler, *fakeKube, *Metrics) {
+		t.Helper()
+		kube := newFakeKube()
+		cert := testCertificate()
+		kube.certificates = []*CerthubCertificate{cert}
+		reconciler := testReconciler(kube, &fakeBackend{})
+		runtime := &Runtime{
+			Config: Config{WatchNamespaces: []string{"ns"}, ResyncInterval: time.Hour, ReconcileBackoff: 5 * time.Second},
+			Kube:   kube,
+		}
+		sched, clock := testScheduler(t, runtime, reconciler)
+		if err := sched.resyncAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		sched.schedule(sched.entries["ns/gateway"], clock.Add(time.Hour))
+		cert.Status.Conditions = []Condition{{Type: ConditionReady, Status: ConditionTrue}}
+		reconciler.Metrics.SetCertificateConditions(cert)
+		if !hasGatewayMetric(reconciler.Metrics) {
+			t.Fatal("test setup did not record a condition metric")
+		}
+		return sched, kube, reconciler.Metrics
+	}
+	check := func(t *testing.T, sched *scheduler, metrics *Metrics) {
+		t.Helper()
+		if len(sched.entries) != 0 || len(sched.queue) != 0 {
+			t.Fatalf("queue size = %d/%d; want deleted Certificate removed", len(sched.entries), len(sched.queue))
+		}
+		if hasGatewayMetric(metrics) {
+			t.Fatalf("deleted Certificate condition metric remained: %#v", metricLines(metrics))
+		}
+	}
+
+	t.Run("DELETED event", func(t *testing.T) {
+		sched, _, metrics := newScheduler(t)
+		sched.handleWatchEvent(context.Background(), namespacedCertificateWatchEvent{namespace: "ns", event: CertificateWatchEvent{Type: "DELETED", Certificate: testCertificate()}})
+		check(t, sched, metrics)
+	})
+	t.Run("periodic list", func(t *testing.T) {
+		sched, kube, metrics := newScheduler(t)
+		kube.certificates = nil
+		if err := sched.resyncAll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		check(t, sched, metrics)
+	})
+	t.Run("relist after expired watch", func(t *testing.T) {
+		sched, kube, metrics := newScheduler(t)
+		kube.certificates = nil
+		sched.handleWatchEvent(context.Background(), namespacedCertificateWatchEvent{namespace: "ns", event: CertificateWatchEvent{Type: WatchEventRelist}})
+		check(t, sched, metrics)
+	})
+	t.Run("not found when due", func(t *testing.T) {
+		sched, kube, metrics := newScheduler(t)
+		kube.certificates = nil
+		sched.schedule(sched.entries["ns/gateway"], sched.now())
+		sched.reconcileDue(context.Background())
+		check(t, sched, metrics)
+	})
+}
+
+func testScheduler(t *testing.T, runtime *Runtime, reconciler *Reconciler) (*scheduler, *time.Time) {
+	t.Helper()
+	clock := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	sched := runtime.newScheduler(reconciler, testLogger(t))
+	sched.now = func() time.Time { return clock }
+	return sched, &clock
 }
 
 func TestRuntimeContinuesAfterInitialNamespaceListFailure(t *testing.T) {
@@ -1083,6 +1246,160 @@ func TestRuntimeContinuesAfterInitialNamespaceListFailure(t *testing.T) {
 	if !reflect.DeepEqual(kube.watchedNamespaces, []string{"first", "second"}) {
 		t.Fatalf("watched namespaces = %#v", kube.watchedNamespaces)
 	}
+}
+
+// A short requeue of one Certificate must not sweep every other Certificate.
+// Before per-object scheduling, the shortest requeue in the namespace drove a
+// full reconcile of all Certificates, so a Ready Certificate with a 1h requeue
+// called the backend on every poll of its pending neighbour.
+func TestRuntimeShortRequeueReconcilesOnlyThatCertificate(t *testing.T) {
+	t.Run("pending Retry-After", func(t *testing.T) {
+		pending := runtimeTestCertificate("ns", "pending", "uid-pending", "pending.example.com")
+		ready := runtimeTestCertificate("ns", "ready", "uid-ready", "ready.example.com")
+		kube := newFakeKube()
+		kube.certificatesByNamespace = map[string][]*CerthubCertificate{"ns": {pending, ready}}
+		backend := newDomainBackend(func(domain string) materialResponse {
+			if domain == "pending.example.com" {
+				return materialResponse{err: apiError(http.StatusConflict, certerrors.CodeCertificateNotReady, true, ptr(1))}
+			}
+			return materialResponse{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}
+		})
+		runtime := runtimeUnderTest(kube, backend, []string{"ns"}, time.Second)
+
+		runRuntimeFor(t, runtime, 2300*time.Millisecond)
+
+		if got := backend.count("pending.example.com"); got < 2 {
+			t.Fatalf("pending Certificate backend calls = %d; want its 1s Retry-After to be polled", got)
+		}
+		if got := backend.count("ready.example.com"); got != 1 {
+			t.Fatalf("ready Certificate backend calls = %d; want 1 (no sweep caused by another Certificate's requeue)", got)
+		}
+	})
+	t.Run("secret write failure", func(t *testing.T) {
+		failing := runtimeTestCertificate("ns", "failing", "uid-failing", "failing.example.com")
+		ready := runtimeTestCertificate("ns", "ready", "uid-ready", "ready.example.com")
+		kube := newFakeKube()
+		kube.writeErr = stderrors.New("admission webhook denied the request")
+		kube.certificatesByNamespace = map[string][]*CerthubCertificate{"ns": {failing, ready}}
+		backend := newDomainBackend(func(domain string) materialResponse {
+			if domain == "failing.example.com" {
+				return materialResponse{value: testMaterial("etag"), meta: certhubclient.ResponseMeta{StatusCode: http.StatusOK}}
+			}
+			return materialResponse{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}
+		})
+		runtime := runtimeUnderTest(kube, backend, []string{"ns"}, 20*time.Millisecond)
+
+		runRuntimeFor(t, runtime, 400*time.Millisecond)
+
+		// Exponential backoff from 20ms retries at about 0, 20, 60, 140 and
+		// 300ms. A fixed 20ms requeue would fetch the private key ~20 times.
+		if got := backend.count("failing.example.com"); got < 3 || got > 6 {
+			t.Fatalf("failing Certificate material fetches = %d; want 3..6 with exponential backoff", got)
+		}
+		if got := backend.count("ready.example.com"); got != 1 {
+			t.Fatalf("ready Certificate backend calls = %d; want 1 (no sweep caused by another Certificate's failure)", got)
+		}
+	})
+}
+
+// A watch event in one namespace must not move the due time of a pending
+// requeue in another namespace.
+func TestRuntimeWatchEventDoesNotDelayOtherNamespaceRequeue(t *testing.T) {
+	failing := runtimeTestCertificate("a", "failing", "uid-failing", "failing.example.com")
+	ready := runtimeTestCertificate("b", "ready", "uid-ready", "ready.example.com")
+	kube := newFakeKube()
+	kube.certificatesByNamespace = map[string][]*CerthubCertificate{"a": {failing}, "b": {ready}}
+	kube.watchChannels = map[string]chan CertificateWatchEvent{
+		"a": make(chan CertificateWatchEvent, 1),
+		"b": make(chan CertificateWatchEvent, 1),
+	}
+	backend := newDomainBackend(func(domain string) materialResponse {
+		if domain == "failing.example.com" {
+			return materialResponse{err: stderrors.New("dial tcp: connection refused")}
+		}
+		return materialResponse{meta: certhubclient.ResponseMeta{StatusCode: http.StatusNoContent}}
+	})
+	runtime := runtimeUnderTest(kube, backend, []string{"a", "b"}, 200*time.Millisecond)
+	changed := cloneTestCertificate(ready)
+	changed.Metadata.Generation = 2
+	time.AfterFunc(20*time.Millisecond, func() {
+		kube.watchChannels["b"] <- CertificateWatchEvent{Type: "MODIFIED", Certificate: changed}
+	})
+
+	runRuntimeFor(t, runtime, 600*time.Millisecond)
+
+	if got := backend.count("ready.example.com"); got != 2 {
+		t.Fatalf("namespace b backend calls = %d; want initial reconcile plus one for the watch event", got)
+	}
+	if got := backend.count("failing.example.com"); got < 2 {
+		t.Fatalf("namespace a backend calls = %d; want the 200ms requeue to run despite the namespace b watch event", got)
+	}
+}
+
+func runtimeUnderTest(kube *fakeKube, backend BackendClient, namespaces []string, backoff time.Duration) *Runtime {
+	return &Runtime{
+		Config: Config{
+			WatchNamespaces:  namespaces,
+			MetricsBindAddr:  "127.0.0.1:0",
+			ResyncInterval:   time.Hour,
+			ReconcileBackoff: backoff,
+		},
+		Kube:    kube,
+		Backend: backend,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics: NewMetrics(),
+	}
+}
+
+func runRuntimeFor(t *testing.T, runtime *Runtime, duration time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+	if err := runtime.Run(ctx, io.Discard); err != nil {
+		t.Fatalf("runtime failed: %v", err)
+	}
+}
+
+func runtimeTestCertificate(namespace, name, uid, domain string) *CerthubCertificate {
+	cert := testCertificate()
+	cert.Metadata.Namespace = namespace
+	cert.Metadata.Name = name
+	cert.Metadata.UID = uid
+	cert.Metadata.Generation = 1
+	cert.Spec.Domains = []string{domain}
+	cert.Spec.SecretName = name + "-tls"
+	return cert
+}
+
+// domainBackend answers TLS material requests per requested domain and counts
+// the calls for each domain.
+type domainBackend struct {
+	mu      sync.Mutex
+	calls   map[string]int
+	respond func(domain string) materialResponse
+}
+
+func newDomainBackend(respond func(domain string) materialResponse) *domainBackend {
+	return &domainBackend{calls: map[string]int{}, respond: respond}
+}
+
+func (b *domainBackend) GetTLSMaterial(_ context.Context, criteria certhubclient.CertificateCriteria, _ certhubclient.RequestOptions) (*material.TLSMaterial, certhubclient.ResponseMeta, error) {
+	domain := strings.Join(criteria.Domains, ",")
+	b.mu.Lock()
+	b.calls[domain]++
+	b.mu.Unlock()
+	response := b.respond(domain)
+	return response.value, response.meta, response.err
+}
+
+func (b *domainBackend) EnsureCertificate(context.Context, certhubclient.CertificateCriteria, certhubclient.RequestOptions) (*certhubclient.CertificateResponse, certhubclient.ResponseMeta, error) {
+	return nil, certhubclient.ResponseMeta{}, stderrors.New("unexpected ensure call")
+}
+
+func (b *domainBackend) count(domain string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls[domain]
 }
 
 func TestMetricsConditionIsPerResource(t *testing.T) {
@@ -1402,7 +1719,13 @@ func testMaterial(etag string) *material.TLSMaterial {
 	}
 }
 
+// ownedSecret returns a Secret as the operator writes it for cert. Only the
+// Delete policy carries an owner reference.
 func ownedSecret(cert *CerthubCertificate, etag string) *Secret {
+	var ownerReferences []OwnerReference
+	if SecretDeletionPolicy(cert.Spec) == PolicyDelete {
+		ownerReferences = []OwnerReference{certhubOwnerReference(cert)}
+	}
 	return &Secret{
 		Metadata: Metadata{
 			Name:      cert.Spec.SecretName,
@@ -1415,7 +1738,7 @@ func ownedSecret(cert *CerthubCertificate, etag string) *Secret {
 				AnnotationOwnerUID:     cert.Metadata.UID,
 				AnnotationMaterialETag: etag,
 			},
-			OwnerReferences: []OwnerReference{certhubOwnerReference(cert)},
+			OwnerReferences: ownerReferences,
 		},
 		Type: SecretTypeTLS,
 		Data: map[string][]byte{
@@ -1527,6 +1850,7 @@ type fakeKube struct {
 	certificatesByNamespace   map[string][]*CerthubCertificate
 	listErrors                map[string]error
 	listedNamespaces          []string
+	gotCertificates           []string
 	watchChannels             map[string]chan CertificateWatchEvent
 	watchedNamespaces         []string
 	statusUpdates             int
@@ -1630,6 +1954,20 @@ func (f *fakeKube) ListCertificates(_ context.Context, namespace string) ([]*Cer
 		return f.certificatesByNamespace[namespace], nil
 	}
 	return f.certificates, nil
+}
+
+func (f *fakeKube) GetCertificate(_ context.Context, namespace, name string) (*CerthubCertificate, error) {
+	f.gotCertificates = append(f.gotCertificates, namespace+"/"+name)
+	items := f.certificates
+	if f.certificatesByNamespace != nil {
+		items = f.certificatesByNamespace[namespace]
+	}
+	for _, cert := range items {
+		if cert.Metadata.Namespace == namespace && cert.Metadata.Name == name {
+			return cert, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (f *fakeKube) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error) {

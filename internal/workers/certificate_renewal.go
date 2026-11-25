@@ -32,6 +32,9 @@ type CertificateRenewalConfig struct {
 	PollInterval time.Duration
 	LogWriter    io.Writer
 	WorkerPrefix string
+	// InstanceID identifies the server process in the worker ID. When it is
+	// empty, a new random instance ID is generated.
+	InstanceID string
 }
 
 type CertificateRenewalRunner struct {
@@ -55,13 +58,17 @@ func StartCertificateRenewalWorker(ctx context.Context, cfg CertificateRenewalCo
 	if cfg.WorkerPrefix == "" {
 		cfg.WorkerPrefix = "cert-renewal"
 	}
+	ids, err := workerIDs(cfg.WorkerPrefix, cfg.InstanceID, 1)
+	if err != nil {
+		return nil, fmt.Errorf("certificate renewal worker IDs: %w", err)
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	runner := &CertificateRenewalRunner{cancel: cancel, done: make(chan struct{})}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runCertificateRenewalWorker(workerCtx, cfg.Store, cfg.Applications, cfg.PollInterval, cfg.LogWriter, cfg.WorkerPrefix+"-1")
+		runCertificateRenewalWorker(workerCtx, cfg.Store, cfg.Applications, cfg.PollInterval, cfg.LogWriter, ids[0])
 	}()
 	go func() {
 		wg.Wait()

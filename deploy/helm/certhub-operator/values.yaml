@@ -34,6 +34,7 @@ certhub:
   tokenSecretKey: token
   # Periodic certificate resync; the operator accepts values of at least 30s.
   resyncInterval: 6h
+  # Base of the per-Certificate exponential failure backoff.
   reconcileBackoff: 1m
   httpTimeout: 30s
   httpRetryMaxAttempts: 5

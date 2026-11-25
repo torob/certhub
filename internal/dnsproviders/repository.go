@@ -54,6 +54,10 @@ const (
 
 const FailureCodeZoneConflict = "dns_provider_zone_conflict"
 
+// FailureCodeZoneRefreshFailed marks a refresh job whose discovered zone list
+// could not be applied to dns_provider_zones.
+const FailureCodeZoneRefreshFailed = "dns_zone_refresh_failed"
+
 type Provider struct {
 	ID                        string
 	Name                      string
@@ -525,6 +529,8 @@ with job_claim as (
       and exists (select 1 from job_claim)
       and not exists (select 1 from conflict)
       and not exists (select 1 from input where input.zone_name = dns_provider_zones.zone_name)
+      -- DNS challenge history keeps a foreign key to its zone, so referenced zones are kept.
+      and not exists (select 1 from dns_challenge_records r where r.dns_provider_zone_id = dns_provider_zones.id)
     returning 1
 ), inserted as (
     insert into dns_provider_zones (id, dns_provider_id, zone_name)

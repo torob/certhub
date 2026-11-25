@@ -122,7 +122,7 @@ func (s *Server) serveCertificates(w http.ResponseWriter, r *http.Request, reqct
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/certificates":
 		return s.handleListCertificates(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/applications/"):
-		return s.handleCreateApplicationCertificate(w, r)
+		return s.handleCreateApplicationCertificate(w, r, reqctx)
 	default:
 		return s.handleCertificateByID(w, r, reqctx)
 	}
@@ -137,7 +137,7 @@ func (s *Server) handleSyncCertificate(w http.ResponseWriter, r *http.Request, r
 	if err != nil {
 		return writeCertificateError(w, certdomain.ErrInvalidRequest)
 	}
-	result, err := s.certs.EnsureForApplicationToken(r.Context(), certdomain.ApplicationActor{ApplicationID: current.Application.ID, TokenID: current.Token.ID}, criteria)
+	result, err := s.certs.EnsureForApplicationToken(r.Context(), certdomain.ApplicationActor{ApplicationID: current.Application.ID, TokenID: current.Token.ID}, criteria, certificateAuditContext(reqctx))
 	if err != nil {
 		return writeCertificateError(w, err)
 	}
@@ -151,7 +151,7 @@ func (s *Server) handleSyncCertificate(w http.ResponseWriter, r *http.Request, r
 	return http.StatusOK, ""
 }
 
-func (s *Server) handleCreateApplicationCertificate(w http.ResponseWriter, r *http.Request) (int, string) {
+func (s *Server) handleCreateApplicationCertificate(w http.ResponseWriter, r *http.Request, reqctx RequestContext) (int, string) {
 	current, status, code, ok := s.authenticateCertificateUser(w, r)
 	if !ok {
 		return status, code
@@ -164,7 +164,7 @@ func (s *Server) handleCreateApplicationCertificate(w http.ResponseWriter, r *ht
 	if err != nil {
 		return writeCertificateError(w, certdomain.ErrInvalidRequest)
 	}
-	result, err := s.certs.EnsureForUser(r.Context(), certificateActor(current), parts[0], criteria)
+	result, err := s.certs.EnsureForUser(r.Context(), certificateActor(current), parts[0], criteria, certificateAuditContext(reqctx))
 	if err != nil {
 		return writeCertificateError(w, err)
 	}
@@ -256,7 +256,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 			if err := decodeJSONBody(r, &body); err != nil || body.Reason == "" {
 				return writeCertificateError(w, certdomain.ErrInvalidRequest)
 			}
-			version, err := s.certs.RevokeCertificateVersion(r.Context(), actor, certID, versionID, certdomain.RevocationReason(body.Reason))
+			version, err := s.certs.RevokeCertificateVersion(r.Context(), actor, certID, versionID, certdomain.RevocationReason(body.Reason), certificateAuditContext(reqctx))
 			if err != nil {
 				return writeCertificateError(w, err)
 			}
@@ -331,7 +331,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request, r
 		} else if tail == "reissue" {
 			reason = certdomain.IssuanceReasonReissue
 		}
-		version, err := s.certs.StartLifecycle(r.Context(), actor, id, reason)
+		version, err := s.certs.StartLifecycle(r.Context(), actor, id, reason, certificateAuditContext(reqctx))
 		if err != nil {
 			return writeCertificateError(w, err)
 		}
@@ -548,6 +548,7 @@ func (s *Server) authenticateCertificateUser(w http.ResponseWriter, r *http.Requ
 func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 	var state certdomain.StateError
 	var renewalNotDue certdomain.RenewalNotDueError
+	var renewalOverlap certdomain.RenewalOverlapError
 	var busy certdomain.CertificateBusyError
 	var validVersions certdomain.CertificateHasValidVersionsError
 	status := http.StatusInternalServerError
@@ -579,6 +580,9 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 	case errors.As(err, &renewalNotDue):
 		status, code, message = http.StatusConflict, "renewal_not_due", "Certificate is not inside its renewal window."
 		details = renewalNotDueDetails(renewalNotDue)
+	case errors.As(err, &renewalOverlap):
+		status, code, message = http.StatusConflict, "renewal_overlap_exists", "Certificate already has the maximum number of valid versions; revoke one or wait for the older version to expire."
+		details = renewalOverlapDetails(renewalOverlap)
 	case errors.Is(err, certdomain.ErrConflict):
 		status, code, message = http.StatusConflict, "conflict", "Resource state conflicts with this request."
 	case errors.As(err, &state):
@@ -624,6 +628,17 @@ func renewalNotDueDetails(err certdomain.RenewalNotDueError) map[string]any {
 		details["not_after"] = err.Version.NotAfter
 	}
 	return details
+}
+
+func renewalOverlapDetails(err certdomain.RenewalOverlapError) map[string]any {
+	versions := make([]apiCertificateVersion, 0, len(err.ValidVersions))
+	for _, version := range err.ValidVersions {
+		versions = append(versions, serializeCertificateVersion(version))
+	}
+	return map[string]any{
+		"certificate_id": err.Certificate.ID,
+		"valid_versions": versions,
+	}
 }
 
 func certificateStateDetails(state certdomain.StateError) map[string]any {

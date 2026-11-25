@@ -578,7 +578,16 @@ Password login rate limiting:
 - Must return `429 rate_limited` when limits are exceeded.
 - Must not reveal whether the normalized email belongs to a User.
 - Successful login clears failure counters for the normalized email plus source IP key.
-- Recommended v1 defaults: 5 failed attempts per 5 minutes for one normalized email plus source IP, and 50 failed attempts per 5 minutes per source IP.
+- v1 limits: 5 failed attempts per 5 minutes for one normalized email plus source IP, and 50 failed attempts per 5 minutes per source IP. The window is fixed and starts at the first failure.
+- Covered endpoints: `POST /v1/auth/login` (password and TOTP), `POST /v1/auth/password-2fa/login-setup/confirm`, `POST /v1/auth/password-2fa/confirm`, and `DELETE /v1/auth/password-2fa`. Authenticated endpoints and the login-setup confirm use the User's normalized email.
+- Every invalid password (`invalid_credentials`) and every invalid TOTP code (`invalid_2fa_code`) counts as one failure for both keys. Known and unknown emails use the same keys and counters.
+- The limit is checked before any User lookup or Argon2id work. Attempts in progress count against the limit, so parallel requests cannot pass it.
+- Only a completed login (`POST /v1/auth/login` with status `completed`, or a successful login-setup confirm) clears the normalized email plus source IP counter. A password step that returns `password_2fa_setup_required`, and successful authenticated 2FA confirm or disable requests, do not clear it. Nothing clears the source IP counter before its window ends.
+- `rate_limited` responses set `retry_after_seconds` and the `Retry-After` header to the seconds until the blocking window ends.
+- A rate-limited `POST /v1/auth/login` writes `user_login_failed` with reason `rate_limited` and no target User, because no User lookup is made.
+- Counters are in memory in each server process. They are not shared between replicas and reset when the process restarts. A deployment with N replicas can accept up to N times the limits.
+- Each process tracks at most 100,000 keys. When it is full, it removes expired keys first and then evicts the least recently used keys. It never evicts keys of attempts in progress, and if no key can be evicted it returns `rate_limited`.
+- Argon2id password verifications, including the dummy verification for unknown or unusable accounts, run with at most `min(GOMAXPROCS, 4)` verifications at a time in each process. Each verification uses 64 MiB, so this bounds that memory. Waiting requests stop when the request context ends.
 
 ### Token Hashing
 
@@ -1278,6 +1287,7 @@ Expected responses:
 - `400 Bad Request`: invalid body.
 - `401 Unauthorized`: access token is missing, invalid, or expired (`invalid_token`), or TOTP code is invalid (`invalid_2fa_code`).
 - `404 Not Found`: no pending setup exists.
+- `429 Too Many Requests`: too many failed verifications (`rate_limited`).
 
 #### DELETE /v1/auth/password-2fa
 
@@ -1313,6 +1323,7 @@ Expected responses:
 - `400 Bad Request`: invalid body.
 - `401 Unauthorized`: access token is missing, invalid, or expired (`invalid_token`), or password/TOTP proof is invalid (`invalid_credentials` or `invalid_2fa_code`).
 - `403 Forbidden`: 2FA is required by policy (`password_2fa_required`).
+- `429 Too Many Requests`: too many failed verifications (`rate_limited`).
 
 #### GET /v1/auth/oidc/login
 
@@ -1904,7 +1915,7 @@ Description and notes:
 - Manual renewal follows the same version-overlap constraints as auto renewal.
 - If a Certificate already has a `status=issuing` CertificateVersion with `reason=renewal`, this endpoint is idempotent and returns the existing in-progress renewal instead of creating another version.
 - If a Certificate has any other `status=issuing` CertificateVersion, such as initial issuance or key rotation, this endpoint returns `409 conflict` and does not create another version.
-- If creating a renewal could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 renewal_overlap_exists`.
+- If creating a renewal could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 renewal_overlap_exists` and must not create a CertificateVersion or job. `details` uses `RenewalOverlapDetails`: `certificate_id` and the current `valid_versions` metadata.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. The server reconcile and auto-renewal processes manage that Certificate.
 
 ```http
@@ -1940,7 +1951,7 @@ Description and notes:
 - Key rotation follows the same replacement-overlap constraints as renewal.
 - If a Certificate already has a `status=issuing` CertificateVersion with `reason=key_rotation`, this endpoint is idempotent and returns the existing in-progress key rotation.
 - If a Certificate has any other `status=issuing` CertificateVersion, this endpoint returns `409 conflict` and does not create another version.
-- If key rotation could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 Conflict`.
+- If key rotation could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 renewal_overlap_exists` and must not create a CertificateVersion or job.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. Change `self_certificate.key_type` to request a new key type for Certhub's own serving certificate.
 
 ```http
@@ -1960,7 +1971,7 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User lacks lifecycle access or current Application domain scopes no longer cover the Certificate SANs.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow key rotation or the Certificate is system-managed.
+- `409 Conflict`: certificate state does not allow key rotation, including `renewal_overlap_exists` or `system_managed_resource`.
 
 #### POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke
 
@@ -1973,6 +1984,10 @@ Description and notes:
 - Request body must include an explicit `reason` from the revocation reason enum. The backend must not silently default a missing revocation reason.
 - Marks only the selected CertificateVersion `revoked` immediately for current material selection.
 - Sets `certificate_versions.revocation_reason`, `revoked_at`, and `revoked_by_user_id` immediately.
+- Updates the parent Certificate status in the same statement, using the other CertificateVersions only (the revoked version never counts as usable):
+  - If the parent status is `issuing`, `validating_dns`, `renewing`, or `rotating_key`, the status does not change. The in-progress issuance sets the final status.
+  - Else, if another usable version remains (non-revoked `valid` version with certificate, chain, fullchain, encrypted private key, and ETag present, and `not_before <= now < not_after`), the status does not change. A `ready` parent stays `ready`.
+  - Else, the parent status becomes `revoked`. Certhub sets parent `revocation_reason` and `revoked_by_user_id` from the request and `revoked_at` to the current time (an already revoked parent keeps its original values), and clears parent `failure_code` and `failure_message`. Current material endpoints then return `409 certificate_no_active_version`, and a User must use `POST /v1/certificates/{certificate_id}/reissue`, which clears the parent revocation metadata.
 - Attempts ACME revocation for the selected version when applicable.
 - If ACME revocation fails after local revocation is accepted, local version status remains `revoked`; Certhub records failure metadata and audit events and allows retry.
 - Repeating this endpoint for an already locally revoked version retries ACME revocation when `acme_revocation_status=failed` or `pending`.
@@ -2324,6 +2339,7 @@ Summary: Complete forced password-login 2FA setup.
 
 - Accepts `setup_token` and `totp_code`.
 - Wrong TOTP returns `invalid_2fa_code` without consuming the setup token.
+- Wrong TOTP codes count toward password login rate limiting; when the limit is exceeded the endpoint returns `429 rate_limited`.
 - Success consumes the setup token, enables password 2FA, creates a normal login session, and returns the standard token response.
 
 #### GET /v1/applications
@@ -3281,12 +3297,15 @@ Material/archive endpoints expose reconciliation state only as normal lookup res
 10. A replacement overlap starts when renewal or key rotation is created while an older CertificateVersion is still valid and ends when the older CertificateVersion expires.
 11. During replacement overlap, a Certificate may temporarily have two valid, not-expired CertificateVersions: the older version that is still usable and the newly issued replacement version.
 12. A Certificate must never have more than two valid, not-expired CertificateVersions.
-13. Manual renewal and key rotation use the same overlap constraints. If manual renewal would create more than two valid, not-expired CertificateVersions, Certhub must reject it with `409 renewal_overlap_exists`. If key rotation would create more than two valid, not-expired CertificateVersions, Certhub must reject it with `409 Conflict`.
+13. Manual renewal and key rotation use the same overlap constraints. If manual renewal or key rotation would create more than two valid, not-expired CertificateVersions, Certhub must reject it with `409 renewal_overlap_exists`.
 14. Old valid CertificateVersions may remain stored until their natural `not_after`, but API material endpoints must always return the latest valid CertificateVersion.
 15. Expired CertificateVersions must never be returned from `tls-material` or `tls-archive`.
 16. If a certificate identity exists but no active valid CertificateVersion exists and no issuing CertificateVersion exists, material/archive endpoints return `409 certificate_no_active_version`.
 17. `409 certificate_no_active_version` is not retryable. A User with lifecycle access must start `POST /v1/certificates/{certificate_id}/reissue`.
 18. Application clients must handle `409 certificate_no_active_version` as a terminal cycle failure. They must not call `POST /v1/sync/certificates` unless material/archive lookup returns `404 certificate_not_found`.
+19. The background renewal scan must not select a Certificate that already has two valid, not-expired CertificateVersions (`status=valid` and `not_after` in the future, the same rule as the `certificate_versions` overlap trigger). Renewal for that Certificate starts on a later scan, after the older CertificateVersion expires or is revoked.
+20. The issuance worker must check the valid-version overlap limit before it creates or loads the ACME order for an issuing CertificateVersion, so that no CA issuance occurs when the issued material could not be stored. It must check the limit again before it stores material. A failure from either check uses failure code `certificate_version_overlap`; event metadata `phase` is `issuance_precheck` or `certificate_material_store`.
+21. Automatic renewal failure backoff: after a renewal CertificateVersion becomes `failed`, the background renewal scan must skip that Certificate until 1 hour after that version's `completed_at`. This limits CA and DNS work, and CA rate-limit use, when renewal fails repeatedly. Manual `POST /v1/certificates/{certificate_id}/renew` is not subject to this backoff.
 
 ## Observability
 
@@ -3857,7 +3876,7 @@ Durable management jobs for refreshing auto-mode DNS provider zones.
 | `started_at` | timestamptz | Nullable | Time current or latest attempt started. |
 | `completed_at` | timestamptz | Nullable | Time the job reached terminal state. |
 | `discovered_zone_count` | integer | Nullable, non-negative | Number of zones discovered on successful refresh. |
-| `failure_code` | string | Nullable | Stable sanitized failure code for failed refresh jobs, including `dns_provider_zone_conflict` when applicable. |
+| `failure_code` | string | Nullable | Stable sanitized failure code for failed refresh jobs, including `dns_provider_zone_conflict` when applicable and `dns_zone_refresh_failed` when the discovered zone list could not be applied. |
 | `failure_message` | string | Nullable, max length 2048, no control characters | Sanitized failure details. Must not contain provider credentials or unsanitized provider responses. |
 | `conflict_zone_name` | string | Nullable, format `dns_name` | Conflicting zone name when failure is `dns_provider_zone_conflict`. |
 | `conflict_dns_provider_id` | UUID | Nullable, foreign key to `dns_providers.id` | Existing provider that owns `conflict_zone_name` when conflict occurs. |
@@ -3870,6 +3889,7 @@ Constraints:
 - Workers must claim refresh jobs with row-level locking or leases, such as `FOR UPDATE SKIP LOCKED`.
 - Failed refresh jobs must preserve the previous `dns_provider_zones` rows unchanged.
 - Successful refresh jobs replace immutable zone rows by delete plus insert in one transaction.
+- A refresh job whose discovered zone list cannot be applied must fail with `dns_zone_refresh_failed` and release its lease; it must not stay `running` and be reclaimed without end.
 - Provider `zone_refresh_status` and failure fields must be updated atomically with refresh job transitions.
 
 ### `dns_provider_zones`
@@ -3898,6 +3918,7 @@ Auto mode behavior:
 - Certhub must enqueue a durable refresh job to discover zones when the provider is created/activated and on explicit refresh.
 - Refresh workers call the DNS provider API to discover zones.
 - A successful refresh replaces the provider's `dns_provider_zones` rows with the discovered zone list in one transaction.
+- Exception: a zone that is missing from the discovered list but is still referenced by `dns_challenge_records` (DNS challenge history) is kept, because challenge history is retained and references the zone row. A kept zone stays matchable for new issuance; if it no longer exists at the DNS provider, issuance fails when Certhub presents the challenge record. It is removed by a later refresh after its challenge history is deleted with its Certificate.
 - Users cannot manually create, update, or delete zones for auto-mode providers.
 - If discovery fails, Certhub records `dns_zone_discovery_failed` and must not silently remove the existing zone rows.
 - If the discovered list contains a zone that conflicts with a `dns_provider_zones` row owned by another provider, the refresh job must fail with `dns_provider_zone_conflict`, preserve the previous rows unchanged, and store structured details containing the conflicting `zone_name`, current provider ID, and conflicting provider ID.

@@ -3,6 +3,7 @@ package operator
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,13 +30,7 @@ func TestExternalKubernetesSecretSyncWithRealAPI(t *testing.T) {
 	defer cancel()
 
 	ensureExternalKubernetesCRD(ctx, t, kubectl)
-	namespace := fmt.Sprintf("certhub-secret-sync-%d", time.Now().UTC().Unix())
-	runKubectl(ctx, t, kubectl, nil, "create", "namespace", namespace)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupCtx, kubectl, "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false").Run()
-	})
+	namespace := createExternalTestNamespace(ctx, t, kubectl, "certhub-secret-sync")
 
 	manifest := fmt.Sprintf(`apiVersion: %s
 kind: %s
@@ -101,8 +96,8 @@ spec:
 	if secret.Metadata.Annotations[AnnotationOwnerUID] != cert.Metadata.UID {
 		t.Fatalf("Secret owner UID annotation = %q, want %q", secret.Metadata.Annotations[AnnotationOwnerUID], cert.Metadata.UID)
 	}
-	if len(secret.Metadata.OwnerReferences) != 1 || secret.Metadata.OwnerReferences[0] != certhubOwnerReference(cert) {
-		t.Fatalf("Retain Secret owner reference = %#v", secret.Metadata.OwnerReferences)
+	if len(secret.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("Retain Secret owner reference = %#v, want none", secret.Metadata.OwnerReferences)
 	}
 
 	updated, err := kube.ListCertificates(ctx, namespace)
@@ -138,6 +133,115 @@ spec:
 	if len(retained.Metadata.OwnerReferences) != 0 {
 		t.Fatalf("retained Secret still has owner reference: %#v", retained.Metadata.OwnerReferences)
 	}
+}
+
+// TestExternalKubernetesRetainSecretSurvivesForegroundDeletion reproduces an
+// Argo CD style prune (propagationPolicy=Foreground). The garbage collector
+// deletes every dependent of an owner in foreground deletion while the owner
+// still exists, so a Retain Secret must never carry an owner reference that
+// the operator would only remove after it observes the deletion.
+func TestExternalKubernetesRetainSecretSurvivesForegroundDeletion(t *testing.T) {
+	if os.Getenv("CERTHUB_EXTERNAL_K8S_SECRET_SYNC") != "1" {
+		t.Skip("set CERTHUB_EXTERNAL_K8S_SECRET_SYNC=1 to run real Kubernetes Secret sync validation")
+	}
+	kubectl := strings.TrimSpace(os.Getenv("KUBECTL_BIN"))
+	if kubectl == "" {
+		kubectl = "kubectl"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	ensureExternalKubernetesCRD(ctx, t, kubectl)
+	namespace := createExternalTestNamespace(ctx, t, kubectl, "certhub-retain-foreground")
+
+	manifest := fmt.Sprintf(`apiVersion: %s
+kind: %s
+metadata:
+  name: gateway
+  namespace: %s
+spec:
+  domains:
+    - gateway.example.com
+  secretName: gateway-tls
+  keyType: ecdsa-p256
+  issuer: letsencrypt_staging
+  secretDeletionPolicy: Retain
+`, APIVersion, Kind, namespace)
+	runKubectl(ctx, t, kubectl, []byte(manifest), "apply", "-f", "-")
+
+	proxyURL, stopProxy := startKubectlProxy(ctx, t, kubectl)
+	defer stopProxy()
+	kube := &RESTKubeClient{
+		baseURL:          proxyURL,
+		defaultNamespace: namespace,
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+	}
+
+	certs, err := kube.ListCertificates(ctx, namespace)
+	if err != nil || len(certs) != 1 {
+		t.Fatalf("list CerthubCertificate through Kubernetes API: items=%#v err=%v", certs, err)
+	}
+	cert := certs[0]
+	backend := &fakeBackend{materials: []materialResponse{{
+		value: testMaterial("etag-foreground"),
+		meta:  certhubclient.ResponseMeta{StatusCode: http.StatusOK},
+	}}}
+	reconciler := NewReconciler(kube, backend)
+	if result, err := reconciler.Reconcile(ctx, cert); err != nil || result.Result != "synced" {
+		t.Fatalf("reconcile against real Kubernetes API: result=%#v err=%v", result, err)
+	}
+	synced, err := kube.GetSecret(ctx, namespace, "gateway-tls")
+	if err != nil {
+		t.Fatalf("get synced TLS Secret through Kubernetes API: %v", err)
+	}
+
+	// Delete like an Argo CD prune. The operator has not observed the
+	// deletion yet; give the garbage collector time to act first.
+	runKubectl(ctx, t, kubectl, nil, "delete", "certhubcertificate", "gateway", "--namespace", namespace, "--cascade=foreground", "--wait=false")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := kube.GetSecret(ctx, namespace, "gateway-tls"); stderrors.Is(err, ErrNotFound) {
+			t.Fatalf("garbage collector deleted the Retain Secret during foreground deletion before the operator reconciled; Secret owner references at sync: %#v", synced.Metadata.OwnerReferences)
+		} else if err != nil {
+			t.Fatalf("get Secret during foreground deletion: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	deleting, err := kube.ListCertificates(ctx, namespace)
+	if err != nil || len(deleting) != 1 || deleting[0].Metadata.DeletionTimestamp == nil {
+		t.Fatalf("get terminating CerthubCertificate: items=%#v err=%v", deleting, err)
+	}
+	if result, err := reconciler.Reconcile(ctx, deleting[0]); err != nil || result.Result != "deleted" {
+		t.Fatalf("reconcile Retain foreground deletion: result=%#v err=%v", result, err)
+	}
+	runKubectl(ctx, t, kubectl, nil, "wait", "--for=delete", "certhubcertificate/gateway", "--namespace", namespace, "--timeout=30s")
+	retained, err := kube.GetSecret(ctx, namespace, "gateway-tls")
+	if err != nil {
+		t.Fatalf("Retain Secret disappeared after foreground CerthubCertificate deletion: %v", err)
+	}
+	if retained.Metadata.UID != synced.Metadata.UID || string(retained.Data["tls.crt"]) != "FULLCHAIN" {
+		t.Fatalf("retained Secret identity or data changed: uid=%q want %q", retained.Metadata.UID, synced.Metadata.UID)
+	}
+	if len(retained.Metadata.OwnerReferences) != 0 {
+		t.Fatalf("retained Secret still has owner reference: %#v", retained.Metadata.OwnerReferences)
+	}
+}
+
+// createExternalTestNamespace creates a disposable namespace and deletes it at
+// cleanup. CERTHUB_EXTERNAL_K8S_NAMESPACE_PREFIX optionally prefixes the name
+// so shared clusters can scope test namespaces.
+func createExternalTestNamespace(ctx context.Context, t *testing.T, kubectl, base string) string {
+	t.Helper()
+	namespace := fmt.Sprintf("%s%s-%d", strings.TrimSpace(os.Getenv("CERTHUB_EXTERNAL_K8S_NAMESPACE_PREFIX")), base, time.Now().UTC().Unix())
+	runKubectl(ctx, t, kubectl, nil, "create", "namespace", namespace)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		_ = exec.CommandContext(cleanupCtx, kubectl, "delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false").Run()
+	})
+	return namespace
 }
 
 func ensureExternalKubernetesCRD(ctx context.Context, t *testing.T, kubectl string) {
@@ -231,5 +335,68 @@ func operatorTestRepoRoot(t *testing.T) string {
 			t.Fatal("could not find repository root")
 		}
 		dir = next
+	}
+}
+
+// TestExternalKubernetesWatchOutlivesRequestTimeout checks against a real API
+// server that a CerthubCertificate watch stays open past the whole-request
+// timeout of the normal Kubernetes client and still delivers events promptly.
+func TestExternalKubernetesWatchOutlivesRequestTimeout(t *testing.T) {
+	if os.Getenv("CERTHUB_EXTERNAL_K8S_SECRET_SYNC") != "1" {
+		t.Skip("set CERTHUB_EXTERNAL_K8S_SECRET_SYNC=1 to run real Kubernetes watch validation")
+	}
+	kubectl := strings.TrimSpace(os.Getenv("KUBECTL_BIN"))
+	if kubectl == "" {
+		kubectl = "kubectl"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ensureExternalKubernetesCRD(ctx, t, kubectl)
+	namespace := createExternalTestNamespace(ctx, t, kubectl, "certhub-watch")
+	proxyURL, stopProxy := startKubectlProxy(ctx, t, kubectl)
+	defer stopProxy()
+
+	const requestTimeout = 2 * time.Second
+	kube := &RESTKubeClient{
+		baseURL:          proxyURL,
+		defaultNamespace: namespace,
+		httpClient:       &http.Client{Timeout: requestTimeout},
+	}
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	watch, err := kube.WatchCertificateChanges(watchCtx, namespace)
+	if err != nil {
+		t.Fatalf("watch CerthubCertificate: %v", err)
+	}
+	time.Sleep(requestTimeout + 1500*time.Millisecond)
+
+	manifest := fmt.Sprintf(`apiVersion: %s
+kind: %s
+metadata:
+  name: late
+  namespace: %s
+spec:
+  domains:
+    - late.example.com
+  secretName: late-tls
+  keyType: ecdsa-p256
+`, APIVersion, Kind, namespace)
+	runKubectl(ctx, t, kubectl, []byte(manifest), "apply", "-f", "-")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event, ok := <-watch:
+			if !ok {
+				t.Fatal("watch channel closed")
+			}
+			if event.Certificate != nil && event.Certificate.Metadata.Name == "late" {
+				if event.Type != "ADDED" {
+					t.Fatalf("event type = %q; want ADDED on the open stream", event.Type)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no watch event within 2s of creation; the stream did not outlive the %s request timeout", requestTimeout)
+		}
 	}
 }

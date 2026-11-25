@@ -82,7 +82,7 @@ resources are therefore trusted to choose certificate Secret names in that
 namespace.
 
 `spec.secretName` is immutable after creation. This guarantees that every
-owner-referenced Secret remains discoverable through the deleting
+managed Secret remains discoverable through the deleting
 Certificate's single target name. To move certificate material to another
 Secret, create a new `CerthubCertificate` with the new target, update consumers,
 and then delete the old resource under its selected deletion policy.
@@ -101,22 +101,29 @@ remove its cleanup finalizer. Kubernetes CRDs do not expose a separate
 on every valid, non-deleting Certificate before the operator creates a Secret
 or attaches the Certificate owner reference to an existing Secret.
 
-Managed TLS Secrets carry an owner reference to their
-`CerthubCertificate`. This makes each Secret visible as a child in Kubernetes
-resource graphs, including the Argo CD resource tree. During deletion the
-finalizer makes both deletion policies explicit and ordered:
+Every managed TLS Secret carries the management labels and the
+`certhub.torob.dev/owner-uid` annotation. Only Secrets of a Certificate with
+`secretDeletionPolicy: Delete` also carry an owner reference to their
+`CerthubCertificate`, which makes them visible as a child in Kubernetes
+resource graphs, including the Argo CD resource tree. `Retain` Secrets have no
+owner reference: Kubernetes foreground deletion, which Argo CD prune uses by
+default, deletes all dependents while the owner still exists, before the
+operator can react, and the finalizer cannot prevent that. The operator adds
+or removes the owner reference in place when the policy changes. During
+deletion the finalizer makes both deletion policies explicit and ordered:
 
-- `Retain` verifies ownership and removes only the matching Certificate owner
-  reference before releasing the finalizer. An already unreferenced owned
-  Secret also remains in place.
+- `Retain` verifies ownership, removes a remaining matching Certificate owner
+  reference (for example from an older operator version), and then releases
+  the finalizer. The Secret remains in place.
 - `Delete` verifies ownership and deletes the Secret with UID and resource
   version preconditions before releasing the finalizer.
 
 If either cleanup operation fails, the finalizer remains so Kubernetes cannot
-bypass the selected policy. Existing managed Secrets created by `v0.10.0`
-without owner references are patched in place after the finalizer is
-persisted; that migration does not replace the Secret or rewrite its TLS
-material.
+bypass the selected policy. Existing managed Secrets are patched in place to
+match the policy after the finalizer is persisted; that patch does not replace
+the Secret or rewrite its TLS material. If you change a Certificate from
+`Delete` to `Retain`, wait until the operator has reconciled the change before
+you delete the Certificate with foreground propagation.
 
 Set `rbac.create=false` to supply all RBAC resources outside the chart. Set
 `serviceAccount.create=false` and `serviceAccount.name` to use an existing
@@ -258,8 +265,9 @@ The customization can be checked locally with the Argo CD `v3.4.2` CLI:
 ARGOCD_BIN=/path/to/argocd-v3.4.2 test/argocd-health/check.sh
 ```
 
-The generated Secret appears beneath its Certificate after the operator adds
-the Kubernetes owner reference. When an AppProject uses a restrictive
+For `secretDeletionPolicy: Delete`, the generated Secret appears beneath its
+Certificate after the operator adds the Kubernetes owner reference. `Retain`
+Secrets have no owner reference and do not appear beneath the Certificate. When an AppProject uses a restrictive
 `namespaceResourceWhitelist`, allow both the custom resource and core
 Secrets:
 
@@ -283,7 +291,8 @@ namespaceResourceWhitelist:
 | `certhub.url` | `""` | Required absolute HTTPS Certhub URL |
 | `certhub.tokenSecretName` | `certhub-token` | Token Secret in the Helm release namespace |
 | `certhub.tokenSecretKey` | `token` | Application-token key in the token Secret |
-| `certhub.resyncInterval` | `6h` | Periodic resync interval; minimum `30s` |
+| `certhub.resyncInterval` | `6h` | Requeue interval of a ready Certificate and period of the safety-net namespace list; minimum `30s` |
+| `certhub.reconcileBackoff` | `1m` | Base of the per-Certificate exponential failure backoff (capped at 32x and at `resyncInterval`) and poll interval while issuance is pending without `Retry-After` |
 | `metrics.service.enabled` | `true` | Create the metrics Service |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
 | `networkPolicy.enabled` | `false` | Create a policy selecting the operator pod |

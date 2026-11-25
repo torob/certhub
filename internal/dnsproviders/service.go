@@ -435,7 +435,15 @@ func (s *Service) CompleteNextRefreshJob(ctx context.Context, workerID string) (
 	}
 	completed, err := s.repo.CompleteRefreshJobSuccess(ctx, CompleteRefreshJobParams{JobID: job.ID, DNSProviderID: job.DNSProviderID, WorkerID: workerID, ZoneNames: zones})
 	if err != nil {
-		return RefreshJob{}, true, classifyWriteError(err)
+		if ctx.Err() != nil {
+			return RefreshJob{}, true, classifyWriteError(err)
+		}
+		msg := "discovered zones could not be applied"
+		failed, failErr := s.repo.FailRefreshJob(ctx, FailRefreshJobParams{JobID: job.ID, DNSProviderID: job.DNSProviderID, WorkerID: workerID, FailureCode: FailureCodeZoneRefreshFailed, FailureMessage: &msg})
+		if failErr != nil {
+			return RefreshJob{}, true, classifyWriteError(failErr)
+		}
+		return failed, true, nil
 	}
 	return completed, true, nil
 }

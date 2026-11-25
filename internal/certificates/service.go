@@ -25,6 +25,7 @@ var (
 	ErrNotFound                      = errors.New("not found")
 	ErrConflict                      = errors.New("conflict")
 	ErrRenewalNotDue                 = errors.New("renewal not due")
+	ErrRenewalOverlapExists          = errors.New("renewal overlap exists")
 	ErrIssuerNotConfigured           = errors.New("issuer not configured")
 	ErrDomainNotAuthorized           = errors.New("domain not authorized")
 	ErrSystemManagedResource         = errors.New("system managed resource")
@@ -69,7 +70,7 @@ type Store interface {
 	GetLatestValidMaterial(context.Context, string) (CertificateVersion, error)
 	CreateIssuingVersion(context.Context, CreateIssuingVersionParams) (CertificateVersion, error)
 	EnsureIssuanceJob(context.Context, EnsureIssuanceJobParams) (IssuanceJob, error)
-	RevokeCertificateVersion(context.Context, RevokeCertificateVersionParams) (CertificateVersion, error)
+	RevokeCertificateVersion(context.Context, RevokeCertificateVersionParams) (CertificateVersion, bool, error)
 	DeleteCertificate(context.Context, DeleteCertificateParams) (Certificate, error)
 }
 
@@ -122,6 +123,15 @@ type ApplicationActor struct {
 type AuditContext struct {
 	CorrelationID string
 	SourceIP      string
+}
+
+// auditIdentity is the identity that a lifecycle mutation records in its
+// audit event.
+type auditIdentity struct {
+	Type    auditdomain.IdentityType
+	ID      string
+	TokenID string
+	Context AuditContext
 }
 
 type Criteria struct {
@@ -201,6 +211,21 @@ func (e RenewalNotDueError) Unwrap() error {
 	return ErrRenewalNotDue
 }
 
+// RenewalOverlapError reports that a renewal or key rotation would exceed the
+// limit of MaxActiveValidVersions valid, not-expired CertificateVersions.
+type RenewalOverlapError struct {
+	Certificate   Certificate
+	ValidVersions []CertificateVersion
+}
+
+func (e RenewalOverlapError) Error() string {
+	return ErrRenewalOverlapExists.Error()
+}
+
+func (e RenewalOverlapError) Unwrap() error {
+	return ErrRenewalOverlapExists
+}
+
 func (e StateError) Error() string {
 	return e.Err.Error()
 }
@@ -213,7 +238,7 @@ func NewService(cfg ServiceConfig) *Service {
 	return &Service{repo: cfg.Repository, apps: cfg.ApplicationReader, issuers: cfg.IssuerReader, audit: cfg.AuditRepository, keys: cfg.KeySet, tx: cfg.Storage}
 }
 
-func (s *Service) EnsureForApplicationToken(ctx context.Context, actor ApplicationActor, criteria Criteria) (EnsureResult, error) {
+func (s *Service) EnsureForApplicationToken(ctx context.Context, actor ApplicationActor, criteria Criteria, auditCtx AuditContext) (EnsureResult, error) {
 	app, err := s.apps.Get(ctx, actor.ApplicationID)
 	if err != nil {
 		return EnsureResult{}, ErrNotFound
@@ -221,10 +246,15 @@ func (s *Service) EnsureForApplicationToken(ctx context.Context, actor Applicati
 	if systemManagedApplication(app) {
 		return EnsureResult{}, ErrSystemManagedResource
 	}
-	return s.ensure(ctx, actor.ApplicationID, criteria, "", nil)
+	return s.ensure(ctx, actor.ApplicationID, criteria, auditIdentity{
+		Type:    auditdomain.IdentityTypeApplication,
+		ID:      actor.ApplicationID,
+		TokenID: actor.TokenID,
+		Context: auditCtx,
+	})
 }
 
-func (s *Service) EnsureForUser(ctx context.Context, actor Actor, applicationID string, criteria Criteria) (EnsureResult, error) {
+func (s *Service) EnsureForUser(ctx context.Context, actor Actor, applicationID string, criteria Criteria, auditCtx AuditContext) (EnsureResult, error) {
 	app, err := s.requireApplicationRole(ctx, actor, applicationID, appdomain.GrantRoleManager, false)
 	if err != nil {
 		return EnsureResult{}, err
@@ -232,7 +262,7 @@ func (s *Service) EnsureForUser(ctx context.Context, actor Actor, applicationID 
 	if systemManagedApplication(app) {
 		return EnsureResult{}, ErrSystemManagedResource
 	}
-	return s.ensure(ctx, applicationID, criteria, actor.ID, nil)
+	return s.ensure(ctx, applicationID, criteria, auditIdentity{Type: auditdomain.IdentityTypeUser, ID: actor.ID, Context: auditCtx})
 }
 
 func (s *Service) ListCertificates(ctx context.Context, actor Actor, params ListParams) (ListResult, error) {
@@ -513,7 +543,7 @@ func (s *Service) MaterialMetadataForVersionID(ctx context.Context, actor Actor,
 	return MaterialMetadataResult{Certificate: cert, Version: version, MaterialETag: *version.MaterialETag}, nil
 }
 
-func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID string, reason IssuanceReason) (CertificateVersion, error) {
+func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID string, reason IssuanceReason, auditCtx AuditContext) (CertificateVersion, error) {
 	var version CertificateVersion
 	err := s.withWriteTx(ctx, func(txsvc *Service) error {
 		cert, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, false)
@@ -588,7 +618,16 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 				return err
 			}
 		}
-		version, err = txsvc.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{CertificateID: certificateID, Reason: reason})
+		if reason == IssuanceReasonRenewal || reason == IssuanceReasonKeyRotation {
+			if err := txsvc.requireOverlapCapacity(ctx, cert); err != nil {
+				return err
+			}
+		}
+		versionID, err := storage.NewUUID()
+		if err != nil {
+			return err
+		}
+		version, err = txsvc.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{ID: versionID, CertificateID: certificateID, Reason: reason})
 		if err != nil {
 			if errors.Is(err, storage.ErrNoRows) {
 				if refreshed, getErr := txsvc.repo.Get(ctx, certificateID); getErr == nil && !refreshed.Enabled {
@@ -615,12 +654,17 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		if err != nil {
 			return classifyWriteError(err)
 		}
-		return nil
+		if version.ID != versionID {
+			// An in-progress version with the same reason was returned; this
+			// request changed nothing, so it writes no audit event.
+			return nil
+		}
+		return txsvc.appendLifecycleStartedAudit(ctx, auditIdentity{Type: auditdomain.IdentityTypeUser, ID: actor.ID, Context: auditCtx}, cert, version)
 	})
 	return version, err
 }
 
-func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, certificateID, versionID string, reason RevocationReason) (CertificateVersion, error) {
+func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, certificateID, versionID string, reason RevocationReason, auditCtx AuditContext) (CertificateVersion, error) {
 	var version CertificateVersion
 	err := s.withWriteTx(ctx, func(txsvc *Service) error {
 		current, err := txsvc.visibleCertificate(ctx, actor, certificateID, roleManager, false)
@@ -634,7 +678,8 @@ func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, cer
 		if systemManagedApplication(app) {
 			return ErrSystemManagedResource
 		}
-		version, err = txsvc.repo.RevokeCertificateVersion(ctx, RevokeCertificateVersionParams{
+		var revoked bool
+		version, revoked, err = txsvc.repo.RevokeCertificateVersion(ctx, RevokeCertificateVersionParams{
 			CertificateID:        certificateID,
 			CertificateVersionID: versionID,
 			Reason:               reason,
@@ -651,7 +696,29 @@ func (s *Service) RevokeCertificateVersion(ctx context.Context, actor Actor, cer
 		}); err != nil {
 			return classifyWriteError(err)
 		}
-		return nil
+		action := "certificate_revoked"
+		if !revoked {
+			// A repeated request on a locally revoked version retries ACME
+			// revocation only while it is pending or failed. Otherwise it is
+			// an idempotent success and writes no audit event.
+			if version.ACMERevocationStatus == nil || (*version.ACMERevocationStatus != ACMERemoteRevocationPending && *version.ACMERevocationStatus != ACMERemoteRevocationFailed) {
+				return nil
+			}
+			action = "certificate_revocation_retried"
+		}
+		revocationReason := reason
+		if version.RevocationReason != nil {
+			revocationReason = *version.RevocationReason
+		}
+		metadata := map[string]any{
+			"certificate_version_id": version.ID,
+			"version":                version.Version,
+			"revocation_reason":      string(revocationReason),
+		}
+		if version.ACMERevocationStatus != nil {
+			metadata["acme_revocation_status"] = string(*version.ACMERevocationStatus)
+		}
+		return txsvc.appendCertificateAudit(ctx, auditIdentity{Type: auditdomain.IdentityTypeUser, ID: actor.ID, Context: auditCtx}, action, "certificate_version", version.ID, current, metadata)
 	})
 	return version, err
 }
@@ -705,7 +772,7 @@ func (s *Service) DeleteCertificate(ctx context.Context, actor Actor, certificat
 	})
 }
 
-func (s *Service) ensure(ctx context.Context, applicationID string, criteria Criteria, _ string, _ *AuditContext) (EnsureResult, error) {
+func (s *Service) ensure(ctx context.Context, applicationID string, criteria Criteria, identity auditIdentity) (EnsureResult, error) {
 	var result EnsureResult
 	err := s.withWriteTx(ctx, func(txsvc *Service) error {
 		normalized, issuer, err := txsvc.normalizeCriteria(ctx, criteria)
@@ -715,7 +782,12 @@ func (s *Service) ensure(ctx context.Context, applicationID string, criteria Cri
 		if err := txsvc.requireDomainCoverage(ctx, applicationID, normalized.Domains); err != nil {
 			return err
 		}
+		certificateID, err := storage.NewUUID()
+		if err != nil {
+			return err
+		}
 		cert, err := txsvc.repo.CreateOrReuse(ctx, CreateOrReuseCertificateParams{
+			ID:             certificateID,
 			ApplicationID:  applicationID,
 			IssuerID:       issuer.ID,
 			NormalizedSANs: normalized.Domains,
@@ -726,42 +798,128 @@ func (s *Service) ensure(ctx context.Context, applicationID string, criteria Cri
 			return classifyWriteError(err)
 		}
 		result.Certificate = cert
-		if !cert.Enabled {
-			return nil
-		}
-		if cert.Status == StatusFailed || cert.Status == StatusRevoked || cert.Status == StatusReady || cert.Status == StatusDeleted {
-			return nil
-		}
-		version, err := txsvc.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{
-			CertificateID: cert.ID,
-			Reason:        IssuanceReasonInitialIssue,
-		})
+		created := cert.ID == certificateID
+		started, err := txsvc.startInitialIssuance(ctx, cert, &result)
 		if err != nil {
-			if errors.Is(err, storage.ErrNoRows) {
-				if refreshed, getErr := txsvc.repo.Get(ctx, cert.ID); getErr == nil && !refreshed.Enabled {
-					result.Certificate = refreshed
-					return nil
-				}
+			return err
+		}
+		switch {
+		case created:
+			metadata := map[string]any{
+				"normalized_sans": cert.NormalizedSANs,
+				"key_type":        string(cert.KeyType),
+				"issuer_id":       cert.IssuerID,
 			}
-			return classifyWriteError(err)
-		}
-		_, err = txsvc.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
-			CertificateID:        cert.ID,
-			CertificateVersionID: &version.ID,
-			Reason:               JobReasonInitialIssue,
-			NextRunAt:            time.Now().UTC(),
-		})
-		if err != nil {
-			return classifyWriteError(err)
-		}
-		result.Accepted = true
-		updated, err := txsvc.repo.Get(ctx, cert.ID)
-		if err == nil {
-			result.Certificate = updated
+			if started != nil {
+				metadata["certificate_version_id"] = started.ID
+				metadata["issuance_reason"] = string(started.Reason)
+			}
+			return txsvc.appendCertificateAudit(ctx, identity, "certificate_created", "certificate", cert.ID, cert, metadata)
+		case started != nil:
+			return txsvc.appendLifecycleStartedAudit(ctx, identity, cert, *started)
 		}
 		return nil
 	})
 	return result, err
+}
+
+// startInitialIssuance creates or reuses the initial issuing version and its
+// job for an ensured Certificate. It returns the version only when this call
+// created it.
+func (s *Service) startInitialIssuance(ctx context.Context, cert Certificate, result *EnsureResult) (*CertificateVersion, error) {
+	if !cert.Enabled {
+		return nil, nil
+	}
+	if cert.Status == StatusFailed || cert.Status == StatusRevoked || cert.Status == StatusReady || cert.Status == StatusDeleted {
+		return nil, nil
+	}
+	versionID, err := storage.NewUUID()
+	if err != nil {
+		return nil, err
+	}
+	version, err := s.repo.CreateIssuingVersion(ctx, CreateIssuingVersionParams{
+		ID:            versionID,
+		CertificateID: cert.ID,
+		Reason:        IssuanceReasonInitialIssue,
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrNoRows) {
+			if refreshed, getErr := s.repo.Get(ctx, cert.ID); getErr == nil && !refreshed.Enabled {
+				result.Certificate = refreshed
+				return nil, nil
+			}
+		}
+		return nil, classifyWriteError(err)
+	}
+	_, err = s.repo.EnsureIssuanceJob(ctx, EnsureIssuanceJobParams{
+		CertificateID:        cert.ID,
+		CertificateVersionID: &version.ID,
+		Reason:               JobReasonInitialIssue,
+		NextRunAt:            time.Now().UTC(),
+	})
+	if err != nil {
+		return nil, classifyWriteError(err)
+	}
+	result.Accepted = true
+	updated, err := s.repo.Get(ctx, cert.ID)
+	if err == nil {
+		result.Certificate = updated
+	}
+	if version.ID != versionID {
+		return nil, nil
+	}
+	return &version, nil
+}
+
+// appendLifecycleStartedAudit records the start of a new issuing
+// CertificateVersion. Reissue and initial issuance use
+// certificate_issuance_started; the spec has no separate reissue action.
+func (s *Service) appendLifecycleStartedAudit(ctx context.Context, identity auditIdentity, cert Certificate, version CertificateVersion) error {
+	action := "certificate_issuance_started"
+	switch version.Reason {
+	case IssuanceReasonRenewal:
+		action = "certificate_renewal_started"
+	case IssuanceReasonKeyRotation:
+		action = "certificate_key_rotation_started"
+	}
+	return s.appendCertificateAudit(ctx, identity, action, "certificate_version", version.ID, cert, map[string]any{
+		"certificate_version_id": version.ID,
+		"version":                version.Version,
+		"issuance_reason":        string(version.Reason),
+	})
+}
+
+// appendCertificateAudit appends a successful certificate audit event. Callers
+// run it inside the mutation transaction, so an audit failure rolls back the
+// mutation. metadata must hold only non-secret values.
+func (s *Service) appendCertificateAudit(ctx context.Context, identity auditIdentity, action, targetType, targetID string, cert Certificate, metadata map[string]any) error {
+	if s.audit == nil {
+		return nil
+	}
+	if identity.TokenID != "" {
+		metadata["application_token_id"] = identity.TokenID
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	params := auditdomain.AppendEventParams{
+		IdentityType:       identity.Type,
+		IdentityID:         optionalString(identity.ID),
+		Action:             action,
+		TargetType:         targetType,
+		TargetID:           &targetID,
+		ScopeApplicationID: &cert.ApplicationID,
+		ScopeCertificateID: &cert.ID,
+		Result:             auditdomain.ResultSuccess,
+		CorrelationID:      optionalString(identity.Context.CorrelationID),
+		SourceIP:           optionalString(identity.Context.SourceIP),
+		Metadata:           encoded,
+	}
+	if _, err := s.audit.Append(ctx, params); err != nil {
+		return classifyWriteError(err)
+	}
+	return nil
 }
 
 func (s *Service) latestIssuingVersion(ctx context.Context, certificateID string) (CertificateVersion, bool, error) {
@@ -789,6 +947,28 @@ func (s *Service) requireRenewalWindow(ctx context.Context, cert Certificate, is
 	notBefore := renewalNotBefore(*version.NotAfter, issuer)
 	if time.Now().UTC().Before(notBefore) {
 		return RenewalNotDueError{Certificate: cert, Version: version, RenewalNotBefore: notBefore}
+	}
+	return nil
+}
+
+// requireOverlapCapacity rejects a new renewal or key rotation when the
+// Certificate already has MaxActiveValidVersions valid, not-expired
+// CertificateVersions. It uses the same criteria as the
+// certificate_versions_valid_overlap database trigger.
+func (s *Service) requireOverlapCapacity(ctx context.Context, cert Certificate) error {
+	versions, err := s.repo.ListVersions(ctx, ListVersionsParams{CertificateID: cert.ID, ListOptions: storage.ListOptions{Limit: storage.MaxListLimit}})
+	if err != nil {
+		return classifyReadError(err)
+	}
+	now := time.Now().UTC()
+	var active []CertificateVersion
+	for _, version := range versions {
+		if version.Status == VersionStatusValid && version.NotAfter != nil && version.NotAfter.After(now) {
+			active = append(active, version)
+		}
+	}
+	if len(active) >= MaxActiveValidVersions {
+		return RenewalOverlapError{Certificate: cert, ValidVersions: active}
 	}
 	return nil
 }

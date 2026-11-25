@@ -3,8 +3,10 @@ package dnsproviders
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -166,5 +168,100 @@ func TestArvanCloudTXTRecordsAcceptArrayValueShape(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Text != "array-shaped-value" {
 		t.Fatalf("records = %#v", records)
+	}
+}
+
+func arvanCloudPage(page, lastPage int, data any) map[string]any {
+	return map[string]any{
+		"data": data,
+		"meta": map[string]int{"current_page": page, "last_page": lastPage, "per_page": 1, "total": lastPage},
+	}
+}
+
+func TestArvanCloudListZonesReadsAllPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/domains" {
+			t.Fatalf("unexpected ArvanCloud request: %s %s", r.Method, r.URL.String())
+		}
+		switch page := r.URL.Query().Get("page"); page {
+		case "", "1":
+			_ = json.NewEncoder(w).Encode(arvanCloudPage(1, 2, []map[string]string{{"domain": "example.com"}}))
+		case "2":
+			_ = json.NewEncoder(w).Encode(arvanCloudPage(2, 2, []map[string]string{{"domain": "last-page.example.org"}}))
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	}))
+	defer server.Close()
+
+	client := NewArvanCloudClient(server.Client())
+	client.BaseURL = server.URL
+	zones, err := client.ListZones(context.Background(), json.RawMessage(`{"api_key":"Apikey token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(zones, []string{"example.com", "last-page.example.org"}) {
+		t.Fatalf("zones = %v; want both pages", zones)
+	}
+}
+
+func TestArvanCloudListZonesFailsWhenAnyPageFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if page := r.URL.Query().Get("page"); page == "" || page == "1" {
+			_ = json.NewEncoder(w).Encode(arvanCloudPage(1, 2, []map[string]string{{"domain": "example.com"}}))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewArvanCloudClient(server.Client(), netretry.Policy{})
+	client.BaseURL = server.URL
+	zones, err := client.ListZones(context.Background(), json.RawMessage(`{"api_key":"Apikey token"}`))
+	if !errors.Is(err, ErrZoneDiscoveryFailed) {
+		t.Fatalf("ListZones() = %v, %v; want ErrZoneDiscoveryFailed and no partial list", zones, err)
+	}
+}
+
+func TestArvanCloudPresentAndCleanUpFindTXTRecordOnLaterPage(t *testing.T) {
+	var posts int
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/domains/example.com/dns-records":
+			switch page := r.URL.Query().Get("page"); page {
+			case "", "1":
+				_ = json.NewEncoder(w).Encode(arvanCloudPage(1, 2, []map[string]any{{"id": "a-record", "type": "a", "name": "www", "value": []map[string]string{{"ip": "192.0.2.1"}}}}))
+			case "2":
+				_ = json.NewEncoder(w).Encode(arvanCloudPage(2, 2, []map[string]any{{"id": "txt-record", "type": "txt", "name": "_acme-challenge", "value": map[string]string{"text": "value"}}}))
+			default:
+				t.Fatalf("unexpected page %q", page)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/domains/example.com/dns-records":
+			posts++
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "duplicate"}})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/domains/example.com/dns-records/"):
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/domains/example.com/dns-records/"))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected ArvanCloud request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewArvanCloudClient(server.Client(), netretry.Policy{})
+	client.BaseURL = server.URL
+	op := DNS01ChallengeOperation{ZoneName: "example.com", RecordName: "_acme-challenge.example.com", TXTValue: "value"}
+	if err := client.Present(context.Background(), ArvanCloudCredentials{APIKey: "Apikey token"}, op); err != nil {
+		t.Fatal(err)
+	}
+	if posts != 0 {
+		t.Fatalf("create requests = %d; want 0 because the record exists on page 2", posts)
+	}
+	if err := client.CleanUp(context.Background(), ArvanCloudCredentials{APIKey: "Apikey token"}, op); err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0] != "txt-record" {
+		t.Fatalf("deleted = %v; want [txt-record]", deleted)
 	}
 }

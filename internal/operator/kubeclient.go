@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,14 +33,40 @@ type CertificateLister interface {
 	ListCertificates(ctx context.Context, namespace string) ([]*CerthubCertificate, error)
 }
 
+type CertificateGetter interface {
+	GetCertificate(ctx context.Context, namespace, name string) (*CerthubCertificate, error)
+}
+
 type CertificateWatcher interface {
 	WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error)
 }
+
+// WatchEventRelist is a synthetic watch event type. The watcher sends it,
+// with no Certificate, after the API server expired the watch resourceVersion
+// (410 Gone). DELETED events may be lost in that gap, so the receiver must
+// list the namespace again.
+const WatchEventRelist = "RELIST"
 
 type CertificateWatchEvent struct {
 	Type        string
 	Certificate *CerthubCertificate
 }
+
+const (
+	// kubeRequestTimeout bounds a whole non-watch Kubernetes API request.
+	kubeRequestTimeout = 30 * time.Second
+	// A watch asks the API server to end the stream after a random
+	// timeoutSeconds in [watchMinTimeout, watchMinTimeout+watchTimeoutJitter),
+	// so watches in many namespaces do not reconnect at the same time.
+	watchMinTimeout    = 5 * time.Minute
+	watchTimeoutJitter = 5 * time.Minute
+	// watchDeadlineGrace is added to timeoutSeconds for the client-side
+	// deadline that ends a watch whose connection silently died.
+	watchDeadlineGrace = 30 * time.Second
+	// A stream that ends cleanly after at least watchMinHealthyDuration is
+	// resumed at once; a shorter one waits for the watch retry delay.
+	watchMinHealthyDuration = time.Second
+)
 
 type RESTKubeClient struct {
 	baseURL          string
@@ -70,10 +99,19 @@ func NewInClusterRESTKubeClient() (*RESTKubeClient, error) {
 		baseURL:          "https://" + netJoinHostPort(host, port),
 		token:            strings.TrimSpace(string(tokenBytes)),
 		defaultNamespace: strings.TrimSpace(string(namespaceBytes)),
-		httpClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			RootCAs:    caPool,
-		}}, Timeout: 30 * time.Second},
+		// The client Timeout covers whole normal requests. Watches use a copy
+		// without it (see watchClient), so the transport limits connect, TLS
+		// handshake, and response-header time for every request.
+		httpClient: &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    caPool,
+			},
+			DialContext:           (&net.Dialer{Timeout: kubeRequestTimeout, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: kubeRequestTimeout,
+			IdleConnTimeout:       90 * time.Second,
+		}, Timeout: kubeRequestTimeout},
 		retry: netretry.DefaultPolicy(),
 	}, nil
 }
@@ -317,64 +355,145 @@ func (c *RESTKubeClient) ListCertificates(ctx context.Context, namespace string)
 	return out, nil
 }
 
+func (c *RESTKubeClient) GetCertificate(ctx context.Context, namespace, name string) (*CerthubCertificate, error) {
+	var cert CerthubCertificate
+	if err := c.do(ctx, http.MethodGet, crPath(c.resolveNamespace(namespace), name), nil, &cert, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return &cert, nil
+}
+
+// WatchCertificateChanges streams Certificate events until ctx ends. Each
+// stream asks the API server to close it after a jittered timeoutSeconds and
+// the next stream resumes from the last seen resourceVersion. After 410 Gone
+// it restarts without a resourceVersion and sends WatchEventRelist.
 func (c *RESTKubeClient) WatchCertificateChanges(ctx context.Context, namespace string) (<-chan CertificateWatchEvent, error) {
 	ch := make(chan CertificateWatchEvent, 16)
 	go func() {
 		defer close(ch)
+		resourceVersion := ""
 		for ctx.Err() == nil {
-			watchPath := "/apis/" + APIGroup + "/v1alpha1/certhubcertificates?watch=true"
-			if namespace != "" {
-				watchPath = "/apis/" + APIGroup + "/v1alpha1/namespaces/" + url.PathEscape(namespace) + "/certhubcertificates?watch=true"
-			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+watchPath, nil)
-			if err != nil {
-				return
-			}
-			req.Header.Set("Accept", "application/json")
-			if c.token != "" {
-				req.Header.Set("Authorization", "Bearer "+c.token)
-			}
-			resp, err := c.retryClient().Do(req)
-			if err != nil {
-				sleepWatchRetry(ctx)
-				continue
-			}
-			if resp.StatusCode != http.StatusOK {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				sleepWatchRetry(ctx)
-				continue
-			}
-			dec := json.NewDecoder(resp.Body)
-			for ctx.Err() == nil {
-				var envelope struct {
-					Type   string          `json:"type"`
-					Object json.RawMessage `json:"object"`
-				}
-				if err := dec.Decode(&envelope); err != nil {
-					break
-				}
-				switch envelope.Type {
-				case "ADDED", "MODIFIED", "DELETED":
-				default:
-					continue
-				}
-				var cert CerthubCertificate
-				if err := json.Unmarshal(envelope.Object, &cert); err != nil {
-					continue
-				}
+			switch c.watchOnce(ctx, namespace, &resourceVersion, ch) {
+			case watchEnded:
+			case watchExpired:
+				resourceVersion = ""
 				select {
-				case ch <- CertificateWatchEvent{Type: envelope.Type, Certificate: &cert}:
+				case ch <- CertificateWatchEvent{Type: WatchEventRelist}:
 				case <-ctx.Done():
-					_ = resp.Body.Close()
 					return
 				}
+			default:
+				sleepWatchRetry(ctx)
 			}
-			_ = resp.Body.Close()
-			sleepWatchRetry(ctx)
 		}
 	}()
 	return ch, nil
+}
+
+type watchOutcome int
+
+const (
+	watchFailed watchOutcome = iota
+	watchEnded
+	watchExpired
+)
+
+func (c *RESTKubeClient) watchOnce(ctx context.Context, namespace string, resourceVersion *string, ch chan<- CertificateWatchEvent) watchOutcome {
+	if c == nil || c.httpClient == nil {
+		return watchFailed
+	}
+	timeout := watchMinTimeout + rand.N(watchTimeoutJitter)
+	query := url.Values{}
+	query.Set("watch", "true")
+	query.Set("allowWatchBookmarks", "true")
+	query.Set("timeoutSeconds", strconv.Itoa(int(timeout/time.Second)))
+	if *resourceVersion != "" {
+		query.Set("resourceVersion", *resourceVersion)
+	}
+	watchPath := "/apis/" + APIGroup + "/v1alpha1/certhubcertificates"
+	if namespace != "" {
+		watchPath = "/apis/" + APIGroup + "/v1alpha1/namespaces/" + url.PathEscape(namespace) + "/certhubcertificates"
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout+watchDeadlineGrace)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.baseURL+watchPath+"?"+query.Encode(), nil)
+	if err != nil {
+		return watchFailed
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	started := time.Now()
+	resp, err := netretry.NewClient(c.watchClient(), c.retry).Do(req)
+	if err != nil {
+		return watchFailed
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusGone {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return watchExpired
+	}
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return watchFailed
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var envelope struct {
+			Type   string          `json:"type"`
+			Object json.RawMessage `json:"object"`
+		}
+		if err := dec.Decode(&envelope); err != nil {
+			if errors.Is(err, io.EOF) && time.Since(started) >= watchMinHealthyDuration {
+				return watchEnded
+			}
+			return watchFailed
+		}
+		switch envelope.Type {
+		case "ADDED", "MODIFIED", "DELETED":
+		case "BOOKMARK":
+			var bookmark struct {
+				Metadata Metadata `json:"metadata"`
+			}
+			if err := json.Unmarshal(envelope.Object, &bookmark); err == nil && bookmark.Metadata.ResourceVersion != "" {
+				*resourceVersion = bookmark.Metadata.ResourceVersion
+			}
+			continue
+		case "ERROR":
+			var status struct {
+				Code int `json:"code"`
+			}
+			if err := json.Unmarshal(envelope.Object, &status); err == nil && status.Code == http.StatusGone {
+				return watchExpired
+			}
+			return watchFailed
+		default:
+			continue
+		}
+		var cert CerthubCertificate
+		if err := json.Unmarshal(envelope.Object, &cert); err != nil {
+			continue
+		}
+		if cert.Metadata.ResourceVersion != "" {
+			*resourceVersion = cert.Metadata.ResourceVersion
+		}
+		select {
+		case ch <- CertificateWatchEvent{Type: envelope.Type, Certificate: &cert}:
+		case <-ctx.Done():
+			return watchFailed
+		}
+	}
+}
+
+// watchClient returns the HTTP client for watch streams: the normal client
+// without its whole-request Timeout, which would also cut the streaming body.
+// The transport connect, TLS, and response-header limits still apply, and
+// watchOnce bounds each stream with timeoutSeconds plus a grace period.
+func (c *RESTKubeClient) watchClient() *http.Client {
+	client := *c.httpClient
+	client.Timeout = 0
+	return &client
 }
 
 func sleepWatchRetry(ctx context.Context) {

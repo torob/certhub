@@ -26,3 +26,13 @@ test("checked URLs remain absolute when passed to fetch", () => {
     assert.equal(new URL(target, "https://attacker.example").origin, origin);
   }
 });
+
+test("readiness requests reach this server's /readyz endpoint", () => {
+  assert.equal(apiRequestURL("/readyz", origin), "https://certhub.example/readyz");
+});
+
+test("only the exact /readyz path is allowed outside the API prefix", () => {
+  for (const path of ["//evil.example/readyz", "https://evil.example/readyz", "https://user:pass@certhub.example/readyz", "/readyz/../metrics", "/readyz/../x", "/readyz/", "/readyz/extra", "/readyz?x=1", "/readyz#x", "/%72eadyz", "/v1/../readyz/../metrics", "/healthz", "/metrics"]) {
+    assert.throws(() => apiRequestURL(path, origin), path);
+  }
+});

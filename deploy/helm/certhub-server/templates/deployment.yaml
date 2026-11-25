@@ -41,7 +41,7 @@ spec:
                   key: {{ .Values.env.encryptionKeySecretKey | quote }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ include "certhub-server.listenPort" . }}
           livenessProbe:
             httpGet:
               path: /healthz
