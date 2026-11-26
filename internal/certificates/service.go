@@ -449,7 +449,7 @@ func (s *Service) ListVersionEvents(ctx context.Context, actor Actor, certificat
 }
 
 func (s *Service) MaterialForCriteria(ctx context.Context, actor ApplicationActor, criteria Criteria, _ AuditContext) (MaterialResult, error) {
-	normalized, issuer, err := s.normalizeCriteria(ctx, criteria)
+	normalized, issuer, err := s.normalizeLookupCriteria(ctx, criteria)
 	if err != nil {
 		return MaterialResult{}, err
 	}
@@ -464,7 +464,7 @@ func (s *Service) MaterialForCriteria(ctx context.Context, actor ApplicationActo
 }
 
 func (s *Service) MaterialMetadataForCriteria(ctx context.Context, actor ApplicationActor, criteria Criteria) (MaterialMetadataResult, error) {
-	normalized, issuer, err := s.normalizeCriteria(ctx, criteria)
+	normalized, issuer, err := s.normalizeLookupCriteria(ctx, criteria)
 	if err != nil {
 		return MaterialMetadataResult{}, err
 	}
@@ -983,6 +983,34 @@ func (s *Service) normalizeCriteria(ctx context.Context, in Criteria) (certcrite
 		return certcriteria.Normalized{}, issuerdomain.Issuer{}, err
 	}
 	return normalized, issuer, nil
+}
+
+// normalizeLookupCriteria resolves criteria for material lookups. Unlike
+// normalizeCriteria, a named issuer may be disabled: disabling an issuer stops
+// new issuance, but existing valid material stays available until it expires.
+func (s *Service) normalizeLookupCriteria(ctx context.Context, in Criteria) (certcriteria.Normalized, issuerdomain.Issuer, error) {
+	normalized, err := certcriteria.Normalize(certcriteria.Criteria{Domains: in.Domains, KeyType: in.KeyType, Issuer: in.Issuer})
+	if err != nil {
+		return certcriteria.Normalized{}, issuerdomain.Issuer{}, ErrInvalidRequest
+	}
+	issuer, err := s.lookupIssuer(ctx, normalized.Issuer)
+	if err != nil {
+		return certcriteria.Normalized{}, issuerdomain.Issuer{}, err
+	}
+	return normalized, issuer, nil
+}
+
+// lookupIssuer accepts a named issuer of any status. An omitted issuer still
+// needs the active default issuer, as in selectIssuer.
+func (s *Service) lookupIssuer(ctx context.Context, name string) (issuerdomain.Issuer, error) {
+	if name == "" {
+		return s.selectIssuer(ctx, name)
+	}
+	issuer, err := s.issuers.GetByName(ctx, name)
+	if err != nil {
+		return issuerdomain.Issuer{}, ErrInvalidRequest
+	}
+	return issuer, nil
 }
 
 func (s *Service) selectIssuer(ctx context.Context, name string) (issuerdomain.Issuer, error) {

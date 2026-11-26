@@ -957,6 +957,7 @@ Issuer selection rules:
 
 - If a request specifies `issuer`, it must match an active issuer `name`; otherwise Certhub returns `400 invalid_request`.
 - If a request omits `issuer`, exactly one active issuer must have `default=true`; otherwise Certhub returns `409 issuer_not_configured`.
+- Exception for criteria-based material lookups (`POST /v1/sync/certificates/tls-material` and `POST /v1/sync/certificates/tls-archive`): a specified `issuer` must match an existing issuer `name` with any status, `active` or `disabled`; otherwise Certhub returns `400 invalid_request`. A disabled issuer cannot issue, but existing valid material of its Certificates stays available until it expires. A lookup that omits `issuer` follows the rule above and needs exactly one active default issuer.
 - At most one active issuer may have `default=true`.
 
 ## Status Values
@@ -1623,6 +1624,7 @@ Description and notes:
 - Requires an Application token. User access tokens are rejected.
 - The Application is identified exclusively from the token; request body must not include `application_id`.
 - The authenticated Application must be authorized for every requested SAN by its domain scopes.
+- A specified `issuer` may be `active` or `disabled`. An unknown issuer name returns `400 invalid_request`. An omitted `issuer` needs exactly one active default issuer; otherwise the endpoint returns `409 issuer_not_configured`.
 - Always returns the latest valid CertificateVersion for the exact matching certificate.
 - Supports conditional retrieval with `If-None-Match`.
 - Must create a `private_key_read` audit event only when material is returned with `200 OK`.
@@ -2899,6 +2901,7 @@ Description and notes:
 - Setting `status=active` requires a usable active ACME account.
 - Setting `default=true` must preserve the constraint that at most one active issuer is default.
 - Disabling an issuer prevents new issuance and renewal selection for that issuer but does not delete historical Certificates, CertificateVersions, ACME accounts, or audit events.
+- Criteria-based material lookups that name a disabled issuer continue to return existing valid material of its Certificates until that material expires. Lookups that omit `issuer` need an active default issuer.
 
 ```http
 PATCH /v1/issuers/{issuer_id}
@@ -3822,7 +3825,7 @@ Configured ACME issuers.
 | `type` | enum | Required, value `acme` in v1 | Issuer implementation type. |
 | `directory_url` | string | Required, format `https_url` | ACME directory URL. |
 | `default` | boolean | Required, default false | Whether this issuer is selected by default. |
-| `status` | enum | Required, one of `active`, `disabled`; default `active` | Disabled issuers cannot issue. |
+| `status` | enum | Required, one of `active`, `disabled`; default `active` | Disabled issuers cannot issue. Criteria-based material lookups that name a disabled issuer still return existing valid material. |
 | `renewal_window_seconds` | integer | Required, positive, default `2592000`, minimum `86400` | How many seconds before `not_after` Certhub should start automatic renewal. Default is 30 days. |
 | `contact_email` | string | Required, format `email` | Contact email used when Certhub creates or reuses the issuer ACME account. |
 | `created_at` | timestamptz | Required | Creation time. |
