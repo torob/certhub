@@ -385,12 +385,15 @@ td {
   font-size: 0.82rem;
 }
 
+/* A row action is an outlined button. It must override the filled
+   button.danger background, also on hover. */
 .row-action.danger {
   border-color: #d7b7b7;
+  background: #fff;
   color: #8a1f1f;
 }
 
-.row-action.danger:hover {
+.row-action.danger:hover:not(:disabled) {
   border-color: #b45a5a;
   background: #fff7f7;
 }
