@@ -252,9 +252,15 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cert *CerthubCertifica
 	}
 	if err == nil && secret != nil {
 		if ownershipErr := checkOwnedSecret(cert, secret); ownershipErr != nil {
-			r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
-			r.Metrics.IncReconcile("ownership_conflict")
-			return failureResult("ownership_conflict", r.Backoff), nil
+			if secretReferencesCertificate(cert, secret) {
+				r.emit(ctx, cert, "Warning", "SecretOwnershipConflict", ownershipErr.Error())
+				r.Metrics.IncReconcile("ownership_conflict")
+				return failureResult("ownership_conflict", r.Backoff), nil
+			}
+			// This Certificate never wrote the Secret, so it has nothing to
+			// clean up. Leave the Secret unchanged and release the finalizer.
+			r.emit(ctx, cert, "Normal", "SecretNotOwned", "target Secret is not owned by this CerthubCertificate; left unchanged")
+			secret = nil
 		}
 	}
 
@@ -453,6 +459,28 @@ func (r *Reconciler) writeTLSSecret(ctx context.Context, cert *CerthubCertificat
 		},
 	}
 	return r.Kube.CreateOrUpdateSecret(ctx, secret)
+}
+
+// secretReferencesCertificate reports whether the Secret carries an ownership
+// marker of this Certificate: the owner-UID annotation or an owner reference
+// with the Certificate UID. Only the operator writes these markers for this
+// Certificate, so a Secret without them was never written for it. A Secret
+// with a marker that fails another ownership check can still hold material of
+// this Certificate.
+func secretReferencesCertificate(cert *CerthubCertificate, secret *Secret) bool {
+	uid := cert.Metadata.UID
+	if uid == "" {
+		return true
+	}
+	if secret.Metadata.Annotations[AnnotationOwnerUID] == uid {
+		return true
+	}
+	for _, ref := range secret.Metadata.OwnerReferences {
+		if ref.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 func checkOwnedSecret(cert *CerthubCertificate, secret *Secret) error {

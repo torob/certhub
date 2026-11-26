@@ -402,14 +402,29 @@ Delete behavior:
   written by an older operator, or a policy change not yet reconciled), the
   operator removes it with a resource-version-guarded metadata patch. Only
   after that patch succeeds, the owned Secret is confirmed to have no matching
-  reference, or the target Secret is confirmed absent may the operator release
-  the finalizer. The retained Secret keeps the same UID and data.
+  reference, the target Secret is confirmed absent, or the target Secret is
+  confirmed to carry no ownership marker of this Certificate (see below) may
+  the operator release the finalizer. The retained Secret keeps the same UID
+  and data.
 - `secretDeletionPolicy=Delete` deletes only a Secret that the operator can
   prove it owns through the required labels,
   `certhub.torob.dev/owner-uid`, Secret type, and same-namespace/name checks. If
   a CerthubCertificate owner reference is present, it must match the current
   CR. Deletion uses both UID and resource-version preconditions; only confirmed
-  deletion or absence permits finalizer release.
+  deletion, confirmed absence, or a target Secret with no ownership marker of
+  this Certificate (see below) permits finalizer release.
+- An ownership marker of this Certificate is a `certhub.torob.dev/owner-uid`
+  annotation equal to the Certificate UID, or an owner reference with the
+  Certificate UID. Only the operator writes these markers for this Certificate.
+  A target Secret with neither marker was never written for this Certificate,
+  for example a foreign Secret that blocked the initial write or a Secret
+  retained by an older Certificate with the same name. For both policies the
+  operator leaves that Secret unchanged, emits a `SecretNotOwned` Event, and
+  releases the finalizer, because this Certificate has nothing to clean up. A
+  target Secret that carries a marker but fails another ownership check is an
+  ownership conflict: the operator emits `SecretOwnershipConflict`, keeps the
+  finalizer, and retries, because the Secret can still hold material of this
+  Certificate.
 - A policy transition changes the cleanup action selected when deletion begins
   but never permits finalizer release before that action completes. A live
   reconcile after the transition adds (`Retain` to `Delete`) or removes
@@ -417,7 +432,7 @@ Delete behavior:
   with foreground propagation after a change to `Retain` but before that
   reconcile, Kubernetes can still delete the previously owner-referenced
   Secret.
-- Owner-reference mutation, Secret deletion, ownership verification, or
+- Owner-reference mutation, Secret deletion, Secret read, ownership conflict, or
   finalizer patch failures leave the finalizer in place and are retried.
 - The operator must never delete, clear, or rewrite an unowned Secret, a Secret with an owner-reference UID mismatch, or a Secret missing the expected management labels/annotations.
 - Deleting the Kubernetes CR never deletes or revokes the Certhub backend Certificate. It only affects the local Kubernetes Secret according to `secretDeletionPolicy`.
@@ -542,6 +557,10 @@ Required operator scenarios:
   finalizer.
 - Cleanup and finalizer-patch failure matrices prove that the finalizer remains
   until the selected retention or deletion action is complete.
+- Deleting a CR whose target Secret carries no ownership marker of that CR
+  releases the finalizer for both policies, emits `SecretNotOwned`, and leaves
+  the Secret unchanged. A target Secret that carries the CR UID but fails
+  another ownership check keeps the finalizer.
 - Policy transitions, ownership conflicts, and repeated reconciles preserve
   ordering and are idempotent.
 - CRD admission accepts unchanged `spec.secretName` values on resources that

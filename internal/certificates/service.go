@@ -27,6 +27,7 @@ var (
 	ErrRenewalNotDue                 = errors.New("renewal not due")
 	ErrRenewalOverlapExists          = errors.New("renewal overlap exists")
 	ErrIssuerNotConfigured           = errors.New("issuer not configured")
+	ErrIssuerDisabled                = errors.New("issuer disabled")
 	ErrDomainNotAuthorized           = errors.New("domain not authorized")
 	ErrSystemManagedResource         = errors.New("system managed resource")
 	ErrCertificateNotReady           = errors.New("certificate not ready")
@@ -563,6 +564,15 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 		if !cert.Enabled {
 			return StateError{Err: ErrCertificateDisabled, Certificate: cert}
 		}
+		// Disabled issuers cannot issue. Check before any version or job is
+		// created, also when a renewal version already exists.
+		issuer, err := txsvc.issuers.Get(ctx, cert.IssuerID)
+		if err != nil {
+			return classifyReadError(err)
+		}
+		if issuer.Status != issuerdomain.StatusActive {
+			return ErrIssuerDisabled
+		}
 		if err := txsvc.requireDomainCoverage(ctx, cert.ApplicationID, cert.NormalizedSANs); err != nil {
 			return err
 		}
@@ -609,10 +619,6 @@ func (s *Service) StartLifecycle(ctx context.Context, actor Actor, certificateID
 					return classifyWriteError(err)
 				}
 				return nil
-			}
-			issuer, err := txsvc.issuers.Get(ctx, cert.IssuerID)
-			if err != nil {
-				return classifyReadError(err)
 			}
 			if err := txsvc.requireRenewalWindow(ctx, cert, issuer); err != nil {
 				return err

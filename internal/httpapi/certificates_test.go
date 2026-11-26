@@ -500,6 +500,14 @@ func TestWriteCertificateErrorDisabled(t *testing.T) {
 	}
 }
 
+func TestWriteCertificateErrorMapsDisabledIssuerToIssuerNotConfigured(t *testing.T) {
+	rec := httptest.NewRecorder()
+	status, code := writeCertificateError(rec, certdomain.ErrIssuerDisabled)
+	if status != http.StatusConflict || code != "issuer_not_configured" || !strings.Contains(rec.Body.String(), "The certificate issuer is disabled.") {
+		t.Fatalf("status/code=%d %q body=%s", status, code, rec.Body.String())
+	}
+}
+
 func TestListCertificatesForNonAdminUsesAccessibleApplicationIDs(t *testing.T) {
 	fixture := newCertificateHTTPFixture(t)
 	user := fakeUser()

@@ -1921,6 +1921,7 @@ Description and notes:
 - If a Certificate has any other `status=issuing` CertificateVersion, such as initial issuance or key rotation, this endpoint returns `409 conflict` and does not create another version.
 - If creating a renewal could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 renewal_overlap_exists` and must not create a CertificateVersion or job. `details` uses `RenewalOverlapDetails`: `certificate_id` and the current `valid_versions` metadata.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. The server reconcile and auto-renewal processes manage that Certificate.
+- If the Certificate's issuer is disabled, this endpoint returns `409 issuer_not_configured` and does not create a CertificateVersion or job. This also applies when a CertificateVersion with `status=issuing` already exists.
 
 ```http
 POST /v1/certificates/{certificate_id}/renew
@@ -1939,7 +1940,7 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User lacks lifecycle access or current Application domain scopes no longer cover the Certificate SANs.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow renewal, including `renewal_overlap_exists` or `system_managed_resource`.
+- `409 Conflict`: certificate state does not allow renewal, including `renewal_overlap_exists`, `system_managed_resource`, or `issuer_not_configured`.
 
 #### POST /v1/certificates/{certificate_id}/rotate-key
 
@@ -1957,6 +1958,7 @@ Description and notes:
 - If a Certificate has any other `status=issuing` CertificateVersion, this endpoint returns `409 conflict` and does not create another version.
 - If key rotation could result in more than two valid, not-expired CertificateVersions, Certhub must reject the request with `409 renewal_overlap_exists` and must not create a CertificateVersion or job.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`. Change `self_certificate.key_type` to request a new key type for Certhub's own serving certificate.
+- If the Certificate's issuer is disabled, this endpoint returns `409 issuer_not_configured` and does not create a CertificateVersion or job. This also applies when a CertificateVersion with `status=issuing` already exists.
 
 ```http
 POST /v1/certificates/{certificate_id}/rotate-key
@@ -1975,7 +1977,7 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User lacks lifecycle access or current Application domain scopes no longer cover the Certificate SANs.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow key rotation, including `renewal_overlap_exists` or `system_managed_resource`.
+- `409 Conflict`: certificate state does not allow key rotation, including `renewal_overlap_exists`, `system_managed_resource`, or `issuer_not_configured`.
 
 #### POST /v1/certificates/{certificate_id}/versions/{certificate_version_id}/revoke
 
@@ -2040,6 +2042,7 @@ Description and notes:
 - Clears parent Certificate revocation metadata when reissuing from a revoked parent; historical CertificateVersion revocation metadata remains intact.
 - Returns `409 conflict` when an active valid CertificateVersion exists or any CertificateVersion is already issuing; use renew or rotate-key for active certificates.
 - If the Certificate belongs to the reserved `certhub_server` Application, this endpoint must return `409 system_managed_resource`.
+- If the Certificate's issuer is disabled, this endpoint returns `409 issuer_not_configured` and does not create a CertificateVersion or job. This also applies when a CertificateVersion with `status=issuing` already exists.
 
 ```http
 POST /v1/certificates/{certificate_id}/reissue
@@ -2056,7 +2059,7 @@ Expected responses:
 - `401 Unauthorized`: token is missing or invalid.
 - `403 Forbidden`: User lacks lifecycle access or current Application domain scopes no longer cover the Certificate SANs.
 - `404 Not Found`: certificate does not exist or is not visible.
-- `409 Conflict`: certificate state does not allow reissue or the Certificate is system-managed.
+- `409 Conflict`: certificate state does not allow reissue, the Certificate is system-managed, or its issuer is disabled (`issuer_not_configured`).
 
 #### GET /v1/certificates/{certificate_id}/events
 
@@ -2902,6 +2905,7 @@ Description and notes:
 - Setting `default=true` must preserve the constraint that at most one active issuer is default.
 - Disabling an issuer prevents new issuance and renewal selection for that issuer but does not delete historical Certificates, CertificateVersions, ACME accounts, or audit events.
 - Criteria-based material lookups that name a disabled issuer continue to return existing valid material of its Certificates until that material expires. Lookups that omit `issuer` need an active default issuer.
+- Manual renew, rotate-key, and reissue of a Certificate whose issuer is disabled return `409 issuer_not_configured`. The issuance worker fails a queued issuance, renewal, reissue, or key rotation job of a disabled issuer with failure code `issuer_not_configured` before any ACME order or DNS work. Revocation retries still run.
 
 ```http
 PATCH /v1/issuers/{issuer_id}
@@ -4172,7 +4176,7 @@ Rules:
 | `renewal_not_due` | `409` | No | `1` | Manual renewal was requested before the active CertificateVersion entered the issuer renewal window. |
 | `system_managed_resource` | `409` | No | `1` | The resource is owned by backend process configuration. Show read-only/config-managed state instead of retrying the write. |
 | `conflict` | `409` | No | `1` | Show conflict and require operator action. |
-| `issuer_not_configured` | `409` | No | `1` | Admin must configure exactly one active default issuer or select an active issuer explicitly. |
+| `issuer_not_configured` | `409` | No | `1` | Admin must configure exactly one active default issuer or select an active issuer explicitly. Lifecycle actions on a Certificate whose issuer is disabled also return this code; an admin must activate the issuer first. |
 | `service_unavailable` | `503` | Yes | `8` | Backend readiness, worker queue, or generic dependency is temporarily unavailable. Retry with backoff. |
 | `issuer_unavailable` | `503` | Yes | `8` | Transient issuer, ACME account, or issuer dependency outage. Retry with backoff. |
 | `dns_provider_not_found` | `409` | No | `7` | Admin must configure a matching DNS provider zone. Material lookup endpoints expose this as `details.failure_code` under `certificate_issuance_failed`. |

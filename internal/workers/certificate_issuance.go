@@ -416,6 +416,11 @@ func (s *CertificateIssuanceService) completeClaimedJob(ctx context.Context, wor
 	if err != nil {
 		return issuanceFailure{code: "issuer_not_configured", err: err}
 	}
+	// A job can be queued before an admin disables the issuer. Disabled
+	// issuers cannot issue, also when their ACME account is still active.
+	if issuer.Status != issuerdomain.StatusActive {
+		return issuanceFailure{code: "issuer_not_configured", err: fmt.Errorf("certificate issuer status is %s; only an active issuer can issue", issuer.Status)}
+	}
 	account, err := s.Issuers.GetActiveACMEAccount(ctx, issuer.ID)
 	if err != nil {
 		return issuanceFailure{code: "issuer_account_not_configured", err: err}

@@ -572,6 +572,8 @@ func writeCertificateError(w http.ResponseWriter, err error) (int, string) {
 		status, code, message = http.StatusNotFound, "certificate_not_found", "Resource does not exist or is not visible."
 	case errors.Is(err, certdomain.ErrIssuerNotConfigured):
 		status, code, message = http.StatusConflict, "issuer_not_configured", "No active default issuer is configured."
+	case errors.Is(err, certdomain.ErrIssuerDisabled):
+		status, code, message = http.StatusConflict, "issuer_not_configured", "The certificate issuer is disabled."
 	case errors.Is(err, certdomain.ErrSystemManagedResource):
 		status, code, message = http.StatusConflict, "system_managed_resource", "Resource is managed by Certhub configuration."
 	case errors.As(err, &busy):

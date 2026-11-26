@@ -1109,7 +1109,8 @@ paths:
         Returns `409 renewal_overlap_exists` with `RenewalOverlapDetails` when the
         Certificate already has two valid, not-expired CertificateVersions and no
         renewal is in progress. Retry after the older valid CertificateVersion expires
-        or is revoked.
+        or is revoked. Returns `409 issuer_not_configured` when the Certificate's
+        issuer is disabled.
       security:
         - UserBearerAuth: []
       requestBody:
@@ -1162,7 +1163,8 @@ paths:
       description: >-
         Returns `409 renewal_overlap_exists` with `RenewalOverlapDetails` when the
         Certificate already has two valid, not-expired CertificateVersions. Retry after
-        the older valid CertificateVersion expires or is revoked.
+        the older valid CertificateVersion expires or is revoked. Returns
+        `409 issuer_not_configured` when the Certificate's issuer is disabled.
       security:
         - UserBearerAuth: []
       requestBody:
@@ -1212,6 +1214,8 @@ paths:
       tags: [Certificates]
       operationId: reissueCertificate
       summary: Start a new issuance when the certificate has no active valid or issuing CertificateVersion.
+      description: >-
+        Returns `409 issuer_not_configured` when the Certificate's issuer is disabled.
       security:
         - UserBearerAuth: []
       requestBody:
