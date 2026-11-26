@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -74,7 +75,7 @@ func TestRESTKubeClientRetriesReadsButNotMutations(t *testing.T) {
 func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *testing.T) {
 	ctx := context.Background()
 	var stored *Secret
-	var sawPost, sawOwnerReferencePatch, sawPut, sawDelete bool
+	var sawPost, sawOwnerReferencePatch, sawUpdatePatch, sawDelete bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requireKubeAuth(t, r)
 		switch {
@@ -102,6 +103,35 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 			stored = &created
 			sawPost = true
 			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls" && sawOwnerReferencePatch:
+			requireKubeContentType(t, r, "application/merge-patch+json")
+			var patch map[string]any
+			decodeKubeJSON(t, r, &patch)
+			metadata, _ := patch["metadata"].(map[string]any)
+			if got := slices.Sorted(maps.Keys(metadata)); !slices.Equal(got, []string{"annotations", "labels", "ownerReferences", "resourceVersion"}) {
+				t.Fatalf("update patch metadata fields = %q; want only operator-managed fields and resourceVersion", got)
+			}
+			if metadata["resourceVersion"] != "rv-owned" {
+				t.Fatalf("update did not carry resourceVersion: %#v", metadata)
+			}
+			if patch["type"] != SecretTypeTLS {
+				t.Fatalf("update patch type = %#v", patch["type"])
+			}
+			patched := applyJSONMergePatch(rawKubeObject(t, stored), patch)
+			var updated Secret
+			if err := json.Unmarshal(mustJSON(t, patched), &updated); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(updated.Data["tls.key"]); got != "KEY2" {
+				t.Fatalf("unexpected updated Secret tls.key length=%d", len(got))
+			}
+			if !slices.Equal(updated.Metadata.OwnerReferences, []OwnerReference{certhubOwnerReference(testCertificate())}) {
+				t.Fatalf("update patch changed owner references: %#v", updated.Metadata.OwnerReferences)
+			}
+			updated.Metadata.ResourceVersion = "rv-2"
+			stored = &updated
+			sawUpdatePatch = true
+			writeKubeJSON(t, w, updated)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			if r.Header.Get("Content-Type") != "application/merge-patch+json" {
 				t.Fatalf("owner-reference patch content type = %q", r.Header.Get("Content-Type"))
@@ -122,21 +152,6 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 			stored.Metadata.ResourceVersion = "rv-owned"
 			sawOwnerReferencePatch = true
 			writeKubeJSON(t, w, stored)
-		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
-			requireKubeContentType(t, r, "application/json")
-			var updated Secret
-			decodeKubeJSON(t, r, &updated)
-			if updated.Metadata.ResourceVersion != "rv-owned" {
-				t.Fatalf("update did not carry resourceVersion: %#v", updated.Metadata)
-			}
-			if got := string(updated.Data["tls.key"]); got != "KEY2" {
-				t.Fatalf("unexpected updated Secret tls.key length=%d", len(got))
-			}
-			updated.Metadata.UID = "secret-uid"
-			updated.Metadata.ResourceVersion = "rv-2"
-			stored = &updated
-			sawPut = true
-			writeKubeJSON(t, w, updated)
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			requireKubeContentType(t, r, "application/json")
 			var opts struct {
@@ -179,12 +194,13 @@ func TestRESTKubeClientSecretCreateUpdateDeleteUsesKubernetesRESTSemantics(t *te
 	}
 
 	updated := ownedSecret(cert, "etag-2")
+	updated.Metadata.OwnerReferences = []OwnerReference{certhubOwnerReference(cert)}
 	updated.Data["tls.key"] = []byte("KEY2")
 	if err := client.CreateOrUpdateSecret(ctx, updated); err != nil {
 		t.Fatalf("update failed: %v", err)
 	}
-	if !sawPut {
-		t.Fatalf("update did not PUT")
+	if !sawUpdatePatch {
+		t.Fatalf("update did not send a merge patch")
 	}
 
 	if err := client.DeleteSecret(ctx, "ns", "gateway-tls", stored); err != nil {
@@ -342,7 +358,7 @@ func TestRESTKubeClientRefusesUnownedExistingSecretBeforeUpdate(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			writeKubeJSON(t, w, existing)
-		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
+		case (r.Method == http.MethodPut || r.Method == http.MethodPatch) && r.URL.Path == "/api/v1/namespaces/ns/secrets/gateway-tls":
 			putCalled = true
 			t.Fatalf("unowned Secret must not be updated")
 		default:
@@ -357,7 +373,7 @@ func TestRESTKubeClientRefusesUnownedExistingSecretBeforeUpdate(t *testing.T) {
 		t.Fatalf("unexpected ownership error: %v", err)
 	}
 	if putCalled {
-		t.Fatalf("PUT was called for unowned Secret")
+		t.Fatalf("unowned Secret was written")
 	}
 }
 
@@ -693,6 +709,15 @@ func decodeKubeJSON(t *testing.T, r *http.Request, out any) {
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
 		t.Fatalf("decode request body: %v", err)
 	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func cloneKubeSecret(t *testing.T, secret *Secret) *Secret {

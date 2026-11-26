@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/torob/certhub/pkg/netretry"
@@ -24,9 +26,14 @@ import (
 
 const (
 	serviceAccountDir       = "/var/run/secrets/kubernetes.io/serviceaccount"
-	serviceAccountTokenFile = serviceAccountDir + "/token"
-	serviceAccountCAFile    = serviceAccountDir + "/ca.crt"
-	serviceAccountNSFile    = serviceAccountDir + "/namespace"
+	serviceAccountTokenFile = "token"
+	serviceAccountCAFile    = "ca.crt"
+	serviceAccountNSFile    = "namespace"
+	// serviceAccountTokenReloadPeriod is how long the client uses a service
+	// account token before it reads the token file again, as client-go does.
+	// The kubelet writes a new projected token long before the old one
+	// expires, so the client changes to it in time.
+	serviceAccountTokenReloadPeriod = time.Minute
 )
 
 type CertificateLister interface {
@@ -69,8 +76,12 @@ const (
 )
 
 type RESTKubeClient struct {
-	baseURL          string
+	baseURL string
+	// token is a fixed bearer token. When tokenFile is set, it supplies the
+	// token instead: the in-cluster service account token that the kubelet
+	// rotates.
 	token            string
+	tokenFile        *cachedTokenFile
 	defaultNamespace string
 	httpClient       *http.Client
 	retry            netretry.Policy
@@ -78,26 +89,32 @@ type RESTKubeClient struct {
 }
 
 func NewInClusterRESTKubeClient() (*RESTKubeClient, error) {
+	return newInClusterRESTKubeClient(serviceAccountDir)
+}
+
+// newInClusterRESTKubeClient builds the client from the service account
+// files in dir.
+func newInClusterRESTKubeClient(dir string) (*RESTKubeClient, error) {
 	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
 	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
 	if host == "" || port == "" {
 		return nil, errors.New("Kubernetes service environment is not available")
 	}
-	tokenBytes, err := os.ReadFile(serviceAccountTokenFile)
+	tokenFile, err := newCachedTokenFile(filepath.Join(dir, serviceAccountTokenFile), serviceAccountTokenReloadPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("read service account token: %w", err)
 	}
-	namespaceBytes, _ := os.ReadFile(serviceAccountNSFile)
+	namespaceBytes, _ := os.ReadFile(filepath.Join(dir, serviceAccountNSFile))
 	caPool, err := x509.SystemCertPool()
 	if err != nil || caPool == nil {
 		caPool = x509.NewCertPool()
 	}
-	if caBytes, err := os.ReadFile(serviceAccountCAFile); err == nil {
+	if caBytes, err := os.ReadFile(filepath.Join(dir, serviceAccountCAFile)); err == nil {
 		caPool.AppendCertsFromPEM(caBytes)
 	}
 	return &RESTKubeClient{
 		baseURL:          "https://" + netJoinHostPort(host, port),
-		token:            strings.TrimSpace(string(tokenBytes)),
+		tokenFile:        tokenFile,
 		defaultNamespace: strings.TrimSpace(string(namespaceBytes)),
 		// The client Timeout covers whole normal requests. Watches use a copy
 		// without it (see watchClient), so the transport limits connect, TLS
@@ -114,6 +131,114 @@ func NewInClusterRESTKubeClient() (*RESTKubeClient, error) {
 		}, Timeout: kubeRequestTimeout},
 		retry: netretry.DefaultPolicy(),
 	}, nil
+}
+
+// cachedTokenFile caches a bearer token that is read from a file which is
+// replaced in place, such as the projected service account token. current
+// reads the file again when the cached token is older than period; reload
+// reads it at once.
+type cachedTokenFile struct {
+	path   string
+	period time.Duration
+	now    func() time.Time
+
+	mu      sync.Mutex
+	token   string
+	expires time.Time
+}
+
+func newCachedTokenFile(path string, period time.Duration) (*cachedTokenFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f := &cachedTokenFile{path: path, period: period, now: time.Now}
+	f.token = strings.TrimSpace(string(data))
+	f.expires = f.now().Add(period)
+	return f, nil
+}
+
+// current returns the cached token and reads the file again after the cache
+// period.
+func (f *cachedTokenFile) current() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.now().Before(f.expires) {
+		f.readLocked()
+	}
+	return f.token
+}
+
+// reload reads the file at once, after the API server rejected the cached
+// token, and returns the token that is cached now.
+func (f *cachedTokenFile) reload() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readLocked()
+	return f.token
+}
+
+// readLocked keeps the last token when the file cannot be read or is empty:
+// the kubelet replaces the file atomically, and the old token stays valid for
+// some time after a rotation. The next call tries the file again.
+func (f *cachedTokenFile) readLocked() {
+	data, err := os.ReadFile(f.path)
+	if err != nil {
+		return
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return
+	}
+	f.token = token
+	f.expires = f.now().Add(f.period)
+}
+
+// bearerToken returns the token for the next request: the current service
+// account token of an in-cluster client, or the fixed token.
+func (c *RESTKubeClient) bearerToken() string {
+	if c.tokenFile != nil {
+		return c.tokenFile.current()
+	}
+	return c.token
+}
+
+// send sends req with the current bearer token. When the API server answers
+// 401 Unauthorized to an in-cluster client, send reads the service account
+// token file again and, if the token changed, sends the request one more time
+// with the new token. The API server rejects an unauthenticated request before
+// it processes it, so this is also safe for a mutation.
+func (c *RESTKubeClient) send(client netretry.Doer, req *http.Request) (*http.Response, error) {
+	token := c.bearerToken()
+	setBearerToken(req, token)
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || c.tokenFile == nil {
+		return resp, err
+	}
+	next := c.tokenFile.reload()
+	if next == token {
+		return resp, nil
+	}
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return resp, nil
+		}
+		retry.Body = body
+	} else if req.Body != nil && req.Body != http.NoBody {
+		return resp, nil
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	setBearerToken(retry, next)
+	return client.Do(retry)
+}
+
+func setBearerToken(req *http.Request, token string) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 }
 
 func (c *RESTKubeClient) DefaultNamespace() string {
@@ -148,8 +273,52 @@ func (c *RESTKubeClient) CreateOrUpdateSecret(ctx context.Context, secret *Secre
 	if err := checkWritableExistingSecret(existing, secret); err != nil {
 		return err
 	}
-	secret.Metadata.ResourceVersion = existing.Metadata.ResourceVersion
-	return c.do(ctx, http.MethodPut, coreNamespacedPath(secret.Metadata.Namespace, "secrets", secret.Metadata.Name), secret, nil, http.StatusOK)
+	return c.doPatch(ctx, coreNamespacedPath(secret.Metadata.Namespace, "secrets", secret.Metadata.Name), managedSecretPatch(existing, secret), nil, http.StatusOK)
+}
+
+// managedSecretPatch returns a JSON merge patch from the live Secret to the
+// desired one that changes only the operator-managed fields. The desired
+// labels and annotations are set, and labels, annotations, and finalizers
+// that other tools added stay. The owner references are set to the desired
+// list: the ownership checks permit no owner reference other than the
+// operator's own, so this only adds or removes that one. The type and the
+// data are operator-owned: a managed Secret contains only the expected TLS
+// data keys, so live data keys that are not desired are removed. The live
+// resourceVersion makes the API server refuse the patch with 409 Conflict if
+// the Secret changed after the ownership check.
+func managedSecretPatch(live, desired *Secret) map[string]any {
+	data := make(map[string]any, len(live.Data)+len(desired.Data))
+	for key := range live.Data {
+		data[key] = nil
+	}
+	for key, value := range desired.Data {
+		data[key] = value
+	}
+	labels := desired.Metadata.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	annotations := desired.Metadata.Annotations
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	ownerReferences := desired.Metadata.OwnerReferences
+	if ownerReferences == nil {
+		ownerReferences = []OwnerReference{}
+	}
+	patch := map[string]any{
+		"metadata": map[string]any{
+			"resourceVersion": live.Metadata.ResourceVersion,
+			"labels":          labels,
+			"annotations":     annotations,
+			"ownerReferences": ownerReferences,
+		},
+		"data": data,
+	}
+	if desired.Type != "" {
+		patch["type"] = desired.Type
+	}
+	return patch
 }
 
 func (c *RESTKubeClient) SetSecretOwnerReferences(ctx context.Context, secret *Secret, ownerReferences []OwnerReference) error {
@@ -421,11 +590,8 @@ func (c *RESTKubeClient) watchOnce(ctx context.Context, namespace string, resour
 		return watchFailed
 	}
 	req.Header.Set("Accept", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
 	started := time.Now()
-	resp, err := netretry.NewClient(c.watchClient(), c.retry).Do(req)
+	resp, err := c.send(netretry.NewClient(c.watchClient(), c.retry), req)
 	if err != nil {
 		return watchFailed
 	}
@@ -535,10 +701,7 @@ func (c *RESTKubeClient) doWithContentType(ctx context.Context, method, requestP
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.retryClient().Do(req)
+	resp, err := c.send(c.retryClient(), req)
 	if err != nil {
 		return err
 	}

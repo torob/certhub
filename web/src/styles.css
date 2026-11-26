@@ -341,6 +341,15 @@ textarea {
   font-size: 0.8rem;
 }
 
+.table-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

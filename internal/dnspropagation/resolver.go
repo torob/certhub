@@ -471,25 +471,65 @@ func dialHTTPProxy(ctx context.Context, proxyURL *url.URL, target string, proxyT
 		credentials := proxyURL.User.Username() + ":" + password
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
 	}
-	if err := req.Write(conn); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	reader := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(reader, req)
+	tunnel, err := proxyConnect(ctx, conn, req, lookupTimeout)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_ = conn.Close()
-		return nil, fmt.Errorf("proxy CONNECT returned HTTP %d", resp.StatusCode)
+	return tunnel, nil
+}
+
+// proxyConnect sends the CONNECT request on conn and reads the proxy response.
+// The handshake stops at the ctx deadline or after timeout, whichever comes
+// first, and stops when ctx is canceled. After success the conn deadline is
+// cleared, so the deadline does not apply to the tunnel. The caller closes
+// conn when proxyConnect returns an error.
+func proxyConnect(ctx context.Context, conn net.Conn, req *http.Request, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	stopCloseOnDone := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	reader, err := proxyConnectExchange(conn, req)
+	if !stopCloseOnDone() {
+		// ctx is done and conn is closed. Report the context error, not
+		// the read or write error that the close caused.
+		return nil, fmt.Errorf("proxy CONNECT: %w", ctx.Err())
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
 	}
 	if reader.Buffered() == 0 {
 		return conn, nil
 	}
 	return &bufferedConn{Conn: conn, reader: reader}, nil
+}
+
+func proxyConnectExchange(conn net.Conn, req *http.Request) (*bufio.Reader, error) {
+	if err := req.Write(conn); err != nil {
+		return nil, fmt.Errorf("proxy CONNECT: %w", err)
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		return nil, fmt.Errorf("proxy CONNECT: %w", err)
+	}
+	// Close the response body here, while the handshake deadline applies.
+	// Close can read from conn when the response declares a body.
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("proxy CONNECT returned HTTP %d", resp.StatusCode)
+	}
+	if err := resp.Body.Close(); err != nil {
+		return nil, fmt.Errorf("proxy CONNECT: %w", err)
+	}
+	return reader, nil
 }
 
 type bufferedConn struct {

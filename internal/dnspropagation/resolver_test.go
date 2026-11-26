@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,6 +168,289 @@ func TestCheckerDoTThroughHTTPConnectProxy(t *testing.T) {
 	if !visible {
 		t.Fatalf("TXT was not visible")
 	}
+}
+
+// proxyHangBound is the longest time a proxy test waits for a call that must
+// stop at its context deadline. A call that is still blocked after this time
+// ignores the deadline.
+const proxyHangBound = 3 * time.Second
+
+// proxyUnusedTarget is a CONNECT target that the stalling proxy never dials.
+const proxyUnusedTarget = "127.0.0.1:853"
+
+func TestDialHTTPProxyConnectStopsAtContextDeadline(t *testing.T) {
+	tests := []struct {
+		name        string
+		answerAfter time.Duration
+		response    string
+	}{
+		{name: "silent proxy", answerAfter: -1},
+		{name: "slow proxy", answerAfter: 2 * proxyHangBound, response: proxyConnectEstablished},
+		{name: "proxy declares a body it never sends", answerAfter: 0, response: "HTTP/1.1 200 Connection Established\r\nContent-Length: 16\r\n\r\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyURL := startStallingConnectProxy(t, tc.answerAfter, tc.response)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			err := dialHTTPProxyWithinBound(t, ctx, proxyURL)
+			if !errors.Is(err, context.DeadlineExceeded) && !isNetTimeout(err) {
+				t.Fatalf("error = %v; want context deadline or network timeout", err)
+			}
+			if !netretry.IsTransientForContext(context.Background(), err) {
+				t.Fatalf("error %v is not a retryable lookup failure", err)
+			}
+		})
+	}
+}
+
+func TestDialHTTPProxyConnectStopsAtContextCancel(t *testing.T) {
+	proxyURL := startStallingConnectProxy(t, -1, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	err := dialHTTPProxyWithinBound(t, ctx, proxyURL)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context canceled", err)
+	}
+}
+
+func TestCheckerDoTThroughSilentProxyStopsAtContextDeadline(t *testing.T) {
+	proxyURL := startStallingConnectProxy(t, -1, "")
+	checker, err := NewChecker(Config{
+		Type:          TypeDoT,
+		Endpoint:      proxyUnusedTarget,
+		TLSServerName: "localhost",
+		ProxyName:     "silent_proxy",
+		ProxyURL:      proxyURL,
+		Retry:         netretry.Policy{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	type result struct {
+		visible bool
+		err     error
+	}
+	done := make(chan result, 1)
+	started := time.Now()
+	go func() {
+		visible, err := checker.TXTVisible(ctx, "example.com", "txt-value")
+		done <- result{visible: visible, err: err}
+	}()
+	select {
+	case res := <-done:
+		if res.err == nil || res.visible {
+			t.Fatalf("visible=%v err=%v; want lookup failure", res.visible, res.err)
+		}
+		t.Logf("TXTVisible returned after %s: %v", time.Since(started).Round(time.Millisecond), res.err)
+	case <-time.After(proxyHangBound):
+		t.Fatalf("TXTVisible through a silent proxy did not return within %s; context deadline was 300ms", proxyHangBound)
+	}
+}
+
+func TestProxyConnectStopsAtTimeoutWithoutContextDeadline(t *testing.T) {
+	proxyURL := startStallingConnectProxy(t, -1, "")
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: proxyUnusedTarget}, Host: proxyUnusedTarget, Header: make(http.Header)}
+	done := make(chan error, 1)
+	go func() {
+		tunnel, err := proxyConnect(context.Background(), conn, req, 200*time.Millisecond)
+		if tunnel != nil {
+			err = errors.New("proxyConnect returned a tunnel through a silent proxy")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !isNetTimeout(err) {
+			t.Fatalf("error = %v; want network timeout", err)
+		}
+		if !netretry.IsTransientForContext(context.Background(), err) {
+			t.Fatalf("error %v is not a retryable lookup failure", err)
+		}
+	case <-time.After(proxyHangBound):
+		t.Fatalf("proxyConnect did not return within %s; timeout was 200ms", proxyHangBound)
+	}
+}
+
+func TestDialHTTPProxySlowProxyWithinDeadlineSucceeds(t *testing.T) {
+	proxyURL := startStallingConnectProxy(t, 50*time.Millisecond, proxyConnectEstablished)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := dialHTTPProxy(ctx, proxyURL, proxyUnusedTarget, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+}
+
+func TestDialHTTPProxyTunnelOutlivesHandshakeDeadline(t *testing.T) {
+	echoAddr := startEchoServer(t)
+	proxyURL, stopProxy := startConnectProxy(t)
+	defer stopProxy()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	conn, err := dialHTTPProxy(ctx, proxyURL, echoAddr, nil)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Let the handshake context and its deadline expire, then cancel it.
+	// Neither may affect the established tunnel.
+	<-ctx.Done()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		if _, err := conn.Write([]byte("ping")); err != nil {
+			done <- err
+			return
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			done <- err
+			return
+		}
+		if string(buf) != "ping" {
+			done <- fmt.Errorf("echo = %q; want ping", buf)
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tunnel use after the handshake deadline failed: %v", err)
+		}
+	case <-time.After(proxyHangBound):
+		t.Fatalf("tunnel echo did not complete within %s", proxyHangBound)
+	}
+}
+
+func startEchoServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	return ln.Addr().String()
+}
+
+// dialHTTPProxyWithinBound calls dialHTTPProxy and fails the test when the
+// call does not return within proxyHangBound. It returns the dial error.
+func dialHTTPProxyWithinBound(t *testing.T, ctx context.Context, proxyURL *url.URL) error {
+	t.Helper()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan result, 1)
+	started := time.Now()
+	go func() {
+		conn, err := dialHTTPProxy(ctx, proxyURL, proxyUnusedTarget, nil)
+		done <- result{conn: conn, err: err}
+	}()
+	select {
+	case res := <-done:
+		if res.conn != nil {
+			_ = res.conn.Close()
+			t.Fatalf("dialHTTPProxy returned a connection through a stalling proxy")
+		}
+		if res.err == nil {
+			t.Fatalf("dialHTTPProxy returned no error through a stalling proxy")
+		}
+		t.Logf("dialHTTPProxy returned after %s: %v", time.Since(started).Round(time.Millisecond), res.err)
+		return res.err
+	case <-time.After(proxyHangBound):
+		deadline, _ := ctx.Deadline()
+		t.Fatalf("dialHTTPProxy did not return within %s (context deadline %v, context error %v)", proxyHangBound, deadline, ctx.Err())
+		return nil
+	}
+}
+
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+const proxyConnectEstablished = "HTTP/1.1 200 Connection Established\r\n\r\n"
+
+// startStallingConnectProxy starts a TCP listener that accepts proxy
+// connections and reads the CONNECT request. When answerAfter is negative it
+// never answers. Otherwise it writes response after answerAfter and does not
+// forward any data. Cleanup closes the listener and all accepted connections.
+func startStallingConnectProxy(t *testing.T, answerAfter time.Duration, response string) *url.URL {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var mu sync.Mutex
+	var conns []net.Conn
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			go func() {
+				buf := make([]byte, 4096)
+				_, _ = conn.Read(buf)
+				if answerAfter < 0 {
+					return
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(answerAfter):
+				}
+				_, _ = conn.Write([]byte(response))
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		_ = ln.Close()
+		<-done
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	return &url.URL{Scheme: "http", Host: ln.Addr().String()}
 }
 
 func TestCheckerThroughRealSquidProxies(t *testing.T) {

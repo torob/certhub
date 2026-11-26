@@ -28,17 +28,37 @@ import { apiRequestURL } from "./api-url";
 import { asyncEffectDeps, asyncStateIsStale } from "./async-request";
 import { auditTargetTypeOptions } from "./audit-targets";
 import { homeAdminRequestPaths, homeZonesPath } from "./home-requests";
+import {
+  addMorePage,
+  allPagesLimit,
+  failMorePages,
+  initialMorePages,
+  listRequestKey,
+  pagedListView,
+  resetMorePages,
+  startMorePages,
+  type MorePages,
+  type PageMeta
+} from "./list-pages";
+import {
+  accessRefreshDelayMs,
+  isAccessCappedBySession,
+  isAccessExpired,
+  isSessionExpired,
+  parseExpiresAt,
+  sessionTimesFromTokens,
+  shouldRefreshAccess,
+  type TokenTimes
+} from "./session-clock";
+import { createSessionSync, newSessionLineage, type SyncedSession } from "./session-sync";
 import { unauthorizedDecision } from "./unauthorized";
 import { versionRevokeBody, versionRevokeStep, type VersionRevokeEvent } from "./version-revoke";
 
 type ErrorBody = components["schemas"]["ErrorEnvelope"];
 type Identity = components["schemas"]["UserIdentity"] | components["schemas"]["ApplicationIdentity"];
 
-type Session = {
-  accessToken: string;
-  accessIssuedAt?: string;
-  accessExpiresAt?: string;
-  sessionExpiresAt?: string;
+// Session times are on the local clock (see session-clock.ts).
+type Session = SyncedSession & {
   identity?: Identity;
 };
 
@@ -48,16 +68,26 @@ type APIResult<T> = {
   status: number;
   requestID: string;
   retryAfter?: number;
+  // Date.now() when the request was sent and when the response arrived, and
+  // the HTTP Date header of the response.
+  sentAt?: number;
+  receivedAt?: number;
+  serverDate?: string;
 };
 type AsyncState<T> = APIResult<T> & {
   loading: boolean;
   path?: string;
 };
-type PageMeta = {
-  limit?: number;
-  offset?: number;
-  total?: number;
+// The "Load more" control of a list whose first page does not show all rows.
+type ListPager = {
+  // The request for the next page, or "" when all rows are shown.
+  nextPath: string;
+  loading: boolean;
+  disabled: boolean;
+  error?: APIResult<unknown>;
+  loadMore: () => void;
 };
+type PagedAsyncState<T> = AsyncState<T> & { pager?: ListPager };
 type ToastNotice = {
   id: number;
   message: string;
@@ -91,8 +121,7 @@ declare global {
 const queryClient = new QueryClient();
 const sessionKey = "certhub.session.v1";
 const authExpiredEvent = "certhub-auth-expired";
-const accessRefreshSkewMs = 60_000;
-const minAccessRefreshLeadMs = 1_000;
+const sessionAdoptedEvent = "certhub-session-adopted";
 const toastLimit = 4;
 const toastVisibleMs = 6_000;
 const toastFadeMs = 3_000;
@@ -200,8 +229,16 @@ function parseRoute(): RouteState {
 }
 
 function requestID() {
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  return randomHex(12);
+}
+
+function randomHex(size: number) {
+  const bytes = crypto.getRandomValues(new Uint8Array(size));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randomSessionID() {
+  return randomHex(16);
 }
 
 function loadSession(): Session | undefined {
@@ -218,9 +255,18 @@ function loadSession(): Session | undefined {
 function saveSession(session?: Session) {
   if (!session) {
     sessionStorage.removeItem(sessionKey);
-    return;
+  } else {
+    sessionStorage.setItem(sessionKey, JSON.stringify(session));
   }
-  sessionStorage.setItem(sessionKey, JSON.stringify(session));
+  sessionSync.track(session);
+}
+
+function sharedLocalStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
 }
 
 function clearSession(notify = false) {
@@ -245,44 +291,6 @@ function authExpiredResult(requestID: string): APIResult<never> {
   };
 }
 
-function parseExpiresAt(value?: string): number | undefined {
-  if (!value) return undefined;
-  const expiresAt = Date.parse(value);
-  return Number.isFinite(expiresAt) ? expiresAt : undefined;
-}
-
-function accessRefreshDelayMs(session: Session): number | undefined {
-  const expiresAt = parseExpiresAt(session.accessExpiresAt);
-  if (expiresAt === undefined) return undefined;
-  if (isAccessCappedBySession(session)) return undefined;
-  const now = Date.now();
-  const issuedAt = parseExpiresAt(session.accessIssuedAt);
-  const lifetime = issuedAt !== undefined && expiresAt > issuedAt ? expiresAt - issuedAt : expiresAt - now;
-  const lead = Math.min(accessRefreshSkewMs, Math.max(minAccessRefreshLeadMs, Math.floor(lifetime * 0.2)));
-  return expiresAt - now - lead;
-}
-
-function isAccessCappedBySession(session: Session): boolean {
-  const accessExpiresAt = parseExpiresAt(session.accessExpiresAt);
-  const sessionExpiresAt = parseExpiresAt(session.sessionExpiresAt);
-  return accessExpiresAt !== undefined && sessionExpiresAt !== undefined && accessExpiresAt >= sessionExpiresAt - 1_000;
-}
-
-function shouldRefreshAccess(session: Session): boolean {
-  const delay = accessRefreshDelayMs(session);
-  return delay !== undefined && delay <= 0 && !isAccessExpired(session) && !isSessionExpired(session);
-}
-
-function isAccessExpired(session: Session): boolean {
-  const expiresAt = parseExpiresAt(session.accessExpiresAt);
-  return expiresAt !== undefined && expiresAt <= Date.now();
-}
-
-function isSessionExpired(session: Session): boolean {
-  const expiresAt = parseExpiresAt(session.sessionExpiresAt);
-  return expiresAt !== undefined && expiresAt <= Date.now();
-}
-
 function isRefreshableRequest(pathname: string): boolean {
   return ![
     "/v1/auth/login",
@@ -299,39 +307,65 @@ function copyLatestSession(session: Session) {
 	session.accessIssuedAt = latest.accessIssuedAt;
 	session.accessExpiresAt = latest.accessExpiresAt;
 	session.sessionExpiresAt = latest.sessionExpiresAt;
+	session.syncId = latest.syncId;
+	session.channelId = latest.channelId;
+	session.generation = latest.generation;
 	session.identity = latest.identity || session.identity;
 }
 
+// Shares rotated access tokens between the tabs of one login session
+// (session-sync.ts).
+const sessionSync = createSessionSync<Session>({
+  load: loadSession,
+  save: saveSession,
+  adopted: () => window.dispatchEvent(new Event(sessionAdoptedEvent))
+}, {
+  locks: typeof navigator !== "undefined" ? navigator.locks : undefined,
+  openChannel: typeof BroadcastChannel === "function" ? (name, onMessage) => {
+    const channel = new BroadcastChannel(name);
+    channel.onmessage = (event) => onMessage(event.data);
+    return { post: (message) => channel.postMessage(message), close: () => channel.close() };
+  } : undefined,
+  sharedStorage: sharedLocalStorage(),
+  randomID: randomSessionID
+});
+
+type TokenResponse = TokenTimes & { access_token: string };
+type ResponseClock = Pick<APIResult<unknown>, "sentAt" | "receivedAt" | "serverDate">;
+
+// Session times of a login, OIDC handoff, 2FA setup or refresh response, on
+// the local clock.
+function sessionFromTokens(tokens: TokenResponse, response: ResponseClock): Session {
+  const timing = { sentAt: response.sentAt, receivedAt: response.receivedAt ?? Date.now(), serverDate: response.serverDate };
+  return { accessToken: tokens.access_token, ...sessionTimesFromTokens(tokens, timing) };
+}
+
+// A new login session: a new token-sharing group of tabs.
+function newLoginSession(tokens: TokenResponse, response: ResponseClock): Session {
+  return { ...sessionFromTokens(tokens, response), ...newSessionLineage(randomSessionID) };
+}
+
 async function performRefreshSession(session: Session): Promise<boolean> {
-	const latest = loadSession();
-	if (latest?.accessToken && latest.accessToken !== session.accessToken) {
-		copyLatestSession(session);
-		if (!isAccessExpired(session) && !isSessionExpired(session)) return true;
-	}
-	if (!session.accessToken || isAccessExpired(session) || isSessionExpired(session)) {
-		clearSession(true);
-		return false;
-	}
-	const result = await api<{
-		access_token: string;
-    access_expires_at?: string;
-    session_expires_at?: string;
-  }>("/v1/auth/refresh", undefined, {
-    method: "POST",
-    body: JSON.stringify({ access_token: session.accessToken })
-  }, false);
-  if (!result.data) {
-		clearSession(true);
-		return false;
-	}
-	const preservedIdentity = loadSession()?.identity || session.identity;
-	session.accessToken = result.data.access_token;
-	session.accessIssuedAt = new Date().toISOString();
-	session.accessExpiresAt = result.data.access_expires_at;
-	session.sessionExpiresAt = result.data.session_expires_at;
-	session.identity = preservedIdentity;
-	saveSession(session);
-	return true;
+  const outcome = await sessionSync.refresh(session, {
+    usable: (current) => Boolean(current.accessToken) && !isAccessExpired(current) && !isSessionExpired(current),
+    rotate: async (current) => {
+      const result = await api<TokenResponse>("/v1/auth/refresh", undefined, {
+        method: "POST",
+        body: JSON.stringify({ access_token: current.accessToken })
+      }, false);
+      if (!result.data) return undefined;
+      return { ...current, ...sessionFromTokens(result.data, result), identity: loadSession()?.identity || current.identity };
+    }
+  });
+  // lost: another tab rotated this token and no tab sent the new one. This
+  // tab must not send the rotated token (the server would revoke the session
+  // of all tabs), so only this tab logs out.
+  if (outcome.status === "failed" || outcome.status === "lost") {
+    clearSession(true);
+    return false;
+  }
+  copyLatestSession(session);
+  return true;
 }
 
 async function refreshSession(session: Session): Promise<boolean> {
@@ -374,11 +408,14 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (session?.accessToken) headers.set("Authorization", `Bearer ${session.accessToken}`);
   let response: Response;
+  const sentAt = Date.now();
   try {
     response = await fetch(requestURL, { ...init, headers, cache: "no-store", redirect: "error" });
   } catch (err) {
     return clientError(`network error: ${(err as Error).message}`, true);
   }
+  const receivedAt = Date.now();
+  const serverDate = response.headers.get("Date") || undefined;
   const noBody = response.status === 204 || response.status === 304;
   const text = noBody ? "" : await response.text();
   let parsed: any;
@@ -403,11 +440,11 @@ async function api<T>(path: string, session: Session | undefined, init: RequestI
   const retryAfter = Number(response.headers.get("Retry-After") || "0") || undefined;
   if (unauthorized.clearSession) clearSession(true);
   if (noBody) {
-    return { status: response.status, requestID: requestHeader, retryAfter };
+    return { status: response.status, requestID: requestHeader, retryAfter, sentAt, receivedAt, serverDate };
   }
   if (parseError) throw parseError;
-  if (!response.ok) return { status: response.status, requestID: requestHeader, retryAfter, error: parsed?.error || parsed };
-  return { status: response.status, requestID: requestHeader, retryAfter, data: parsed };
+  if (!response.ok) return { status: response.status, requestID: requestHeader, retryAfter, sentAt, receivedAt, serverDate, error: parsed?.error || parsed };
+  return { status: response.status, requestID: requestHeader, retryAfter, sentAt, receivedAt, serverDate, data: parsed };
 }
 
 function useAsync<T>(session: Session | undefined, path: string, deps: unknown[] = []): AsyncState<T> {
@@ -437,8 +474,54 @@ function preserveRefreshData<T>(state: AsyncState<T>, path: string, result: APIR
   return { ...result, data: state.data };
 }
 
+// A list request with a "Load more" pager. useAsync sends the first page
+// request with path, as before. The pager requests the next pages with the
+// API limit/offset pagination (src/list-pages.ts). A change of path or deps
+// (filters, Refresh, row actions that refresh) shows the first page again.
+// pageLimit sets the page size of the next pages; the default is the page size
+// of the response.
+function usePagedList<T>(session: Session | undefined, path: string, deps: unknown[] = [], pageLimit?: number): PagedAsyncState<T> {
+  const first = useAsync<T>(session, path, deps);
+  const effectDeps = asyncEffectDeps(path, deps);
+  const key = listRequestKey(effectDeps);
+  const [more, setMore] = useState<MorePages<any>>(() => initialMorePages(key));
+  useEffect(() => {
+    setMore((state) => resetMorePages(state, key));
+  }, effectDeps);
+  const firstPage = first.data === undefined ? undefined : { rows: rowsOf(first), pagination: pageMeta(first as { data?: { pagination?: PageMeta } }) };
+  const view = pagedListView(more, key, path, firstPage, pageLimit);
+  const disabled = !view.current || first.loading || view.loading;
+  const loadMore = () => {
+    if (disabled || !view.nextPath) return;
+    const generation = more.generation;
+    setMore((state) => startMorePages(state, generation));
+    api<T>(view.nextPath, session)
+      .then((result) => setMore((state) => result.error ? failMorePages(state, generation, result) : addMorePage(state, generation, { rows: rowsOf(result), pagination: pageMeta(result as { data?: { pagination?: PageMeta } }) })))
+      .catch((err: Error) => setMore((state) => failMorePages(state, generation, clientError(`network error: ${err.message}`, true))));
+  };
+  const data = view.extended && first.data !== undefined ? withListRows(first.data, view.rows, view.pagination) : first.data;
+  const pager = view.nextPath || view.error ? { nextPath: view.nextPath, loading: view.loading, disabled, error: view.error as APIResult<unknown> | undefined, loadMore } : undefined;
+  return { ...first, data, pager };
+}
+
+// A list request for choices (selects, label maps) that loads all rows. The
+// first request is the same as before; the next pages use allPagesLimit.
+// loading stays true until all pages are loaded.
+function useAllPages<T>(session: Session | undefined, path: string, deps: unknown[] = []): AsyncState<T> {
+  const { pager, ...list } = usePagedList<T>(session, path, deps, allPagesLimit);
+  const pending = Boolean(pager?.nextPath && !pager.error);
+  useEffect(() => {
+    if (pager?.nextPath && !pager.disabled && !pager.error) pager.loadMore();
+  }, [pager?.nextPath, pager?.disabled, pager?.error]);
+  return { ...list, loading: list.loading || pending };
+}
+
 function AppShell() {
-  const [session, setSession] = useState<Session | undefined>(() => loadSession());
+  const [session, setSession] = useState<Session | undefined>(() => {
+    const stored = loadSession();
+    sessionSync.track(stored);
+    return stored;
+  });
   const [route, setRoute] = useState<RouteState>(() => parseRoute());
   const [loginNotice, setLoginNotice] = useState("");
   const [notices, setNotices] = useState<ToastNotice[]>([]);
@@ -490,6 +573,19 @@ function AppShell() {
     const listener = () => setSession(undefined);
     window.addEventListener(authExpiredEvent, listener);
     return () => window.removeEventListener(authExpiredEvent, listener);
+  }, []);
+
+  useEffect(() => {
+    // Another tab of this login session refreshed the access token. Update the
+    // session object in place, as refreshSession does, so requests that hold it
+    // send the new token, and render with it to schedule the next refresh.
+    const listener = () => setSession((current) => {
+      if (!current) return current;
+      copyLatestSession(current);
+      return { ...current };
+    });
+    window.addEventListener(sessionAdoptedEvent, listener);
+    return () => window.removeEventListener(sessionAdoptedEvent, listener);
   }, []);
 
   useEffect(() => {
@@ -548,12 +644,12 @@ function AppShell() {
     if (!handoff) return;
     url.search = "";
     window.history.replaceState({}, "", url);
-    api<{ access_token: string; access_expires_at?: string; session_expires_at?: string }>("/v1/auth/oidc/handoff", undefined, {
+    api<TokenResponse>("/v1/auth/oidc/handoff", undefined, {
       method: "POST",
       body: JSON.stringify({ handoff_id: handoff })
     }).then((result) => {
       if (result.data) {
-        const next = { accessToken: result.data.access_token, accessIssuedAt: new Date().toISOString(), accessExpiresAt: result.data.access_expires_at, sessionExpiresAt: result.data.session_expires_at };
+        const next = newLoginSession(result.data, result);
         saveSession(next);
         setSession(next);
       } else {
@@ -645,8 +741,8 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
   const [forcedSetup, setForcedSetup] = useState<any>(undefined);
   const showOIDCLogin = oidcLoginEnabled();
   useEffect(() => setError(props.notice), [props.notice]);
-  function storeLogin(data: any) {
-    const session = { accessToken: data.access_token, accessIssuedAt: new Date().toISOString(), accessExpiresAt: data.access_expires_at, sessionExpiresAt: data.session_expires_at };
+  function storeLogin(result: APIResult<any>) {
+    const session = newLoginSession(result.data, result);
     saveSession(session);
     props.onLogin(session);
   }
@@ -662,7 +758,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
         setError("");
         return;
       }
-      storeLogin(result.data);
+      storeLogin(result);
     } else setError(errorText(result));
   }
   async function confirmSetup() {
@@ -670,7 +766,7 @@ function Login(props: { onLogin: (s: Session) => void; notice: string }) {
       method: "POST",
       body: JSON.stringify({ setup_token: forcedSetup?.password_2fa_setup_token, totp_code: totp })
     });
-    if (result.data) storeLogin(result.data);
+    if (result.data) storeLogin(result);
     else setError(errorText(result));
   }
   return createElement(
@@ -1020,9 +1116,9 @@ function CertificatesPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const [filters, setFilters] = useState({ domain: "", status: "", enabled: "", application_id: "", issuer: "", key_type: "", expires_before: "" });
   const query = queryString({ ...filters, limit: "100" });
-  const list = useAsync<{ certificates: any[] }> (props.session, `/v1/certificates?${query}`, [refresh, query]);
-  const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
-  const issuers = useAsync<{ issuers: any[] }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=100" : "", [refresh]);
+  const list = usePagedList<{ certificates: any[] }>(props.session, `/v1/certificates?${query}`, [refresh, query]);
+  const applications = useAllPages<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const issuers = useAllPages<{ issuers: any[] }>(props.session, isAdmin(props.session) ? "/v1/issuers?limit=100" : "", [refresh]);
   const appByID = resourceMap(rowsOf(applications));
   const manageableApps = rowsOf(applications).filter((app) => canManageApplication(app, props.session) && app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const issuerOptions: FilterOption[] = rowsOf(issuers).map((issuer) => [issuer.name, `${issuer.name}${issuer.default ? " (default)" : ""}`]);
@@ -1073,8 +1169,8 @@ function CertificateDetailPage(props: PageProps) {
   const detail = useAsync<{ certificate: any }>(props.session, id ? `/v1/certificates/${id}` : "", [id, refresh]);
   const cert = detail.data?.certificate || {};
   const appAccess = useAsync<{ application: any }>(props.session, cert.application_id ? `/v1/applications/${cert.application_id}` : "", [cert.application_id, refresh]);
-  const versions = useAsync<{ versions: any[] }>(props.session, id ? `/v1/certificates/${id}/versions?limit=20` : "", [id, refresh]);
-  const events = useAsync<{ audit_events: any[] }>(props.session, id ? `/v1/certificates/${id}/events?limit=20` : "", [id, refresh]);
+  const versions = usePagedList<{ versions: any[] }>(props.session, id ? `/v1/certificates/${id}/versions?limit=20` : "", [id, refresh]);
+  const events = usePagedList<{ audit_events: any[] }>(props.session, id ? `/v1/certificates/${id}/events?limit=20` : "", [id, refresh]);
   const action = (path: string, body?: unknown, method = "POST") => {
     setActionPending(true);
     return api(`/v1/certificates/${id}${path}`, props.session, { method, body: body ? JSON.stringify(body) : undefined }).then((r) => {
@@ -1199,8 +1295,8 @@ function CertificateVersionEventsPage(props: PageProps) {
   const versionID = props.route.versionID || "";
   const [refresh, setRefresh] = useState(0);
   const detail = useAsync<{ certificate: any }>(props.session, certificateID ? `/v1/certificates/${certificateID}` : "", [certificateID, refresh]);
-  const versions = useAsync<{ versions: any[] }>(props.session, certificateID ? `/v1/certificates/${certificateID}/versions?limit=100` : "", [certificateID, refresh]);
-  const events = useAsync<{ certificate_events: any[] }>(props.session, certificateID && versionID ? `/v1/certificates/${certificateID}/versions/${versionID}/events?limit=100` : "", [certificateID, versionID, refresh]);
+  const versions = useAllPages<{ versions: any[] }>(props.session, certificateID ? `/v1/certificates/${certificateID}/versions?limit=100` : "", [certificateID, refresh]);
+  const events = usePagedList<{ certificate_events: any[] }>(props.session, certificateID && versionID ? `/v1/certificates/${certificateID}/versions/${versionID}/events?limit=100` : "", [certificateID, versionID, refresh]);
   const cert = detail.data?.certificate || {};
   const version = rowsOf(versions).find((row) => row.id === versionID);
   const eventRows = rowsOf(events);
@@ -1228,14 +1324,15 @@ function CertificateVersionEventsPage(props: PageProps) {
       failureSummary ? createElement(CertificateEventFailureSummary, { summary: failureSummary }) : null,
       blockingError(events) ? createElement("div", { className: "error" }, events.error?.code, ": ", events.error?.message) :
         initialLoading(events) ? createElement("div", { className: "empty" }, "Loading") :
-          createElement(CertificateEventTimeline, { events: eventRows })
+          createElement(CertificateEventTimeline, { events: eventRows }),
+      initialLoading(events) || blockingError(events) ? null : listPager(events.pager)
     )
   );
 }
 
 function ApplicationsPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const list = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const list = usePagedList<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
   return pageFrame(
     "Applications",
     createElement("div", { className: "header-actions" },
@@ -1267,11 +1364,11 @@ function ApplicationDetailPage(props: PageProps) {
   const requestedTab = applicationTab(rawTab);
   const activeTab = appLoaded && isManagerApplicationTab(requestedTab) && !canManage ? "overview" : requestedTab;
   const visibleTabs = applicationTabs.filter((tab) => !tab.managerOnly || !appLoaded || canManage);
-  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, activeTab === "scopes" && canManage ? `${base}/domain-scopes?limit=100` : "", [id, refresh, activeTab, canManage]);
-  const tokens = useAsync<{ tokens: any[] }>(props.session, activeTab === "tokens" && canManage ? `${base}/tokens?limit=100` : "", [id, refresh, activeTab, canManage]);
-  const grants = useAsync<{ grants: any[] }>(props.session, activeTab === "access" && canManage ? `${base}/users?limit=100` : "", [id, refresh, activeTab, canManage]);
-  const certs = useAsync<{ certificates: any[] }>(props.session, activeTab === "certificates" ? `/v1/certificates?application=${encodeURIComponent(id)}&limit=100` : "", [id, refresh, activeTab]);
-  const events = useAsync<{ audit_events: any[] }>(props.session, activeTab === "audit" ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh, activeTab]);
+  const scopes = usePagedList<{ domain_scopes: any[] }>(props.session, activeTab === "scopes" && canManage ? `${base}/domain-scopes?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const tokens = usePagedList<{ tokens: any[] }>(props.session, activeTab === "tokens" && canManage ? `${base}/tokens?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const grants = usePagedList<{ grants: any[] }>(props.session, activeTab === "access" && canManage ? `${base}/users?limit=100` : "", [id, refresh, activeTab, canManage]);
+  const certs = usePagedList<{ certificates: any[] }>(props.session, activeTab === "certificates" ? `/v1/certificates?application=${encodeURIComponent(id)}&limit=100` : "", [id, refresh, activeTab]);
+  const events = usePagedList<{ audit_events: any[] }>(props.session, activeTab === "audit" ? `/v1/audit-events?application_id=${encodeURIComponent(id)}&limit=50` : "", [id, refresh, activeTab]);
   useEffect(() => {
     setTokenValue("");
     setRotatingToken(undefined);
@@ -1444,7 +1541,7 @@ function ApplicationDetailPage(props: PageProps) {
 
 function UsersPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const list = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
+  const list = usePagedList<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("Users");
   return pageFrame("Users",
     createElement("div", { className: "header-actions" },
@@ -1563,7 +1660,7 @@ function UserDetailPage(props: PageProps) {
 
 function IssuersPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const list = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
+  const list = usePagedList<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("Issuers");
   return pageFrame("Issuers",
     createElement("div", { className: "header-actions" },
@@ -1641,7 +1738,7 @@ function IssuerDetailPage(props: PageProps) {
 
 function DNSPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
-  const list = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
+  const list = usePagedList<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   if (!isAdmin(props.session)) return forbiddenPage("DNS Providers");
   return pageFrame(
     "DNS Providers",
@@ -1660,9 +1757,9 @@ function DNSDetailPage(props: PageProps) {
   const provider = detail.data?.dns_provider || {};
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState({ zone_mode: "auto", status: "active", api_token: "", api_key: "" });
-  const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
+  const providers = useAllPages<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   const providerByID = resourceMap(rowsOf(providers));
-  const zones = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones?limit=100` : "", [id, refresh]);
+  const zones = usePagedList<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones?limit=100` : "", [id, refresh]);
   const discovered = useAsync<{ zones: any[] }>(props.session, id ? `/v1/dns-providers/${id}/zones/discovered?limit=100` : "", [id, refresh]);
   const base = `/v1/dns-providers/${id}`;
   useEffect(() => {
@@ -1733,12 +1830,12 @@ function AuditPage(props: PageProps) {
   const [refresh, setRefresh] = useState(0);
   const [filters, setFilters] = useState({ identity_id: "", identity_type: "", action: "", certificate_id: "", application_id: "", target_type: "", target_id: "", result: "", created_at_from: "", created_at_to: "" });
   const query = queryString({ ...filters, limit: "100" });
-  const list = useAsync<{ audit_events: any[] }>(props.session, `/v1/audit-events?${query}`, [query, refresh]);
-  const applications = useAsync<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
-  const users = useAsync<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
-  const certificates = useAsync<{ certificates: any[] }>(props.session, "/v1/certificates?limit=100", [refresh]);
-  const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
-  const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
+  const list = usePagedList<{ audit_events: any[] }>(props.session, `/v1/audit-events?${query}`, [query, refresh]);
+  const applications = useAllPages<{ applications: any[] }>(props.session, "/v1/applications?limit=100", [refresh]);
+  const users = useAllPages<{ users: any[] }>(props.session, "/v1/users?limit=100", [refresh]);
+  const certificates = useAllPages<{ certificates: any[] }>(props.session, "/v1/certificates?limit=100", [refresh]);
+  const issuers = useAllPages<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", [refresh]);
+  const providers = useAllPages<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", [refresh]);
   const labels = {
     applications: resourceMap(rowsOf(applications)),
     users: resourceMap(rowsOf(users)),
@@ -2250,14 +2347,14 @@ function GrantForm(props: { session: Session; applicationID: string; setNotice: 
 
 function IssueCertificateFlow(props: { session: Session; setNotice: (s: string) => void; onDone: () => void; onCancel?: () => void; applicationID?: string; applications?: any[] }) {
   const locked = Boolean(props.applicationID);
-  const appList = useAsync<{ applications: any[] }>(props.session, props.applications ? "" : "/v1/applications?limit=100", []);
-  const issuers = useAsync<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
+  const appList = useAllPages<{ applications: any[] }>(props.session, props.applications ? "" : "/v1/applications?limit=100", []);
+  const issuers = useAllPages<{ issuers: any[] }>(props.session, "/v1/issuers?limit=100", []);
   const activeIssuerCount = useAsync<{ issuers: any[]; pagination?: PageMeta }>(props.session, "/v1/issuers?limit=1&status=active", []);
   const providers = useAsync<{ dns_providers: any[] }>(props.session, "/v1/dns-providers?limit=100", []);
   const activeProviderCount = useAsync<{ dns_providers: any[]; pagination?: PageMeta }>(props.session, "/v1/dns-providers?limit=1&status=active", []);
   const [body, setBody] = useState({ application_id: props.applicationID || "", domains: [] as string[], key_type: "ecdsa-p256", issuer: "" });
   const scopePath = body.application_id ? `/v1/applications/${body.application_id}/domain-scopes?limit=100` : "";
-  const scopes = useAsync<{ domain_scopes: any[] }>(props.session, scopePath, [body.application_id]);
+  const scopes = useAllPages<{ domain_scopes: any[] }>(props.session, scopePath, [body.application_id]);
   const applications = (props.applications || rowsOf(appList)).filter((app) => canManageApplication(app, props.session) && app.system_kind !== "certhub_server" && app.name !== "certhub_server");
   const selectedApp = applications.find((app) => app.id === body.application_id);
   const domains = body.domains;
@@ -2350,7 +2447,7 @@ function Tabs<T extends string>(props: { activeTab: T; tabs: { id: T; label: str
   );
 }
 
-function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, columns: TableColumn[], onSelect?: (row: any) => void) {
+function table(result: { data?: any; error?: ErrorBody; loading?: boolean; pager?: ListPager }, columns: TableColumn[], onSelect?: (row: any) => void) {
   const rows = rowsOf(result);
   if (initialLoading(result)) return createElement("div", { className: "empty" }, "Loading");
   if (blockingError(result)) return createElement("div", { className: "error" }, result.error?.code, ": ", result.error?.message);
@@ -2362,7 +2459,24 @@ function table(result: { data?: any; error?: ErrorBody; loading?: boolean }, col
     createElement("table", null,
       createElement("thead", null, createElement("tr", null, specs.map((c) => createElement("th", { key: c.key, className: c.key === "actions" ? "actions-head" : "" }, c.label)))),
       createElement("tbody", null, rows.map((row: any) => createElement("tr", { key: row.id || JSON.stringify(row), onClick: () => onSelect?.(row), className: onSelect ? "selectable" : "" }, specs.map((c) => createElement("td", { key: c.key, className: c.key === "actions" ? "actions-td" : "" }, c.render ? c.render(row) : cell(row[c.key]))))))
-    )
+    ),
+    listPager(result.pager)
+  );
+}
+
+// The "Load more" control of a paged list (usePagedList). It is shown only
+// when the API pagination reports more rows than the list shows, or when the
+// last next page request failed.
+function listPager(pager?: ListPager) {
+  if (!pager) return null;
+  return createElement("div", { className: "table-pager" },
+    pager.error ? createElement("span", { className: "field-error" }, errorText(pager.error)) : null,
+    pager.nextPath ? createElement("button", {
+      type: "button",
+      disabled: pager.disabled,
+      "aria-busy": pager.loading ? "true" : "false",
+      onClick: pager.loadMore
+    }, "Load more") : null
   );
 }
 
@@ -2445,6 +2559,14 @@ function certificateEventMetadata(event: any): Record<string, any> {
 function rowsOf(result: { data?: any }): any[] {
   const key = Object.keys(result.data || {}).find((k) => Array.isArray(result.data[k]));
   return key ? result.data[key] : [];
+}
+
+// The response data with the rows of all loaded pages and the merged pagination.
+function withListRows<T>(data: T, rows: any[], pagination: PageMeta | undefined): T {
+  const record = data as Record<string, unknown>;
+  const key = Object.keys(record || {}).find((k) => Array.isArray(record[k]));
+  if (!key) return data;
+  return { ...record, [key]: rows, pagination } as T;
 }
 
 function pageMeta(result: { data?: { pagination?: PageMeta } }): PageMeta | undefined {
