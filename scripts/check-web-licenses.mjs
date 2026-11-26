@@ -16,6 +16,7 @@ const allowedLicenses = new Set([
 ]);
 const reviewedLicenseExpressions = new Set(["(MIT OR CC0-1.0)"]);
 const reviewedPackageLicenses = new Map([
+  ["node_modules/@isaacs/nonrecursive-glob-match", "BlueOak-1.0.0"],
   ["node_modules/minimatch", "BlueOak-1.0.0"]
 ]);
 const failures = [];
